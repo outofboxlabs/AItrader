@@ -5,8 +5,11 @@ overwrite each other's history.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
+from typing import Optional
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS chain_snapshots (
@@ -85,6 +88,41 @@ CREATE TABLE IF NOT EXISTS upcoming_expiries (
     dte INTEGER,
     within_threshold INTEGER,
     PRIMARY KEY (asof_date, position_id)
+);
+
+CREATE TABLE IF NOT EXISTS macro_gate (
+    asof_date TEXT NOT NULL PRIMARY KEY,
+    score REAL,
+    weights_json TEXT,
+    vix REAL,
+    vix_percentile REAL,
+    vix_level_score REAL,
+    vix3m REAL,
+    term_structure_ratio REAL,
+    term_structure_score REAL,
+    breadth_pct_above_200dma REAL,
+    breadth_constituents INTEGER,
+    breadth_score REAL,
+    credit_ratio REAL,
+    credit_percentile REAL,
+    credit_score REAL
+);
+
+CREATE TABLE IF NOT EXISTS news_analysis (
+    asof_date TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    status TEXT,
+    summary TEXT,
+    sentiment TEXT,
+    key_drivers_json TEXT,
+    position_flag INTEGER,
+    position_flag_reason TEXT,
+    headline_count INTEGER,
+    window_days INTEGER,
+    model TEXT,
+    parse_error INTEGER,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (asof_date, ticker)
 );
 """
 
@@ -218,4 +256,83 @@ def save_upcoming_expiries(conn, rows: list[tuple]) -> None:
            (asof_date, position_id, ticker, expiry, dte, within_threshold)
            VALUES (?,?,?,?,?,?)""",
         rows,
+    )
+
+
+def save_macro_gate(conn, asof_date: str, macro: dict) -> None:
+    vix_level = macro["vix_level"]
+    term_structure = macro["term_structure"]
+    breadth = macro["breadth"]
+    credit_spread = macro["credit_spread"]
+    conn.execute(
+        """INSERT OR REPLACE INTO macro_gate
+           (asof_date, score, weights_json, vix, vix_percentile, vix_level_score,
+            vix3m, term_structure_ratio, term_structure_score,
+            breadth_pct_above_200dma, breadth_constituents, breadth_score,
+            credit_ratio, credit_percentile, credit_score)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            asof_date,
+            macro["score"],
+            json.dumps(macro["weights"]),
+            vix_level["vix"],
+            vix_level["vix_percentile"],
+            vix_level["score"],
+            term_structure["vix3m"],
+            term_structure["ratio"],
+            term_structure["score"],
+            breadth["pct_above_200dma"],
+            breadth["constituents"],
+            breadth["score"],
+            credit_spread["credit_ratio"],
+            credit_spread["credit_percentile"],
+            credit_spread["score"],
+        ),
+    )
+
+
+def get_news_analysis(conn, asof_date: str, ticker: str) -> Optional[dict]:
+    row = conn.execute(
+        "SELECT * FROM news_analysis WHERE asof_date=? AND ticker=?", (asof_date, ticker)
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "ticker": row["ticker"],
+        "asof_date": row["asof_date"],
+        "status": row["status"],
+        "summary": row["summary"],
+        "sentiment": row["sentiment"],
+        "key_drivers": json.loads(row["key_drivers_json"]) if row["key_drivers_json"] else [],
+        "position_flag": bool(row["position_flag"]),
+        "position_flag_reason": row["position_flag_reason"],
+        "headline_count": row["headline_count"],
+        "window_days": row["window_days"],
+        "model": row["model"],
+        "parse_error": bool(row["parse_error"]),
+    }
+
+
+def save_news_analysis(conn, result: dict) -> None:
+    conn.execute(
+        """INSERT OR REPLACE INTO news_analysis
+           (asof_date, ticker, status, summary, sentiment, key_drivers_json,
+            position_flag, position_flag_reason, headline_count, window_days,
+            model, parse_error, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            result["asof_date"],
+            result["ticker"],
+            result.get("status"),
+            result.get("summary"),
+            result.get("sentiment"),
+            json.dumps(result.get("key_drivers") or []),
+            int(bool(result.get("position_flag"))),
+            result.get("position_flag_reason"),
+            result.get("headline_count"),
+            result.get("window_days"),
+            result.get("model"),
+            int(bool(result.get("parse_error"))),
+            datetime.now(timezone.utc).isoformat(),
+        ),
     )

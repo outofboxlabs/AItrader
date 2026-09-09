@@ -37,6 +37,29 @@ IV_CHEAP_THRESHOLD = 30.0
 # Upcoming-expiry visibility (surfaced, not advised on).
 EXPIRY_WARNING_DAYS = 45
 
+# --- Macro gate (deterministic, 0-100; higher = calmer environment) ---
+# Weights are normalized to sum to 1.0 automatically, so relative values
+# matter more than the exact numbers.
+MACRO_WEIGHTS: dict[str, float] = {
+    "vix_level": 0.35,
+    "term_structure": 0.15,
+    "breadth": 0.25,
+    "credit_spread": 0.25,
+}
+MACRO_LOOKBACK_DAYS = 252  # trading days used for VIX and credit-ratio percentiles
+VIX_TERM_CALM_RATIO = 0.90  # VIX/VIX3M at/under this = fully calm (contango)
+VIX_TERM_STRESS_RATIO = 1.10  # VIX/VIX3M at/over this = fully stressed (backwardation)
+# Breadth proxy: pulling all ~500 S&P constituents daily is slow, so this
+# sector-ETF basket stands in unless SPY_CONSTITUENTS is populated below.
+BREADTH_PROXY_TICKERS: list[str] = [
+    "XLK", "XLF", "XLE", "XLY", "XLP", "XLV", "XLI", "XLB", "XLRE", "XLU", "XLC",
+]
+SPY_CONSTITUENTS: list[str] = []  # optional: real constituent list overrides the proxy
+
+# --- Claude news analysis (the only paid part of the system) ---
+CLAUDE_NEWS_MODEL = "claude-haiku-4-5-20251001"  # small/cheap model is enough for this
+NEWS_WINDOW_DAYS = 3
+
 # Storage
 DB_PATH = "portfolio.db"
 SNAPSHOTS_DIR = "snapshots"

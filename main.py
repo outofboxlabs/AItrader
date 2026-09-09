@@ -12,10 +12,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import date, datetime, timezone
 
 import config
-from portfolio_monitor import analytics, data, db, snapshots
+from portfolio_monitor import analytics, data, db, macro, news, snapshots
 from portfolio_monitor.models import load_positions
 from portfolio_monitor.valuation import to_db_row, value_option_position, value_shares_position
 
@@ -39,6 +40,24 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--iv-rich-threshold", type=float, default=config.IV_RICH_THRESHOLD)
     parser.add_argument("--iv-cheap-threshold", type=float, default=config.IV_CHEAP_THRESHOLD)
     parser.add_argument("--expiry-warning-days", type=int, default=config.EXPIRY_WARNING_DAYS)
+
+    parser.add_argument("--skip-macro", action="store_true", help="skip the deterministic macro gate")
+    parser.add_argument("--macro-lookback-days", type=int, default=config.MACRO_LOOKBACK_DAYS)
+    parser.add_argument("--vix-term-calm-ratio", type=float, default=config.VIX_TERM_CALM_RATIO)
+    parser.add_argument("--vix-term-stress-ratio", type=float, default=config.VIX_TERM_STRESS_RATIO)
+
+    parser.add_argument(
+        "--skip-news",
+        action="store_true",
+        help="skip Claude news analysis (the only paid part of the system)",
+    )
+    parser.add_argument("--news-window-days", type=int, default=config.NEWS_WINDOW_DAYS)
+    parser.add_argument("--news-model", default=config.CLAUDE_NEWS_MODEL)
+    parser.add_argument(
+        "--anthropic-api-key",
+        default=None,
+        help="defaults to the ANTHROPIC_API_KEY environment variable",
+    )
     return parser.parse_args(argv)
 
 
@@ -149,7 +168,33 @@ def run(args: argparse.Namespace) -> None:
             ],
         )
 
+        macro_result = None
+        if not args.skip_macro:
+            breadth_tickers = config.SPY_CONSTITUENTS or config.BREADTH_PROXY_TICKERS
+            macro_result = macro.compute_macro_gate(
+                weights=config.MACRO_WEIGHTS,
+                lookback_days=args.macro_lookback_days,
+                calm_ratio=args.vix_term_calm_ratio,
+                stress_ratio=args.vix_term_stress_ratio,
+                breadth_tickers=breadth_tickers,
+            )
+            db.save_macro_gate(conn, asof_date.isoformat(), macro_result)
+
+        news_results = []
+        if not args.skip_news:
+            api_key = args.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+            for ticker in tickers:
+                news_results.append(
+                    news.get_or_analyze_news(
+                        conn, ticker, asof_date, args.news_window_days, args.news_model, api_key=api_key
+                    )
+                )
+
     print_analytics_summary(allocation, aggregate_greeks, iv_environment, upcoming_expiries, args)
+    if macro_result is not None:
+        print_macro_summary(macro_result)
+    if news_results:
+        print_news_summary(news_results)
 
 
 def print_valuation_table(valuations) -> None:
@@ -200,6 +245,47 @@ def print_analytics_summary(allocation, aggregate_greeks, iv_environment, upcomi
         print("  none")
     for r in flagged:
         print(f"  {r['position_id']:28s} expiry={r['expiry']} dte={r['dte']}")
+
+
+def print_macro_summary(macro_result: dict) -> None:
+    vix_level = macro_result["vix_level"]
+    term_structure = macro_result["term_structure"]
+    breadth = macro_result["breadth"]
+    credit_spread = macro_result["credit_spread"]
+
+    print(f"\n=== Macro Gate: {macro_result['score']:.1f}/100 (higher = calmer) ===")
+    print(
+        f"  VIX level:       vix={vix_level['vix']:.1f} percentile={vix_level['vix_percentile']:.0f} "
+        f"score={vix_level['score']:.1f}"
+    )
+    ratio = term_structure["ratio"]
+    ratio_str = f"{ratio:.3f}" if ratio is not None else "n/a"
+    print(
+        f"  Term structure:  vix={term_structure['vix']:.1f} vix3m={term_structure['vix3m']:.1f} "
+        f"ratio={ratio_str} score={term_structure['score']:.1f}"
+    )
+    print(
+        f"  Breadth:         {breadth['pct_above_200dma']:.0f}% above 200dma "
+        f"({breadth['constituents']} names) score={breadth['score']:.1f}"
+    )
+    print(
+        f"  Credit spread:   HYG/TLT={credit_spread['credit_ratio']:.4f} "
+        f"percentile={credit_spread['credit_percentile']:.0f} score={credit_spread['score']:.1f}"
+    )
+
+
+def print_news_summary(news_results: list[dict]) -> None:
+    print("\n=== Claude News Analysis (informational only -- not a trade signal) ===")
+    for r in news_results:
+        if r["status"] != "ok":
+            print(f"  {r['ticker']:6s} skipped ({r['status']})")
+            continue
+        flag = " <<< AFFECTS POSITION" if r.get("position_flag") else ""
+        print(f"  {r['ticker']:6s} [{r.get('sentiment', 'n/a')}]{flag}")
+        if r.get("summary"):
+            print(f"    {r['summary']}")
+        if r.get("position_flag") and r.get("position_flag_reason"):
+            print(f"    why: {r['position_flag_reason']}")
 
 
 def main(argv=None) -> None:
