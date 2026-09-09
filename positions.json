@@ -1,0 +1,35 @@
+[
+  {
+    "asset_type": "option",
+    "ticker": "AAPL",
+    "option_type": "call",
+    "strike": 230.0,
+    "expiry": "2025-06-20",
+    "entry_price": 8.50,
+    "contracts": 2,
+    "entry_date": "2025-03-01",
+    "target_price": 15.00,
+    "stop_price": 4.00
+  },
+  {
+    "asset_type": "option",
+    "ticker": "TSLA",
+    "option_type": "put",
+    "strike": 180.0,
+    "expiry": "2025-05-16",
+    "entry_price": 6.20,
+    "contracts": 1,
+    "entry_date": "2025-03-10",
+    "target_price": 10.00,
+    "stop_price": 3.00
+  },
+  {
+    "asset_type": "shares",
+    "ticker": "MSFT",
+    "entry_price": 410.25,
+    "contracts": 15,
+    "entry_date": "2025-02-15",
+    "target_price": 450.00,
+    "stop_price": 380.00
+  }
+]
