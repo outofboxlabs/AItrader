@@ -1,5 +1,7 @@
 import time
 
+import numpy as np
+
 from portfolio_monitor import growth_screener as gs
 
 
@@ -202,3 +204,67 @@ def test_find_growth_candidates_enriches_in_parallel_not_sequentially(monkeypatc
 
     assert len(results) == n
     assert elapsed < 1.0  # would be >= 4.0s if run sequentially
+
+
+def test_strong_buy_ratio_pct_handles_numpy_types():
+    """Real yfinance data comes from pandas .to_dict(), which yields
+    numpy.int64 -- NOT a Python int -- so a naive isinstance(v, (int, float))
+    check silently treats every real count as invalid and returns None.
+    This is what made the "Strong Buy %" column always blank in practice."""
+    ratings = {
+        "strongBuy": np.int64(9),
+        "buy": np.int64(1),
+        "hold": np.int64(0),
+        "sell": np.int64(0),
+        "strongSell": np.int64(0),
+    }
+    assert gs._strong_buy_ratio_pct(ratings) == 90.0
+
+
+def test_find_growth_candidates_survives_numpy_typed_data_end_to_end(monkeypatch):
+    """Regression test for a real production crash: numpy-typed data
+    (int64/float64, exactly what get_analyst_price_targets and
+    get_recommendations_summary(as_dict=True) actually return) made the
+    whole scan return a 502 -- found candidates that then failed to
+    serialize to JSON when saving/exporting. This drives the full
+    find_growth_candidates() pipeline with numpy types end to end and
+    asserts the result is plain-JSON-safe and the ratio is populated."""
+
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        return {"quotes": [{"symbol": "REAL", "shortName": "Real Co", "regularMarketPrice": 10.0, "marketCap": np.int64(10**9)}]}
+
+    class FakeTicker:
+        def __init__(self, symbol):
+            pass
+
+        def get_analyst_price_targets(self):
+            return {"current": np.float64(10.0), "mean": np.float64(20.0)}
+
+        def get_recommendations_summary(self, as_dict=False):
+            return {
+                "strongBuy": {0: np.int64(9)},
+                "buy": {0: np.int64(1)},
+                "hold": {0: np.int64(0)},
+                "sell": {0: np.int64(0)},
+                "strongSell": {0: np.int64(0)},
+            }
+
+        @property
+        def fast_info(self):
+            class FI:
+                year_high = np.float64(25.0)
+                year_low = np.float64(8.0)
+
+            return FI()
+
+    monkeypatch.setattr(gs.yf, "screen", fake_screen)
+    monkeypatch.setattr(gs.yf, "Ticker", FakeTicker)
+
+    results = gs.find_growth_candidates(target_upside_threshold=40.0)
+
+    assert len(results) == 1
+    assert results[0]["strong_buy_ratio_pct"] == 90.0
+
+    import json
+
+    json.dumps(results)  # must not raise -- this is exactly what crashed in production

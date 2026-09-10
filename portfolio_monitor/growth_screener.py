@@ -18,6 +18,8 @@ pretending to a 1-month forecast that doesn't exist.
 
 from __future__ import annotations
 
+import json
+import numbers
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
@@ -43,11 +45,17 @@ def _current_period_ratings(recommendations: dict) -> dict:
 
 def _strong_buy_ratio_pct(ratings: dict) -> Optional[float]:
     """% of all analyst ratings that are "strong buy". None if no ratings
-    data at all (shown as such rather than treated as 0%)."""
-    total = sum(v for v in ratings.values() if isinstance(v, (int, float)))
+    data at all (shown as such rather than treated as 0%).
+
+    Uses numbers.Real rather than isinstance(v, (int, float)) -- real
+    yfinance data comes from pandas .to_dict(), which yields numpy.int64/
+    float64 values that are NOT instances of Python's builtin int/float,
+    so the naive check would silently treat every real count as invalid
+    and always return None."""
+    total = sum(v for v in ratings.values() if isinstance(v, numbers.Real))
     if not total:
         return None
-    return ratings.get("strongBuy", 0) / total * 100.0
+    return float(ratings.get("strongBuy", 0)) / total * 100.0
 
 
 def _enrich_candidate(q: dict, target_upside_threshold: float) -> tuple[Optional[dict], str]:
@@ -109,7 +117,15 @@ def _enrich_candidate(q: dict, target_upside_threshold: float) -> tuple[Optional
         "pct_from_52w_low": pct_from_52w_low,
         "market_cap": q.get("marketCap"),
     }
-    return candidate, "included"
+    # yfinance's dict conversions can carry pandas/numpy types (int64,
+    # float64, Timestamp, ...) that json.dumps chokes on downstream (SQLite
+    # storage, Flask's jsonify, the CSV writer) -- round-trip through json
+    # with a str fallback now so everything past this point is plain JSON
+    # types. This is the same fix already applied in movers.py's
+    # get_analyst_snapshot; it was missing here, which is what caused a
+    # scan that found real candidates to still crash with a 502 before
+    # ever reaching storage or the CSV export.
+    return json.loads(json.dumps(candidate, default=str)), "included"
 
 
 def find_growth_candidates(
