@@ -133,7 +133,7 @@ def test_run_movers_now_returns_results(client, monkeypatch):
     monkeypatch.setattr(
         app_mod.movers,
         "run_movers_scan",
-        lambda conn, asof_date, provider, model, api_key=None, macro_score=None: [
+        lambda conn, asof_date, provider, model, **kwargs: [
             {"ticker": "ACME", "pct_change": -45.0, "rebound": {"analyst_sentiment": "neutral"}}
         ],
     )
@@ -151,7 +151,7 @@ def test_run_movers_now_rejects_unknown_provider(client):
 def test_get_movers_after_run_reads_from_db(client, monkeypatch):
     monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
 
-    def fake_scan(conn, asof_date, provider, model, api_key=None, macro_score=None):
+    def fake_scan(conn, asof_date, provider, model, **kwargs):
         from portfolio_monitor import db as db_mod
 
         db_mod.save_market_movers(conn, asof_date.isoformat(), [{"ticker": "ACME", "name": "Acme", "pct_change": -45.0, "price": 10.0, "volume": 1, "market_cap": 1}])
@@ -279,7 +279,7 @@ def test_run_movers_now_writes_csv_export(client, monkeypatch, tmp_path):
     monkeypatch.setattr(
         app_mod.movers,
         "run_movers_scan",
-        lambda conn, asof_date, provider, model, api_key=None, macro_score=None: [{"ticker": "ACME", "pct_change": -45.0}],
+        lambda conn, asof_date, provider, model, **kwargs: [{"ticker": "ACME", "pct_change": -45.0}],
     )
     res = client.post("/api/movers/run", data=json.dumps({"provider": "anthropic"}), content_type="application/json")
     assert res.status_code == 200

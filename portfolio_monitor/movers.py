@@ -69,6 +69,11 @@ def find_big_drops(
     )
     response = yf.screen(query, sortField="percentchange", sortAsc=True, size=max_results)
     quotes = response.get("quotes", []) if response else []
+    print(
+        f"[movers] screened for a >{abs(threshold_pct):.0f}% single-day drop "
+        f"(mkt cap>=${min_market_cap:,.0f}, price>=${min_price}, vol>{min_volume:,}) "
+        f"-> {len(quotes)} match(es) found"
+    )
     return [
         {
             "ticker": q.get("symbol"),

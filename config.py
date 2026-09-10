@@ -79,6 +79,16 @@ GEMINI_VISION_MODEL = "gemini-2.0-flash"  # UNVERIFIED -- see note above
 # portfolio_monitor/credentials.py. Never commit this file.
 CREDENTIALS_PATH = ".credentials.json"
 
+# --- Market movers screener (Top Movers tab) ---
+# A >40% single-day drop is a genuinely rare, severe event -- realistically
+# zero matches on most days across the whole US market. Lower this if you
+# want to see smaller-but-still-notable drops more often.
+MOVERS_DROP_THRESHOLD_PCT = -40.0
+MOVERS_MIN_MARKET_CAP = 2_000_000_000
+MOVERS_MIN_PRICE = 5.0
+MOVERS_MIN_VOLUME = 20_000
+MOVERS_MAX_RESULTS = 25
+
 # --- Growth screener (Top Growth tab) ---
 # "50% growth in a month" isn't a metric any data source publishes -- the
 # closest real, checkable proxy is the analyst consensus price target,

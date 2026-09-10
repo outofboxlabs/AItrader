@@ -22,6 +22,7 @@ def export_to_csv(rows: list[dict], subfolder: str, name_prefix: str, export_roo
     if not rows:
         with open(path, "w", newline="") as f:
             f.write("")
+        print(f"[exports] wrote 0 rows to {path} (nothing matched this scan)")
         return path
 
     fieldnames = list({key for row in rows for key in row.keys()})
@@ -38,4 +39,5 @@ def export_to_csv(rows: list[dict], subfolder: str, name_prefix: str, export_roo
         writer.writeheader()
         writer.writerows(flat_rows)
 
+    print(f"[exports] wrote {len(rows)} row(s) to {path}")
     return path

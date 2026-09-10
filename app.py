@@ -172,7 +172,19 @@ def _run_movers(provider: str, model: Optional[str], asof_date: Optional[date] =
     macro_score = _latest_macro_score()
     db_mod.init_db(config.DB_PATH)
     with db_mod.connect(config.DB_PATH) as conn:
-        results = movers.run_movers_scan(conn, asof_date, provider, resolved_model, api_key=api_key, macro_score=macro_score)
+        results = movers.run_movers_scan(
+            conn,
+            asof_date,
+            provider,
+            resolved_model,
+            api_key=api_key,
+            macro_score=macro_score,
+            threshold_pct=config.MOVERS_DROP_THRESHOLD_PCT,
+            min_market_cap=config.MOVERS_MIN_MARKET_CAP,
+            min_price=config.MOVERS_MIN_PRICE,
+            min_volume=config.MOVERS_MIN_VOLUME,
+            max_results=config.MOVERS_MAX_RESULTS,
+        )
     exports.export_to_csv(results, "top_movers", "top_movers", export_root=config.EXPORTS_DIR)
     return results
 
