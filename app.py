@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import threading
+import traceback
 import webbrowser
 from datetime import date, datetime
 from typing import Optional
@@ -88,6 +89,7 @@ def save_positions():
     try:
         _save_positions_raw(positions)
     except Exception as exc:
+        traceback.print_exc()
         return jsonify({"error": str(exc)}), 400
     return jsonify({"status": "ok", "count": len(positions)})
 
@@ -113,6 +115,7 @@ def parse_screenshot():
     try:
         extracted = vision.extract_positions_from_image(image_bytes, media_type, provider, model, api_key=api_key)
     except Exception as exc:
+        traceback.print_exc()
         return jsonify({"error": f"{provider} extraction failed: {exc}"}), 502
 
     return jsonify({"positions": extracted})
@@ -150,6 +153,7 @@ def run_analysis():
             news_api_key=news_api_key,
         )
     except Exception as exc:
+        traceback.print_exc()
         return jsonify({"error": str(exc)}), 502
 
     return jsonify(result)
@@ -216,6 +220,7 @@ def run_movers_now():
     try:
         results = _run_movers(provider, model)
     except Exception as exc:
+        traceback.print_exc()
         return jsonify({"error": str(exc)}), 502
 
     return jsonify({"asof_date": date.today().isoformat(), "movers": results})
@@ -265,6 +270,7 @@ def run_growth_now():
     try:
         candidates = _run_growth_screen()
     except Exception as exc:
+        traceback.print_exc()
         return jsonify({"error": str(exc)}), 502
     return jsonify({"asof_date": date.today().isoformat(), "candidates": candidates})
 
@@ -303,6 +309,7 @@ def get_models():
     try:
         model_ids = news.list_models(provider, api_key=api_key)
     except Exception as exc:
+        traceback.print_exc()
         return jsonify({"error": str(exc)}), 502
     return jsonify({"models": model_ids})
 

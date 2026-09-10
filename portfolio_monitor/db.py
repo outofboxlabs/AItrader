@@ -182,9 +182,32 @@ def connect(db_path: str):
         conn.close()
 
 
+# Columns added to a table after it first shipped. `CREATE TABLE IF NOT
+# EXISTS` is a no-op on a database file that already has the table from
+# before that column was added, so a returning user's on-disk schema can
+# silently lag the code -- every insert then fails with "no such column"
+# (this is exactly what happened with growth_candidates.strong_buy_ratio_pct
+# and news_analysis.provider). _migrate_columns backfills them.
+_ADDED_COLUMNS = {
+    "news_analysis": [("provider", "TEXT")],
+    "growth_candidates": [("strong_buy_ratio_pct", "REAL")],
+}
+
+
+def _migrate_columns(conn) -> None:
+    for table, columns in _ADDED_COLUMNS.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            continue  # table doesn't exist yet -- executescript's CREATE TABLE already covers it
+        for column, coltype in columns:
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+
+
 def init_db(db_path: str) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        _migrate_columns(conn)
 
 
 def save_chain_snapshot_rows(conn, ticker: str, asof_date: str, pulled_at: str, chain: dict) -> None:
