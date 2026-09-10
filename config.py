@@ -56,8 +56,12 @@ BREADTH_PROXY_TICKERS: list[str] = [
 ]
 SPY_CONSTITUENTS: list[str] = []  # optional: real constituent list overrides the proxy
 
-# --- Claude news analysis (the only paid part of the system) ---
-CLAUDE_NEWS_MODEL = "claude-haiku-4-5-20251001"  # small/cheap model is enough for this
+# --- News analysis (the only paid part of the system) ---
+# NEWS_PROVIDER picks which API does the summarizing; each provider has its
+# own model default below. Swap providers without touching any code.
+NEWS_PROVIDER = "anthropic"  # "anthropic" or "openai"
+ANTHROPIC_NEWS_MODEL = "claude-haiku-4-5"  # small/cheap model is enough for this
+OPENAI_NEWS_MODEL = "gpt-4o-mini"  # verify against OpenAI's current model list -- not vetted by a live source here
 NEWS_WINDOW_DAYS = 3
 
 # Storage

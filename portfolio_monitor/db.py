@@ -119,6 +119,7 @@ CREATE TABLE IF NOT EXISTS news_analysis (
     position_flag_reason TEXT,
     headline_count INTEGER,
     window_days INTEGER,
+    provider TEXT,
     model TEXT,
     parse_error INTEGER,
     created_at TEXT NOT NULL,
@@ -308,6 +309,7 @@ def get_news_analysis(conn, asof_date: str, ticker: str) -> Optional[dict]:
         "position_flag_reason": row["position_flag_reason"],
         "headline_count": row["headline_count"],
         "window_days": row["window_days"],
+        "provider": row["provider"],
         "model": row["model"],
         "parse_error": bool(row["parse_error"]),
     }
@@ -318,8 +320,8 @@ def save_news_analysis(conn, result: dict) -> None:
         """INSERT OR REPLACE INTO news_analysis
            (asof_date, ticker, status, summary, sentiment, key_drivers_json,
             position_flag, position_flag_reason, headline_count, window_days,
-            model, parse_error, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            provider, model, parse_error, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             result["asof_date"],
             result["ticker"],
@@ -331,6 +333,7 @@ def save_news_analysis(conn, result: dict) -> None:
             result.get("position_flag_reason"),
             result.get("headline_count"),
             result.get("window_days"),
+            result.get("provider"),
             result.get("model"),
             int(bool(result.get("parse_error"))),
             datetime.now(timezone.utc).isoformat(),

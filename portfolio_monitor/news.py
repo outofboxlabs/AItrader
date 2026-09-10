@@ -134,6 +134,36 @@ def analyze_headlines_with_claude(ticker: str, headlines: list[dict], api_key: O
     return _parse_analysis_json(text)
 
 
+def analyze_headlines_with_openai(ticker: str, headlines: list[dict], api_key: Optional[str], model: str) -> dict:
+    """Same contract as analyze_headlines_with_claude, via the OpenAI API.
+    Raises on failure -- the caller decides how to degrade."""
+    import openai
+
+    client = openai.OpenAI(api_key=api_key) if api_key else openai.OpenAI()
+    response = client.chat.completions.create(
+        model=model,
+        max_completion_tokens=500,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": build_user_message(ticker, headlines)},
+        ],
+        response_format={"type": "json_object"},
+    )
+    text = response.choices[0].message.content or ""
+    return _parse_analysis_json(text)
+
+
+def analyze_headlines(
+    ticker: str, headlines: list[dict], provider: str, model: str, api_key: Optional[str] = None
+) -> dict:
+    """Dispatch to whichever provider is configured."""
+    if provider == "anthropic":
+        return analyze_headlines_with_claude(ticker, headlines, api_key=api_key, model=model)
+    if provider == "openai":
+        return analyze_headlines_with_openai(ticker, headlines, api_key=api_key, model=model)
+    raise ValueError(f"Unknown NEWS_PROVIDER: {provider!r} (expected 'anthropic' or 'openai')")
+
+
 def _parse_analysis_json(text: str) -> dict:
     try:
         parsed = json.loads(text)
@@ -169,6 +199,7 @@ def get_or_analyze_news(
     asof_date: date,
     window_days: int,
     model: str,
+    provider: str = "anthropic",
     api_key: Optional[str] = None,
 ) -> dict:
     """Cached per (ticker, asof_date): only calls the API once per name per day."""
@@ -180,7 +211,7 @@ def get_or_analyze_news(
 
     headlines = fetch_recent_headlines(ticker, window_days=window_days)
     try:
-        analysis = analyze_headlines_with_claude(ticker, headlines, api_key=api_key, model=model)
+        analysis = analyze_headlines(ticker, headlines, provider=provider, model=model, api_key=api_key)
         status = "ok"
     except Exception as exc:  # missing API key, network error, rate limit, etc.
         analysis = {
@@ -198,6 +229,7 @@ def get_or_analyze_news(
         "asof_date": asof_date.isoformat(),
         "headline_count": len(headlines),
         "window_days": window_days,
+        "provider": provider,
         "model": model,
         "status": status,
         **analysis,

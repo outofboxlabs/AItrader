@@ -1,6 +1,8 @@
 import json
 from datetime import date, datetime, timezone
 
+import pytest
+
 import portfolio_monitor.news as news_mod
 from portfolio_monitor import db
 from portfolio_monitor.news import (
@@ -138,3 +140,62 @@ def test_get_or_analyze_news_records_skip_status_on_failure(tmp_path, monkeypatc
 
     assert result["status"].startswith("skipped:")
     assert result["sentiment"] is None
+
+
+def test_analyze_headlines_dispatches_to_anthropic(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        news_mod,
+        "analyze_headlines_with_claude",
+        lambda ticker, headlines, api_key, model: calls.append(("anthropic", model)) or {"sentiment": "neutral"},
+    )
+    result = news_mod.analyze_headlines("AAPL", [], provider="anthropic", model="claude-haiku-4-5")
+    assert calls == [("anthropic", "claude-haiku-4-5")]
+    assert result["sentiment"] == "neutral"
+
+
+def test_analyze_headlines_dispatches_to_openai(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        news_mod,
+        "analyze_headlines_with_openai",
+        lambda ticker, headlines, api_key, model: calls.append(("openai", model)) or {"sentiment": "positive"},
+    )
+    result = news_mod.analyze_headlines("AAPL", [], provider="openai", model="gpt-4o-mini")
+    assert calls == [("openai", "gpt-4o-mini")]
+    assert result["sentiment"] == "positive"
+
+
+def test_analyze_headlines_rejects_unknown_provider():
+    with pytest.raises(ValueError, match="Unknown NEWS_PROVIDER"):
+        news_mod.analyze_headlines("AAPL", [], provider="not-a-real-provider", model="whatever")
+
+
+def test_get_or_analyze_news_with_openai_provider_caches(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    call_count = {"n": 0}
+
+    def fake_openai_analyze(ticker, headlines, api_key, model):
+        call_count["n"] += 1
+        return {
+            "summary": "OpenAI summary.",
+            "sentiment": "negative",
+            "key_drivers": ["driver"],
+            "position_flag": False,
+            "position_flag_reason": None,
+        }
+
+    monkeypatch.setattr(news_mod, "analyze_headlines_with_openai", fake_openai_analyze)
+    monkeypatch.setattr(news_mod, "fetch_recent_headlines", lambda ticker, window_days, now=None: [])
+
+    asof = date(2025, 5, 1)
+    with db.connect(db_path) as conn:
+        first = get_or_analyze_news(conn, "AAPL", asof, window_days=3, model="gpt-4o-mini", provider="openai")
+        second = get_or_analyze_news(conn, "AAPL", asof, window_days=3, model="gpt-4o-mini", provider="openai")
+
+    assert call_count["n"] == 1
+    assert first["provider"] == "openai"
+    assert second["provider"] == "openai"
+    assert second["sentiment"] == "negative"

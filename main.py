@@ -49,14 +49,29 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--skip-news",
         action="store_true",
-        help="skip Claude news analysis (the only paid part of the system)",
+        help="skip news analysis (the only paid part of the system)",
     )
     parser.add_argument("--news-window-days", type=int, default=config.NEWS_WINDOW_DAYS)
-    parser.add_argument("--news-model", default=config.CLAUDE_NEWS_MODEL)
+    parser.add_argument(
+        "--news-provider",
+        choices=["anthropic", "openai"],
+        default=config.NEWS_PROVIDER,
+    )
+    parser.add_argument(
+        "--news-model",
+        default=None,
+        help="defaults to config.ANTHROPIC_NEWS_MODEL or config.OPENAI_NEWS_MODEL "
+        "depending on --news-provider",
+    )
     parser.add_argument(
         "--anthropic-api-key",
         default=None,
         help="defaults to the ANTHROPIC_API_KEY environment variable",
+    )
+    parser.add_argument(
+        "--openai-api-key",
+        default=None,
+        help="defaults to the OPENAI_API_KEY environment variable",
     )
     return parser.parse_args(argv)
 
@@ -182,11 +197,22 @@ def run(args: argparse.Namespace) -> None:
 
         news_results = []
         if not args.skip_news:
-            api_key = args.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+            if args.news_provider == "anthropic":
+                news_model = args.news_model or config.ANTHROPIC_NEWS_MODEL
+                api_key = args.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+            else:
+                news_model = args.news_model or config.OPENAI_NEWS_MODEL
+                api_key = args.openai_api_key or os.environ.get("OPENAI_API_KEY")
             for ticker in tickers:
                 news_results.append(
                     news.get_or_analyze_news(
-                        conn, ticker, asof_date, args.news_window_days, args.news_model, api_key=api_key
+                        conn,
+                        ticker,
+                        asof_date,
+                        args.news_window_days,
+                        news_model,
+                        provider=args.news_provider,
+                        api_key=api_key,
                     )
                 )
 
@@ -275,7 +301,8 @@ def print_macro_summary(macro_result: dict) -> None:
 
 
 def print_news_summary(news_results: list[dict]) -> None:
-    print("\n=== Claude News Analysis (informational only -- not a trade signal) ===")
+    provider = news_results[0].get("provider", "?") if news_results else "?"
+    print(f"\n=== News Analysis via {provider} (informational only -- not a trade signal) ===")
     for r in news_results:
         if r["status"] != "ok":
             print(f"  {r['ticker']:6s} skipped ({r['status']})")
