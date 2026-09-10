@@ -166,6 +166,38 @@ def test_analyze_headlines_dispatches_to_openai(monkeypatch):
     assert result["sentiment"] == "positive"
 
 
+def test_analyze_headlines_dispatches_to_gemini(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        news_mod,
+        "analyze_headlines_with_gemini",
+        lambda ticker, headlines, api_key, model: calls.append(("gemini", model)) or {"sentiment": "negative"},
+    )
+    result = news_mod.analyze_headlines("AAPL", [], provider="gemini", model="gemini-2.0-flash")
+    assert calls == [("gemini", "gemini-2.0-flash")]
+    assert result["sentiment"] == "negative"
+
+
+def test_list_models_gemini_returns_live_names(monkeypatch):
+    import google.genai as genai
+
+    class FakeModel:
+        def __init__(self, name):
+            self.name = name
+
+    class FakeModels:
+        def list(self):
+            return [FakeModel("models/gemini-2.0-flash"), FakeModel("models/gemini-2.0-pro")]
+
+    class FakeClient:
+        def __init__(self, api_key=None):
+            self.models = FakeModels()
+
+    monkeypatch.setattr(genai, "Client", FakeClient)
+    result = news_mod.list_models("gemini", api_key="key")
+    assert result == ["models/gemini-2.0-flash", "models/gemini-2.0-pro"]
+
+
 def test_analyze_headlines_rejects_unknown_provider():
     with pytest.raises(ValueError, match="Unknown NEWS_PROVIDER"):
         news_mod.analyze_headlines("AAPL", [], provider="not-a-real-provider", model="whatever")

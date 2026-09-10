@@ -12,11 +12,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
 from datetime import date, datetime, timezone
 
 import config
-from portfolio_monitor import analytics, data, db, macro, news, snapshots
+from portfolio_monitor import analytics, credentials, data, db, macro, news, snapshots
 from portfolio_monitor.models import load_positions
 from portfolio_monitor.valuation import to_db_row, value_option_position, value_shares_position
 
@@ -54,24 +53,29 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--news-window-days", type=int, default=config.NEWS_WINDOW_DAYS)
     parser.add_argument(
         "--news-provider",
-        choices=["anthropic", "openai"],
+        choices=["anthropic", "openai", "gemini"],
         default=config.NEWS_PROVIDER,
     )
     parser.add_argument(
         "--news-model",
         default=None,
-        help="defaults to config.ANTHROPIC_NEWS_MODEL or config.OPENAI_NEWS_MODEL "
+        help="defaults to config.ANTHROPIC_NEWS_MODEL / OPENAI_NEWS_MODEL / GEMINI_NEWS_MODEL "
         "depending on --news-provider",
     )
     parser.add_argument(
         "--anthropic-api-key",
         default=None,
-        help="defaults to the ANTHROPIC_API_KEY environment variable",
+        help="defaults to the ANTHROPIC_API_KEY environment variable, then a saved key (see --interactive)",
     )
     parser.add_argument(
         "--openai-api-key",
         default=None,
-        help="defaults to the OPENAI_API_KEY environment variable",
+        help="defaults to the OPENAI_API_KEY environment variable, then a saved key (see --interactive)",
+    )
+    parser.add_argument(
+        "--gemini-api-key",
+        default=None,
+        help="defaults to the GEMINI_API_KEY environment variable, then a saved key (see --interactive)",
     )
     parser.add_argument(
         "--choose-model",
@@ -79,7 +83,39 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="prompt with a numbered list of live models from --news-provider before running "
         "(skip for unattended/scheduled runs -- it waits on terminal input)",
     )
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="prompt for the news platform (Anthropic/OpenAI/Gemini), its API key if none is "
+        "saved yet (offering to save it to .credentials.json), and the model to use -- implies "
+        "--choose-model. Skip for unattended/scheduled runs.",
+    )
     return parser.parse_args(argv)
+
+
+_NEWS_PROVIDERS = ["anthropic", "openai", "gemini"]
+_NEWS_PROVIDER_LABELS = {
+    "anthropic": "Anthropic (Claude)",
+    "openai": "OpenAI (GPT)",
+    "gemini": "Google (Gemini)",
+}
+
+
+def prompt_for_provider(default: str) -> str:
+    """Numbered platform picker. Returns `default` on empty/invalid input."""
+    print("\nWhich AI platform should analyze news?")
+    for i, key in enumerate(_NEWS_PROVIDERS, start=1):
+        marker = "  (current default)" if key == default else ""
+        print(f"  {i}. {_NEWS_PROVIDER_LABELS[key]}{marker}")
+
+    choice = input(f"Select a platform [1-{len(_NEWS_PROVIDERS)}] (Enter to keep the default): ").strip()
+    if not choice:
+        return default
+    if choice.isdigit() and 1 <= int(choice) <= len(_NEWS_PROVIDERS):
+        return _NEWS_PROVIDERS[int(choice) - 1]
+
+    print("Invalid selection; keeping the default.")
+    return default
 
 
 def prompt_for_model(provider: str, api_key: str | None) -> str | None:
@@ -232,14 +268,23 @@ def run(args: argparse.Namespace) -> None:
 
         news_results = []
         if not args.skip_news:
-            if args.news_provider == "anthropic":
-                api_key = args.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
-                default_model = config.ANTHROPIC_NEWS_MODEL
-            else:
-                api_key = args.openai_api_key or os.environ.get("OPENAI_API_KEY")
-                default_model = config.OPENAI_NEWS_MODEL
+            if args.interactive:
+                args.news_provider = prompt_for_provider(args.news_provider)
 
-            if args.choose_model:
+            cli_key = {
+                "anthropic": args.anthropic_api_key,
+                "openai": args.openai_api_key,
+                "gemini": args.gemini_api_key,
+            }[args.news_provider]
+            api_key = credentials.resolve_api_key(args.news_provider, cli_value=cli_key, interactive=args.interactive)
+
+            default_model = {
+                "anthropic": config.ANTHROPIC_NEWS_MODEL,
+                "openai": config.OPENAI_NEWS_MODEL,
+                "gemini": config.GEMINI_NEWS_MODEL,
+            }[args.news_provider]
+
+            if args.interactive or args.choose_model:
                 chosen_model = prompt_for_model(args.news_provider, api_key)
                 if chosen_model:
                     args.news_model = chosen_model

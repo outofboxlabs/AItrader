@@ -58,11 +58,26 @@ SPY_CONSTITUENTS: list[str] = []  # optional: real constituent list overrides th
 
 # --- News analysis (the only paid part of the system) ---
 # NEWS_PROVIDER picks which API does the summarizing; each provider has its
-# own model default below. Swap providers without touching any code.
-NEWS_PROVIDER = "anthropic"  # "anthropic" or "openai"
+# own model default below. Swap providers without touching any code, or
+# pick interactively at runtime with `python main.py --interactive`.
+NEWS_PROVIDER = "anthropic"  # "anthropic", "openai", or "gemini"
 ANTHROPIC_NEWS_MODEL = "claude-haiku-4-5"  # small/cheap model is enough for this
 OPENAI_NEWS_MODEL = "gpt-4o-mini"  # verify against OpenAI's current model list -- not vetted by a live source here
+GEMINI_NEWS_MODEL = "gemini-2.0-flash"  # UNVERIFIED -- no live Gemini reference in this session, confirm against Google's current docs
 NEWS_WINDOW_DAYS = 3
+
+# --- Vision extraction (screenshot -> positions.json draft), used by web_ui.py ---
+# Extracting numbers (strikes, prices, share counts) from an image is a
+# harder task than summarizing text, so these default to each provider's
+# strongest vision-capable model rather than the cheap news-analysis one.
+VISION_PROVIDER = "anthropic"  # "anthropic", "openai", or "gemini"
+ANTHROPIC_VISION_MODEL = "claude-opus-5"
+OPENAI_VISION_MODEL = "gpt-4o"  # not vetted by a live source here
+GEMINI_VISION_MODEL = "gemini-2.0-flash"  # UNVERIFIED -- see note above
+
+# Local, gitignored cache of API keys entered interactively -- see
+# portfolio_monitor/credentials.py. Never commit this file.
+CREDENTIALS_PATH = ".credentials.json"
 
 # Storage
 DB_PATH = "portfolio.db"

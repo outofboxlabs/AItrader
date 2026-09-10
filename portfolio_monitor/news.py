@@ -153,6 +153,25 @@ def analyze_headlines_with_openai(ticker: str, headlines: list[dict], api_key: O
     return _parse_analysis_json(text)
 
 
+def analyze_headlines_with_gemini(ticker: str, headlines: list[dict], api_key: Optional[str], model: str) -> dict:
+    """Same contract as analyze_headlines_with_claude, via Google's Gemini
+    API. UNVERIFIED: this session had no live Gemini reference to check
+    the SDK surface or model IDs against (unlike the Anthropic and OpenAI
+    paths, which were checked against a live source) -- if this errors,
+    confirm the `google-genai` usage and model string against Google's
+    current docs. Raises on failure -- the caller decides how to degrade."""
+    from google import genai
+
+    client = genai.Client(api_key=api_key) if api_key else genai.Client()
+    prompt = f"{SYSTEM_PROMPT}\n\n{build_user_message(ticker, headlines)}"
+    response = client.models.generate_content(model=model, contents=prompt)
+    text = response.text or ""
+    return _parse_analysis_json(text)
+
+
+_PROVIDERS = ("anthropic", "openai", "gemini")
+
+
 def analyze_headlines(
     ticker: str, headlines: list[dict], provider: str, model: str, api_key: Optional[str] = None
 ) -> dict:
@@ -161,7 +180,9 @@ def analyze_headlines(
         return analyze_headlines_with_claude(ticker, headlines, api_key=api_key, model=model)
     if provider == "openai":
         return analyze_headlines_with_openai(ticker, headlines, api_key=api_key, model=model)
-    raise ValueError(f"Unknown NEWS_PROVIDER: {provider!r} (expected 'anthropic' or 'openai')")
+    if provider == "gemini":
+        return analyze_headlines_with_gemini(ticker, headlines, api_key=api_key, model=model)
+    raise ValueError(f"Unknown NEWS_PROVIDER: {provider!r} (expected one of {_PROVIDERS})")
 
 
 # Heuristic filter for OpenAI's model list, which also includes embeddings,
@@ -186,7 +207,14 @@ def list_models(provider: str, api_key: Optional[str] = None) -> list[str]:
         chat_ids = sorted(i for i in all_ids if i.startswith(_OPENAI_CHAT_MODEL_PREFIXES))
         return chat_ids or sorted(all_ids)
 
-    raise ValueError(f"Unknown NEWS_PROVIDER: {provider!r} (expected 'anthropic' or 'openai')")
+    if provider == "gemini":
+        # UNVERIFIED -- see the note on analyze_headlines_with_gemini.
+        from google import genai
+
+        client = genai.Client(api_key=api_key) if api_key else genai.Client()
+        return [m.name for m in client.models.list()]
+
+    raise ValueError(f"Unknown NEWS_PROVIDER: {provider!r} (expected one of {_PROVIDERS})")
 
 
 def _parse_analysis_json(text: str) -> dict:
