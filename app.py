@@ -381,6 +381,8 @@ PAGE_TEMPLATE = """<!doctype html>
   .badge.neutral, .badge.no.data { background: #2a2f3a; color: var(--muted); }
   .news-card, .mover-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
   .news-card .ticker, .mover-card .ticker { font-weight: 600; margin-right: 8px; }
+  a.ticker-link { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--muted); }
+  a.ticker-link:hover { border-bottom-color: var(--text); }
   .mover-card .drop-pct { color: var(--red); font-weight: 600; }
   .mover-card .rebound { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 0.85rem; }
   .mover-card .rebound h4 { margin: 8px 0 3px; font-size: 0.78rem; color: var(--muted); text-transform: uppercase; }
@@ -755,7 +757,7 @@ function renderMovers(data) {
     const sentimentClass = (r.analyst_sentiment || "no data").replace(" ", "-");
     const riskList = (r.risk_factors || []).map(rf => `<li>${rf}</li>`).join("");
     return `<div class="mover-card">
-      <span class="ticker">${m.ticker}</span> ${m.name ? `<span class="muted">${m.name}</span>` : ""}
+      <a class="ticker-link ticker" href="https://finance.yahoo.com/quote/${encodeURIComponent(m.ticker)}" target="_blank" rel="noopener">${m.ticker}</a> ${m.name ? `<span class="muted">${m.name}</span>` : ""}
       <span class="drop-pct">${fmtNum(m.pct_change, 1)}%</span> to ${fmtMoney(m.price)}
       ${r.status && r.status !== "ok" ? `<div class="muted">AI analysis skipped (${r.status})</div>` : `
       <div class="rebound">
@@ -859,7 +861,7 @@ function renderGrowthTable() {
       ? `${fmtNum(c.strong_buy_ratio_pct, 0)}% <span class="muted">(${ratingsStr})</span>`
       : `n/a <span class="muted">(${ratingsStr})</span>`;
     return `<tr>
-      <td>${c.ticker}${c.name ? ` <span class="muted">(${c.name})</span>` : ""}</td>
+      <td><a class="ticker-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(c.ticker)}" target="_blank" rel="noopener">${c.ticker}</a>${c.name ? ` <span class="muted">(${c.name})</span>` : ""}</td>
       <td>${fmtMoney(c.price)}</td>
       <td>${fmtMoney(c.target_mean)}</td>
       <td class="pos">+${fmtNum(c.target_upside_pct, 1)}%</td>
