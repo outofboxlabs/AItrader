@@ -366,6 +366,9 @@ PAGE_TEMPLATE = """<!doctype html>
   table { border-collapse: collapse; width: 100%; font-size: 0.83rem; }
   th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 500; }
+  th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+  th.sortable:hover { color: var(--text); }
+  th.sortable .arrow { display: inline-block; width: 1em; opacity: 0.6; }
   .bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 0.82rem; }
   .bar-label { width: 90px; flex-shrink: 0; color: var(--muted); }
   .bar-track { flex: 1; background: #11141b; border-radius: 3px; height: 14px; overflow: hidden; }
@@ -504,9 +507,14 @@ PAGE_TEMPLATE = """<!doctype html>
     <div id="g-status"></div>
     <div id="g-as-of" class="muted" style="margin-bottom:8px;"></div>
     <table>
-      <thead><tr>
-        <th>Ticker</th><th>Price</th><th>Target (mean)</th><th>Upside</th>
-        <th>Strong Buy %</th><th>From 52w High</th><th>From 52w Low</th>
+      <thead><tr id="g-head">
+        <th class="sortable" data-sort="ticker">Ticker<span class="arrow"></span></th>
+        <th class="sortable" data-sort="price">Price<span class="arrow"></span></th>
+        <th class="sortable" data-sort="target_mean">Target (mean)<span class="arrow"></span></th>
+        <th class="sortable" data-sort="target_upside_pct">Upside<span class="arrow"></span></th>
+        <th class="sortable" data-sort="strong_buy_ratio_pct">Strong Buy %<span class="arrow"></span></th>
+        <th class="sortable" data-sort="pct_from_52w_high">From 52w High<span class="arrow"></span></th>
+        <th class="sortable" data-sort="pct_from_52w_low">From 52w Low<span class="arrow"></span></th>
       </tr></thead>
       <tbody id="g-body"></tbody>
     </table>
@@ -774,6 +782,9 @@ async function loadSchedulerStatus() {
 }
 
 // ---------- TOP GROWTH TAB ----------
+let growthRows = [];
+let growthSort = { field: "target_upside_pct", dir: -1 };
+
 async function loadGrowth() {
   const res = await fetch("/api/growth");
   const data = await res.json();
@@ -801,13 +812,45 @@ async function runGrowthNow() {
 
 function renderGrowth(data) {
   document.getElementById("g-as-of").textContent = data.asof_date ? `As of ${data.asof_date}` : "No scan has run yet.";
+  growthRows = data.candidates || [];
+  renderGrowthTable();
+}
+
+function sortGrowth(field) {
+  if (growthSort.field === field) {
+    growthSort.dir *= -1;
+  } else {
+    growthSort.field = field;
+    growthSort.dir = field === "ticker" ? 1 : -1;
+  }
+  renderGrowthTable();
+}
+
+function renderGrowthTable() {
   const body = document.getElementById("g-body");
-  const rows = data.candidates || [];
-  if (rows.length === 0) {
+  const { field, dir } = growthSort;
+
+  document.querySelectorAll("#g-head th.sortable").forEach(th => {
+    const arrow = th.querySelector(".arrow");
+    arrow.textContent = th.dataset.sort === field ? (dir === 1 ? "\\u25b2" : "\\u25bc") : "";
+  });
+
+  if (growthRows.length === 0) {
     body.innerHTML = '<tr><td colspan="7" class="muted">No candidates found. Click "Run Now" to screen today\\'s market.</td></tr>';
     return;
   }
-  body.innerHTML = rows.map(c => {
+
+  const sorted = [...growthRows].sort((a, b) => {
+    let av = a[field], bv = b[field];
+    if (av === null || av === undefined) return 1;
+    if (bv === null || bv === undefined) return -1;
+    if (typeof av === "string") { av = av.toLowerCase(); bv = bv.toLowerCase(); }
+    if (av < bv) return -1 * dir;
+    if (av > bv) return 1 * dir;
+    return 0;
+  });
+
+  body.innerHTML = sorted.map(c => {
     const ratings = c.analyst_ratings || {};
     const ratingsStr = Object.keys(ratings).length
       ? Object.entries(ratings).map(([k, v]) => `${k}: ${v}`).join(", ")
@@ -826,6 +869,11 @@ function renderGrowth(data) {
     </tr>`;
   }).join("");
 }
+
+document.getElementById("g-head").addEventListener("click", (e) => {
+  const th = e.target.closest("th.sortable");
+  if (th) sortGrowth(th.dataset.sort);
+});
 
 // ---------- POSITIONS TAB ----------
 let rows = [];
