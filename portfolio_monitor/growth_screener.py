@@ -1,6 +1,12 @@
-"""Growth-candidate screen: liquid US stocks where analyst consensus
-implies substantial upside and the rating majority is "strong buy",
-alongside how far each sits from its 52-week high/low.
+"""Growth-candidate screen: liquid US stocks where the analyst consensus
+price target implies substantial upside, alongside the analyst rating
+breakdown (including what fraction are "strong buy") and how far each
+sits from its 52-week high/low.
+
+The rating breakdown is shown, not filtered on -- a strict "majority
+strong buy" requirement turned out to exclude most otherwise-qualifying
+names (see _strong_buy_ratio_pct), so it's surfaced as a ratio for a
+human to judge instead of a hard gate.
 
 Honesty note baked into the design: no data source predicts "50% growth
 in the next month" -- that's not a published metric anywhere. The closest
@@ -35,20 +41,25 @@ def _current_period_ratings(recommendations: dict) -> dict:
     return result
 
 
-def _is_majority_strong_buy(ratings: dict) -> bool:
+def _strong_buy_ratio_pct(ratings: dict) -> Optional[float]:
+    """% of all analyst ratings that are "strong buy". None if no ratings
+    data at all (shown as such rather than treated as 0%)."""
     total = sum(v for v in ratings.values() if isinstance(v, (int, float)))
     if not total:
-        return False
-    return ratings.get("strongBuy", 0) / total > 0.5
+        return None
+    return ratings.get("strongBuy", 0) / total * 100.0
 
 
 def _enrich_candidate(q: dict, target_upside_threshold: float) -> tuple[Optional[dict], str]:
     """Fetch one candidate's analyst data and 52-week range, and apply the
-    upside/majority filters. Returns (None, reason) if excluded, or
-    (candidate, "included") -- never raises, so one bad ticker can't take
-    down a parallel batch of these. The reason string is only for the
-    diagnostic summary in find_growth_candidates; callers that don't care
-    can ignore it."""
+    upside filter. Returns (None, reason) if excluded, or (candidate,
+    "included") -- never raises, so one bad ticker can't take down a
+    parallel batch of these. The reason string is only for the diagnostic
+    summary in find_growth_candidates; callers that don't care can ignore
+    it. The analyst rating breakdown (including strong_buy_ratio_pct) is
+    included on every candidate for a human to judge -- it's not filtered
+    on, since a strict "majority strong buy" requirement excluded most
+    otherwise-qualifying names in practice."""
     ticker = q.get("symbol")
     if not ticker:
         return None, "no_symbol"
@@ -73,8 +84,7 @@ def _enrich_candidate(q: dict, target_upside_threshold: float) -> tuple[Optional
         return None, "below_upside_threshold"
 
     ratings = _current_period_ratings(recommendations)
-    if not _is_majority_strong_buy(ratings):
-        return None, "no_strong_buy_majority"
+    strong_buy_ratio_pct = _strong_buy_ratio_pct(ratings)
 
     try:
         fast_info = t.fast_info
@@ -94,6 +104,7 @@ def _enrich_candidate(q: dict, target_upside_threshold: float) -> tuple[Optional
         "target_mean": mean_target,
         "target_upside_pct": target_upside_pct,
         "analyst_ratings": ratings,
+        "strong_buy_ratio_pct": strong_buy_ratio_pct,
         "pct_from_52w_high": pct_from_52w_high,
         "pct_from_52w_low": pct_from_52w_low,
         "market_cap": q.get("marketCap"),
@@ -112,9 +123,10 @@ def find_growth_candidates(
 ) -> list[dict]:
     """Screen a liquid US candidate pool (sorted by trailing 52-week % change
     as a momentum proxy), then filter to names where the analyst consensus
-    price target implies >= target_upside_threshold% upside AND the rating
-    majority is "strong buy". Returns up to max_results, sorted by upside
-    descending.
+    price target implies >= target_upside_threshold% upside. The analyst
+    rating breakdown (strong_buy_ratio_pct and the raw counts) is included
+    on every result for a human to judge, not filtered on -- returns up to
+    max_results, sorted by upside descending.
 
     Per-candidate enrichment (analyst data, 52-week range) is I/O-bound --
     each one is its own yfinance network round trip -- so it runs on a

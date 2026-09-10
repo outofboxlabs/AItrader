@@ -162,6 +162,7 @@ CREATE TABLE IF NOT EXISTS growth_candidates (
     target_mean REAL,
     target_upside_pct REAL,
     analyst_ratings_json TEXT,
+    strong_buy_ratio_pct REAL,
     pct_from_52w_high REAL,
     pct_from_52w_low REAL,
     market_cap REAL,
@@ -456,8 +457,9 @@ def save_growth_candidates(conn, asof_date: str, candidates: list[dict]) -> None
     conn.executemany(
         """INSERT OR REPLACE INTO growth_candidates
            (asof_date, ticker, name, price, target_mean, target_upside_pct,
-            analyst_ratings_json, pct_from_52w_high, pct_from_52w_low, market_cap)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            analyst_ratings_json, strong_buy_ratio_pct, pct_from_52w_high,
+            pct_from_52w_low, market_cap)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
         [
             (
                 asof_date,
@@ -467,6 +469,7 @@ def save_growth_candidates(conn, asof_date: str, candidates: list[dict]) -> None
                 c.get("target_mean"),
                 c.get("target_upside_pct"),
                 json.dumps(c.get("analyst_ratings") or {}),
+                c.get("strong_buy_ratio_pct"),
                 c.get("pct_from_52w_high"),
                 c.get("pct_from_52w_low"),
                 c.get("market_cap"),

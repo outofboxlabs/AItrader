@@ -26,17 +26,19 @@ def test_current_period_ratings_missing_columns_are_omitted():
     assert gs._current_period_ratings({}) == {}
 
 
-def test_is_majority_strong_buy_true():
-    assert gs._is_majority_strong_buy({"strongBuy": 8, "buy": 2, "hold": 1, "sell": 0, "strongSell": 0}) is True
+def test_strong_buy_ratio_pct_computes_percentage():
+    ratio = gs._strong_buy_ratio_pct({"strongBuy": 8, "buy": 2, "hold": 0, "sell": 0, "strongSell": 0})
+    assert ratio == 80.0
 
 
-def test_is_majority_strong_buy_false_when_plurality_not_majority():
-    # strongBuy is the largest single bucket but not > 50% of the total
-    assert gs._is_majority_strong_buy({"strongBuy": 4, "buy": 4, "hold": 3, "sell": 0, "strongSell": 0}) is False
+def test_strong_buy_ratio_pct_low_ratio_still_computed():
+    # Not filtered on anymore -- a low ratio is still a valid, reportable number.
+    ratio = gs._strong_buy_ratio_pct({"strongBuy": 2, "buy": 5, "hold": 3, "sell": 0, "strongSell": 0})
+    assert ratio == 20.0
 
 
-def test_is_majority_strong_buy_false_when_empty():
-    assert gs._is_majority_strong_buy({}) is False
+def test_strong_buy_ratio_pct_none_when_no_ratings():
+    assert gs._strong_buy_ratio_pct({}) is None
 
 
 def _fake_ticker_factory(data_by_symbol):
@@ -62,12 +64,15 @@ def _fake_ticker_factory(data_by_symbol):
     return FakeTicker
 
 
-def test_find_growth_candidates_filters_and_sorts(monkeypatch):
+def test_find_growth_candidates_filters_on_upside_only_not_ratings(monkeypatch):
+    """A low strong-buy ratio no longer excludes a candidate -- only the
+    upside threshold does. The ratio is still computed and returned."""
+
     def fake_screen(query, sortField=None, sortAsc=None, size=None):
         return {
             "quotes": [
                 {"symbol": "STRONG", "shortName": "Strong Co", "regularMarketPrice": 100.0, "marketCap": 5e9},
-                {"symbol": "WEAKMAJ", "shortName": "Weak Majority Co", "regularMarketPrice": 50.0, "marketCap": 2e9},
+                {"symbol": "LOWRATIO", "shortName": "Low Ratio Co", "regularMarketPrice": 50.0, "marketCap": 2e9},
                 {"symbol": "LOWUPSIDE", "shortName": "Low Upside Co", "regularMarketPrice": 80.0, "marketCap": 3e9},
             ]
         }
@@ -79,8 +84,8 @@ def test_find_growth_candidates_filters_and_sorts(monkeypatch):
             "year_high": 120.0,
             "year_low": 60.0,
         },
-        "WEAKMAJ": {
-            "price_targets": {"current": 50.0, "mean": 90.0},  # 80% upside but no strong-buy majority
+        "LOWRATIO": {
+            "price_targets": {"current": 50.0, "mean": 90.0},  # 80% upside, but only a 20% strong-buy ratio
             "recommendations": {"strongBuy": {0: 2}, "buy": {0: 5}, "hold": {0: 3}, "sell": {0: 0}, "strongSell": {0: 0}},
             "year_high": 70.0,
             "year_low": 40.0,
@@ -98,12 +103,20 @@ def test_find_growth_candidates_filters_and_sorts(monkeypatch):
 
     results = gs.find_growth_candidates(target_upside_threshold=50.0)
 
-    assert [r["ticker"] for r in results] == ["STRONG"]
-    strong = results[0]
+    # LOWUPSIDE is excluded (below threshold); LOWRATIO is included despite
+    # its weak strong-buy ratio, sorted above STRONG since its upside is higher.
+    assert [r["ticker"] for r in results] == ["LOWRATIO", "STRONG"]
+
+    strong = results[1]
     assert strong["target_upside_pct"] == 70.0
     assert strong["pct_from_52w_high"] == (100.0 - 120.0) / 120.0 * 100.0
     assert strong["pct_from_52w_low"] == (100.0 - 60.0) / 60.0 * 100.0
     assert strong["analyst_ratings"]["strongBuy"] == 9
+    assert strong["strong_buy_ratio_pct"] == 90.0
+
+    low_ratio = results[0]
+    assert low_ratio["target_upside_pct"] == 80.0
+    assert low_ratio["strong_buy_ratio_pct"] == 20.0
 
 
 def test_find_growth_candidates_handles_missing_data_gracefully(monkeypatch):

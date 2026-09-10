@@ -489,16 +489,17 @@ PAGE_TEMPLATE = """<!doctype html>
     <p class="muted" style="max-width:640px;">
       No data source predicts "growth in the next month" -- that's not a metric anyone publishes.
       This screens for liquid US stocks where the <strong>analyst consensus price target</strong>
-      implies at least {{ growth_upside_threshold }}% upside and the rating majority is
-      <strong>strong buy</strong>. Analyst targets are conventionally ~12-month views, not 1-month ones --
-      treat this as "analysts see a lot of upside here", not a monthly forecast.
+      implies at least {{ growth_upside_threshold }}% upside. Analyst targets are conventionally
+      ~12-month views, not 1-month ones -- treat this as "analysts see a lot of upside here", not a
+      monthly forecast. The <strong>Strong Buy %</strong> column shows what fraction of all analyst
+      ratings are "strong buy" -- it's shown for you to judge, not filtered on.
     </p>
     <div id="g-status"></div>
     <div id="g-as-of" class="muted" style="margin-bottom:8px;"></div>
     <table>
       <thead><tr>
         <th>Ticker</th><th>Price</th><th>Target (mean)</th><th>Upside</th>
-        <th>Analyst Ratings</th><th>From 52w High</th><th>From 52w Low</th>
+        <th>Strong Buy %</th><th>From 52w High</th><th>From 52w Low</th>
       </tr></thead>
       <tbody id="g-body"></tbody>
     </table>
@@ -804,12 +805,15 @@ function renderGrowth(data) {
     const ratingsStr = Object.keys(ratings).length
       ? Object.entries(ratings).map(([k, v]) => `${k}: ${v}`).join(", ")
       : "n/a";
+    const strongBuyCell = c.strong_buy_ratio_pct !== null && c.strong_buy_ratio_pct !== undefined
+      ? `${fmtNum(c.strong_buy_ratio_pct, 0)}% <span class="muted">(${ratingsStr})</span>`
+      : `n/a <span class="muted">(${ratingsStr})</span>`;
     return `<tr>
       <td>${c.ticker}${c.name ? ` <span class="muted">(${c.name})</span>` : ""}</td>
       <td>${fmtMoney(c.price)}</td>
       <td>${fmtMoney(c.target_mean)}</td>
       <td class="pos">+${fmtNum(c.target_upside_pct, 1)}%</td>
-      <td>${ratingsStr}</td>
+      <td>${strongBuyCell}</td>
       <td>${c.pct_from_52w_high !== null && c.pct_from_52w_high !== undefined ? fmtNum(c.pct_from_52w_high, 1) + "%" : "n/a"}</td>
       <td>${c.pct_from_52w_low !== null && c.pct_from_52w_low !== undefined ? "+" + fmtNum(c.pct_from_52w_low, 1) + "%" : "n/a"}</td>
     </tr>`;
