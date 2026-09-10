@@ -153,6 +153,20 @@ CREATE TABLE IF NOT EXISTS rebound_analysis (
     created_at TEXT NOT NULL,
     PRIMARY KEY (asof_date, ticker)
 );
+
+CREATE TABLE IF NOT EXISTS growth_candidates (
+    asof_date TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    name TEXT,
+    price REAL,
+    target_mean REAL,
+    target_upside_pct REAL,
+    analyst_ratings_json TEXT,
+    pct_from_52w_high REAL,
+    pct_from_52w_low REAL,
+    market_cap REAL,
+    PRIMARY KEY (asof_date, ticker)
+);
 """
 
 
@@ -436,3 +450,44 @@ def save_rebound_analysis(conn, result: dict) -> None:
             datetime.now(timezone.utc).isoformat(),
         ),
     )
+
+
+def save_growth_candidates(conn, asof_date: str, candidates: list[dict]) -> None:
+    conn.executemany(
+        """INSERT OR REPLACE INTO growth_candidates
+           (asof_date, ticker, name, price, target_mean, target_upside_pct,
+            analyst_ratings_json, pct_from_52w_high, pct_from_52w_low, market_cap)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        [
+            (
+                asof_date,
+                c["ticker"],
+                c.get("name"),
+                c.get("price"),
+                c.get("target_mean"),
+                c.get("target_upside_pct"),
+                json.dumps(c.get("analyst_ratings") or {}),
+                c.get("pct_from_52w_high"),
+                c.get("pct_from_52w_low"),
+                c.get("market_cap"),
+            )
+            for c in candidates
+        ],
+    )
+
+
+def get_growth_candidates(conn, asof_date: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM growth_candidates WHERE asof_date=? ORDER BY target_upside_pct DESC", (asof_date,)
+    ).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["analyst_ratings"] = json.loads(d.pop("analyst_ratings_json")) if d.get("analyst_ratings_json") else {}
+        result.append(d)
+    return result
+
+
+def get_latest_growth_candidates_date(conn) -> Optional[str]:
+    row = conn.execute("SELECT MAX(asof_date) AS d FROM growth_candidates").fetchone()
+    return row["d"] if row else None

@@ -6,3 +6,4 @@ snapshots/*.json
 *.egg-info/
 .credentials.json
 positions.json.bak
+exports/

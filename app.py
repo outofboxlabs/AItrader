@@ -25,7 +25,7 @@ from typing import Optional
 from flask import Flask, jsonify, render_template_string, request
 
 import config
-from portfolio_monitor import credentials, movers, news, pipeline, scheduler, vision
+from portfolio_monitor import credentials, exports, growth_screener, movers, news, pipeline, scheduler, vision
 from portfolio_monitor import db as db_mod
 from portfolio_monitor.models import Position
 
@@ -68,7 +68,11 @@ def _save_positions_raw(positions: list[dict]) -> None:
 
 @app.route("/")
 def index():
-    return render_template_string(PAGE_TEMPLATE, default_provider=config.NEWS_PROVIDER)
+    return render_template_string(
+        PAGE_TEMPLATE,
+        default_provider=config.NEWS_PROVIDER,
+        growth_upside_threshold=config.GROWTH_TARGET_UPSIDE_THRESHOLD_PCT,
+    )
 
 
 @app.route("/api/positions", methods=["GET"])
@@ -168,7 +172,9 @@ def _run_movers(provider: str, model: Optional[str], asof_date: Optional[date] =
     macro_score = _latest_macro_score()
     db_mod.init_db(config.DB_PATH)
     with db_mod.connect(config.DB_PATH) as conn:
-        return movers.run_movers_scan(conn, asof_date, provider, resolved_model, api_key=api_key, macro_score=macro_score)
+        results = movers.run_movers_scan(conn, asof_date, provider, resolved_model, api_key=api_key, macro_score=macro_score)
+    exports.export_to_csv(results, "top_movers", "top_movers", export_root=config.EXPORTS_DIR)
+    return results
 
 
 @app.route("/api/movers", methods=["GET"])
@@ -206,6 +212,48 @@ def run_movers_now():
 @app.route("/api/scheduler/status", methods=["GET"])
 def scheduler_status():
     return jsonify({"running": scheduler.is_running(), "next_run": scheduler.get_next_run_time()})
+
+
+# --- Growth screener (Top Growth tab) ---------------------------------------
+
+
+def _run_growth_screen(asof_date: Optional[date] = None) -> list[dict]:
+    """No news/AI call here -- this is a pure data screen (screener +
+    analyst ratings + 52-week range), so it needs no API key/provider."""
+    asof_date = asof_date or date.today()
+    db_mod.init_db(config.DB_PATH)
+    candidates = growth_screener.find_growth_candidates(
+        candidate_pool_size=config.GROWTH_CANDIDATE_POOL_SIZE,
+        min_market_cap=config.GROWTH_MIN_MARKET_CAP,
+        min_price=config.GROWTH_MIN_PRICE,
+        min_volume=config.GROWTH_MIN_VOLUME,
+        target_upside_threshold=config.GROWTH_TARGET_UPSIDE_THRESHOLD_PCT,
+        max_results=config.GROWTH_MAX_RESULTS,
+    )
+    with db_mod.connect(config.DB_PATH) as conn:
+        db_mod.save_growth_candidates(conn, asof_date.isoformat(), candidates)
+    exports.export_to_csv(candidates, "top_growth", "top_growth", export_root=config.EXPORTS_DIR)
+    return candidates
+
+
+@app.route("/api/growth", methods=["GET"])
+def get_growth():
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        latest_date = db_mod.get_latest_growth_candidates_date(conn)
+        if not latest_date:
+            return jsonify({"asof_date": None, "candidates": []})
+        candidates = db_mod.get_growth_candidates(conn, latest_date)
+    return jsonify({"asof_date": latest_date, "candidates": candidates})
+
+
+@app.route("/api/growth/run", methods=["POST"])
+def run_growth_now():
+    try:
+        candidates = _run_growth_screen()
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+    return jsonify({"asof_date": date.today().isoformat(), "candidates": candidates})
 
 
 # --- Settings ----------------------------------------------------------
@@ -332,6 +380,7 @@ PAGE_TEMPLATE = """<!doctype html>
 <nav>
   <button class="tab-btn active" data-tab="portfolio">Portfolio</button>
   <button class="tab-btn" data-tab="movers">Top Movers</button>
+  <button class="tab-btn" data-tab="growth">Top Growth</button>
   <button class="tab-btn" data-tab="positions">Positions</button>
   <button class="tab-btn" data-tab="settings">Settings</button>
   <button class="tab-btn" data-tab="more">More</button>
@@ -417,6 +466,29 @@ PAGE_TEMPLATE = """<!doctype html>
     <div id="m-status"></div>
     <div id="m-as-of" class="muted" style="margin-bottom:8px;"></div>
     <div id="m-cards"></div>
+  </div>
+
+  <!-- ===================== TOP GROWTH TAB ===================== -->
+  <div class="tab-panel" id="tab-growth">
+    <div class="controls">
+      <button class="action" id="g-run-btn" onclick="runGrowthNow()">Run Now</button>
+    </div>
+    <p class="muted" style="max-width:640px;">
+      No data source predicts "growth in the next month" -- that's not a metric anyone publishes.
+      This screens for liquid US stocks where the <strong>analyst consensus price target</strong>
+      implies at least {{ growth_upside_threshold }}% upside and the rating majority is
+      <strong>strong buy</strong>. Analyst targets are conventionally ~12-month views, not 1-month ones --
+      treat this as "analysts see a lot of upside here", not a monthly forecast.
+    </p>
+    <div id="g-status"></div>
+    <div id="g-as-of" class="muted" style="margin-bottom:8px;"></div>
+    <table>
+      <thead><tr>
+        <th>Ticker</th><th>Price</th><th>Target (mean)</th><th>Upside</th>
+        <th>Analyst Ratings</th><th>From 52w High</th><th>From 52w Low</th>
+      </tr></thead>
+      <tbody id="g-body"></tbody>
+    </table>
   </div>
 
   <!-- ===================== POSITIONS TAB ===================== -->
@@ -680,6 +752,57 @@ async function loadSchedulerStatus() {
     text + ". Fires automatically at 3:30pm US/Eastern on weekdays while this app is running; use \\'Run Now\\' on the Top Movers tab any other time.";
 }
 
+// ---------- TOP GROWTH TAB ----------
+async function loadGrowth() {
+  const res = await fetch("/api/growth");
+  const data = await res.json();
+  renderGrowth(data);
+}
+
+async function runGrowthNow() {
+  const btn = document.getElementById("g-run-btn");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Screening...';
+  document.getElementById("g-status").style.display = "none";
+  try {
+    const res = await fetch("/api/growth/run", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) { showStatus("g-status", "Error: " + data.error, false); return; }
+    renderGrowth(data);
+    showStatus("g-status", `Found ${data.candidates.length} candidate(s) meeting the upside + strong-buy criteria.`, true);
+  } catch (err) {
+    showStatus("g-status", "Error: " + err, false);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Run Now";
+  }
+}
+
+function renderGrowth(data) {
+  document.getElementById("g-as-of").textContent = data.asof_date ? `As of ${data.asof_date}` : "No scan has run yet.";
+  const body = document.getElementById("g-body");
+  const rows = data.candidates || [];
+  if (rows.length === 0) {
+    body.innerHTML = '<tr><td colspan="7" class="muted">No candidates found. Click "Run Now" to screen today\\'s market.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(c => {
+    const ratings = c.analyst_ratings || {};
+    const ratingsStr = Object.keys(ratings).length
+      ? Object.entries(ratings).map(([k, v]) => `${k}: ${v}`).join(", ")
+      : "n/a";
+    return `<tr>
+      <td>${c.ticker}${c.name ? ` <span class="muted">(${c.name})</span>` : ""}</td>
+      <td>${fmtMoney(c.price)}</td>
+      <td>${fmtMoney(c.target_mean)}</td>
+      <td class="pos">+${fmtNum(c.target_upside_pct, 1)}%</td>
+      <td>${ratingsStr}</td>
+      <td>${c.pct_from_52w_high !== null && c.pct_from_52w_high !== undefined ? fmtNum(c.pct_from_52w_high, 1) + "%" : "n/a"}</td>
+      <td>${c.pct_from_52w_low !== null && c.pct_from_52w_low !== undefined ? "+" + fmtNum(c.pct_from_52w_low, 1) + "%" : "n/a"}</td>
+    </tr>`;
+  }).join("");
+}
+
 // ---------- POSITIONS TAB ----------
 let rows = [];
 
@@ -821,6 +944,7 @@ async function saveKey(provider) {
 // ---------- init ----------
 loadPositions();
 loadMovers();
+loadGrowth();
 loadSchedulerStatus();
 loadSettings();
 </script>

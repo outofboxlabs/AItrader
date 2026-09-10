@@ -79,7 +79,20 @@ GEMINI_VISION_MODEL = "gemini-2.0-flash"  # UNVERIFIED -- see note above
 # portfolio_monitor/credentials.py. Never commit this file.
 CREDENTIALS_PATH = ".credentials.json"
 
+# --- Growth screener (Top Growth tab) ---
+# "50% growth in a month" isn't a metric any data source publishes -- the
+# closest real, checkable proxy is the analyst consensus price target,
+# which is conventionally a ~12-month view, not a 1-month one. Labeled
+# accordingly in the UI as "analyst target upside", not a 1-month forecast.
+GROWTH_CANDIDATE_POOL_SIZE = 200
+GROWTH_MIN_MARKET_CAP = 300_000_000
+GROWTH_MIN_PRICE = 5.0
+GROWTH_MIN_VOLUME = 100_000
+GROWTH_TARGET_UPSIDE_THRESHOLD_PCT = 50.0
+GROWTH_MAX_RESULTS = 50
+
 # Storage
 DB_PATH = "portfolio.db"
 SNAPSHOTS_DIR = "snapshots"
 POSITIONS_PATH = "positions.json"
+EXPORTS_DIR = "exports"  # timestamped CSVs from Top Movers / Top Growth scans

@@ -13,6 +13,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod.config, "POSITIONS_PATH", str(tmp_path / "positions.json"))
     monkeypatch.setattr(app_mod.config, "DB_PATH", str(tmp_path / "test.db"))
     monkeypatch.setattr(app_mod.config, "SNAPSHOTS_DIR", str(tmp_path / "snapshots"))
+    monkeypatch.setattr(app_mod.config, "EXPORTS_DIR", str(tmp_path / "exports"))
     app_mod.app.config.update(TESTING=True)
     with app_mod.app.test_client() as c:
         yield c
@@ -216,3 +217,73 @@ def test_index_page_renders(client):
     assert res.status_code == 200
     assert b"Portfolio Dashboard" in res.data
     assert b"{{" not in res.data  # no leftover unrendered Jinja
+
+
+# --- growth screener -----------------------------------------------------
+
+
+def test_get_growth_empty_when_no_scan_yet(client):
+    res = client.get("/api/growth")
+    assert res.status_code == 200
+    assert res.get_json() == {"asof_date": None, "candidates": []}
+
+
+def test_run_growth_now_returns_and_persists_results(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        app_mod.growth_screener,
+        "find_growth_candidates",
+        lambda **kw: [
+            {
+                "ticker": "STRONG",
+                "name": "Strong Co",
+                "price": 100.0,
+                "target_mean": 170.0,
+                "target_upside_pct": 70.0,
+                "analyst_ratings": {"strongBuy": 9, "buy": 1},
+                "pct_from_52w_high": -16.7,
+                "pct_from_52w_low": 66.7,
+                "market_cap": 5e9,
+            }
+        ],
+    )
+    res = client.post("/api/growth/run")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["candidates"][0]["ticker"] == "STRONG"
+    assert data["asof_date"] == date.today().isoformat()
+
+    # Persisted -- a fresh GET reads it back from the db.
+    res2 = client.get("/api/growth")
+    data2 = res2.get_json()
+    assert data2["candidates"][0]["ticker"] == "STRONG"
+    assert data2["candidates"][0]["analyst_ratings"]["strongBuy"] == 9
+
+    # And a CSV landed in the configured exports dir under top_growth/.
+    growth_export_dir = tmp_path / "exports" / "top_growth"
+    assert growth_export_dir.exists()
+    assert len(list(growth_export_dir.glob("*.csv"))) == 1
+
+
+def test_run_growth_now_handles_screener_failure(client, monkeypatch):
+    def boom(**kw):
+        raise RuntimeError("yahoo screener down")
+
+    monkeypatch.setattr(app_mod.growth_screener, "find_growth_candidates", boom)
+    res = client.post("/api/growth/run")
+    assert res.status_code == 502
+    assert "error" in res.get_json()
+
+
+def test_run_movers_now_writes_csv_export(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(
+        app_mod.movers,
+        "run_movers_scan",
+        lambda conn, asof_date, provider, model, api_key=None, macro_score=None: [{"ticker": "ACME", "pct_change": -45.0}],
+    )
+    res = client.post("/api/movers/run", data=json.dumps({"provider": "anthropic"}), content_type="application/json")
+    assert res.status_code == 200
+
+    movers_export_dir = tmp_path / "exports" / "top_movers"
+    assert movers_export_dir.exists()
+    assert len(list(movers_export_dir.glob("*.csv"))) == 1
