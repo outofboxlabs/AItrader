@@ -14,6 +14,8 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
+from . import ai_client
+
 import yfinance as yf
 
 SYSTEM_PROMPT = """You are a financial news analyst embedded in a portfolio \
@@ -121,51 +123,28 @@ def analyze_headlines_with_claude(ticker: str, headlines: list[dict], api_key: O
     """Call the Claude API once and return a parsed analysis dict. Raises
     on failure (missing key, network, rate limit) -- the caller decides
     how to degrade rather than crashing the whole run over one name."""
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
-    response = client.messages.create(
-        model=model,
-        max_tokens=500,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": build_user_message(ticker, headlines)}],
+    text = ai_client.call_provider(
+        "anthropic", SYSTEM_PROMPT, build_user_message(ticker, headlines), model, api_key=api_key, max_tokens=500
     )
-    text = "".join(block.text for block in response.content if getattr(block, "type", None) == "text")
     return _parse_analysis_json(text)
 
 
 def analyze_headlines_with_openai(ticker: str, headlines: list[dict], api_key: Optional[str], model: str) -> dict:
     """Same contract as analyze_headlines_with_claude, via the OpenAI API.
     Raises on failure -- the caller decides how to degrade."""
-    import openai
-
-    client = openai.OpenAI(api_key=api_key) if api_key else openai.OpenAI()
-    response = client.chat.completions.create(
-        model=model,
-        max_completion_tokens=500,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": build_user_message(ticker, headlines)},
-        ],
-        response_format={"type": "json_object"},
+    text = ai_client.call_provider(
+        "openai", SYSTEM_PROMPT, build_user_message(ticker, headlines), model, api_key=api_key, max_tokens=500
     )
-    text = response.choices[0].message.content or ""
     return _parse_analysis_json(text)
 
 
 def analyze_headlines_with_gemini(ticker: str, headlines: list[dict], api_key: Optional[str], model: str) -> dict:
     """Same contract as analyze_headlines_with_claude, via Google's Gemini
-    API. UNVERIFIED: this session had no live Gemini reference to check
-    the SDK surface or model IDs against (unlike the Anthropic and OpenAI
-    paths, which were checked against a live source) -- if this errors,
-    confirm the `google-genai` usage and model string against Google's
-    current docs. Raises on failure -- the caller decides how to degrade."""
-    from google import genai
-
-    client = genai.Client(api_key=api_key) if api_key else genai.Client()
-    prompt = f"{SYSTEM_PROMPT}\n\n{build_user_message(ticker, headlines)}"
-    response = client.models.generate_content(model=model, contents=prompt)
-    text = response.text or ""
+    API. UNVERIFIED against a live doc source in this session -- see
+    ai_client.py's note on _call_gemini."""
+    text = ai_client.call_provider(
+        "gemini", SYSTEM_PROMPT, build_user_message(ticker, headlines), model, api_key=api_key
+    )
     return _parse_analysis_json(text)
 
 

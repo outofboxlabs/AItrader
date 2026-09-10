@@ -1,0 +1,837 @@
+#!/usr/bin/env python3
+"""Local dashboard for the portfolio monitor.
+
+A multi-tab local web app: run the portfolio analysis, review today's big
+market movers with an AI rebound read, edit positions.json (by hand or
+via screenshot), and manage which AI provider/API key is used.
+Everything runs on your own machine -- the only network calls are to
+yfinance and whichever AI provider you've configured.
+
+Usage:
+    python app.py
+Opens automatically at http://127.0.0.1:5050
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import threading
+import webbrowser
+from datetime import date, datetime
+from typing import Optional
+
+from flask import Flask, jsonify, render_template_string, request
+
+import config
+from portfolio_monitor import credentials, movers, news, pipeline, scheduler, vision
+from portfolio_monitor import db as db_mod
+from portfolio_monitor.models import Position
+
+app = Flask(__name__)
+
+PROVIDERS = ["anthropic", "openai", "gemini"]
+NEWS_DEFAULT_MODEL = {
+    "anthropic": config.ANTHROPIC_NEWS_MODEL,
+    "openai": config.OPENAI_NEWS_MODEL,
+    "gemini": config.GEMINI_NEWS_MODEL,
+}
+VISION_DEFAULT_MODEL = {
+    "anthropic": config.ANTHROPIC_VISION_MODEL,
+    "openai": config.OPENAI_VISION_MODEL,
+    "gemini": config.GEMINI_VISION_MODEL,
+}
+
+
+# --- Positions --------------------------------------------------------------
+
+
+def _load_positions_raw() -> list[dict]:
+    if not os.path.exists(config.POSITIONS_PATH):
+        return []
+    with open(config.POSITIONS_PATH) as f:
+        return json.load(f)
+
+
+def _save_positions_raw(positions: list[dict]) -> None:
+    # Validate every row through the real model before writing anything.
+    for row in positions:
+        Position.from_dict(row)
+
+    if os.path.exists(config.POSITIONS_PATH):
+        shutil.copy(config.POSITIONS_PATH, config.POSITIONS_PATH + ".bak")
+
+    with open(config.POSITIONS_PATH, "w") as f:
+        json.dump(positions, f, indent=2)
+
+
+@app.route("/")
+def index():
+    return render_template_string(PAGE_TEMPLATE, default_provider=config.NEWS_PROVIDER)
+
+
+@app.route("/api/positions", methods=["GET"])
+def get_positions():
+    return jsonify(_load_positions_raw())
+
+
+@app.route("/api/positions", methods=["POST"])
+def save_positions():
+    positions = request.get_json(force=True)
+    if not isinstance(positions, list):
+        return jsonify({"error": "expected a JSON array of positions"}), 400
+    try:
+        _save_positions_raw(positions)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"status": "ok", "count": len(positions)})
+
+
+@app.route("/api/parse-screenshot", methods=["POST"])
+def parse_screenshot():
+    file = request.files.get("image")
+    if file is None:
+        return jsonify({"error": "no image uploaded"}), 400
+
+    provider = request.form.get("provider", config.VISION_PROVIDER)
+    if provider not in VISION_DEFAULT_MODEL:
+        return jsonify({"error": f"unknown provider {provider!r}"}), 400
+    model = request.form.get("model") or VISION_DEFAULT_MODEL[provider]
+
+    api_key = credentials.resolve_api_key(provider, interactive=False)
+    if not api_key:
+        return jsonify({"error": f"No saved API key for {provider}. Add one in the Settings tab first."}), 400
+
+    image_bytes = file.read()
+    media_type = file.mimetype or "image/png"
+
+    try:
+        extracted = vision.extract_positions_from_image(image_bytes, media_type, provider, model, api_key=api_key)
+    except Exception as exc:
+        return jsonify({"error": f"{provider} extraction failed: {exc}"}), 502
+
+    return jsonify({"positions": extracted})
+
+
+# --- Portfolio analysis -------------------------------------------------
+
+
+@app.route("/api/run-analysis", methods=["POST"])
+def run_analysis():
+    body = request.get_json(silent=True) or {}
+    asof_str = body.get("asof")
+    asof_date = datetime.strptime(asof_str, "%Y-%m-%d").date() if asof_str else None
+    skip_macro = bool(body.get("skip_macro", False))
+    skip_news = bool(body.get("skip_news", False))
+    news_provider = body.get("news_provider", config.NEWS_PROVIDER)
+    news_model = body.get("news_model") or None
+
+    news_api_key = None
+    if not skip_news:
+        news_api_key = credentials.resolve_api_key(news_provider, interactive=False)
+        if not news_api_key:
+            skip_news = True  # degrade gracefully rather than failing the whole run
+
+    try:
+        result = pipeline.run_full_analysis(
+            positions_path=config.POSITIONS_PATH,
+            db_path=config.DB_PATH,
+            snapshots_dir=config.SNAPSHOTS_DIR,
+            asof_date=asof_date,
+            skip_macro=skip_macro,
+            skip_news=skip_news,
+            news_provider=news_provider,
+            news_model=news_model,
+            news_api_key=news_api_key,
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    return jsonify(result)
+
+
+# --- Top movers / rebound suggestions ---------------------------------------
+
+
+def _latest_macro_score() -> Optional[float]:
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        row = conn.execute("SELECT score FROM macro_gate ORDER BY asof_date DESC LIMIT 1").fetchone()
+    return row["score"] if row else None
+
+
+def _run_movers(provider: str, model: Optional[str], asof_date: Optional[date] = None) -> list[dict]:
+    asof_date = asof_date or date.today()
+    resolved_model = model or NEWS_DEFAULT_MODEL[provider]
+    api_key = credentials.resolve_api_key(provider, interactive=False)
+    macro_score = _latest_macro_score()
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        return movers.run_movers_scan(conn, asof_date, provider, resolved_model, api_key=api_key, macro_score=macro_score)
+
+
+@app.route("/api/movers", methods=["GET"])
+def get_movers():
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        latest_date = db_mod.get_latest_market_movers_date(conn)
+        if not latest_date:
+            return jsonify({"asof_date": None, "movers": []})
+        drops = db_mod.get_market_movers(conn, latest_date)
+        combined = []
+        for d in drops:
+            rebound = db_mod.get_rebound_analysis(conn, latest_date, d["ticker"]) or {}
+            combined.append({**d, "rebound": rebound})
+    return jsonify({"asof_date": latest_date, "movers": combined})
+
+
+@app.route("/api/movers/run", methods=["POST"])
+def run_movers_now():
+    body = request.get_json(silent=True) or {}
+    provider = body.get("provider", config.NEWS_PROVIDER)
+    model = body.get("model") or None
+
+    if provider not in PROVIDERS:
+        return jsonify({"error": f"unknown provider {provider!r}"}), 400
+
+    try:
+        results = _run_movers(provider, model)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    return jsonify({"asof_date": date.today().isoformat(), "movers": results})
+
+
+@app.route("/api/scheduler/status", methods=["GET"])
+def scheduler_status():
+    return jsonify({"running": scheduler.is_running(), "next_run": scheduler.get_next_run_time()})
+
+
+# --- Settings ----------------------------------------------------------
+
+
+@app.route("/api/settings/has-key", methods=["GET"])
+def has_key():
+    provider = request.args.get("provider", config.NEWS_PROVIDER)
+    key = credentials.resolve_api_key(provider, interactive=False)
+    return jsonify({"has_key": bool(key)})
+
+
+@app.route("/api/settings/api-key", methods=["POST"])
+def save_api_key():
+    body = request.get_json(force=True)
+    provider = body.get("provider")
+    api_key = body.get("api_key")
+    if provider not in PROVIDERS:
+        return jsonify({"error": "unknown provider"}), 400
+    if not api_key:
+        return jsonify({"error": "api_key required"}), 400
+    credentials.save_key(provider, api_key)
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/models", methods=["GET"])
+def get_models():
+    provider = request.args.get("provider", config.NEWS_PROVIDER)
+    if provider not in PROVIDERS:
+        return jsonify({"error": "unknown provider"}), 400
+    api_key = credentials.resolve_api_key(provider, interactive=False)
+    if not api_key:
+        return jsonify({"error": f"No saved API key for {provider}."}), 400
+    try:
+        model_ids = news.list_models(provider, api_key=api_key)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+    return jsonify({"models": model_ids})
+
+
+# --- Scheduled job -----------------------------------------------------
+
+
+def _scheduled_movers_job() -> None:
+    """Runs inside the background scheduler thread -- swallow errors so a
+    bad day (e.g. a network hiccup) doesn't kill the scheduler itself."""
+    try:
+        _run_movers(config.NEWS_PROVIDER, None)
+    except Exception as exc:
+        print(f"[scheduler] daily movers scan failed: {exc}")
+
+
+PAGE_TEMPLATE = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Portfolio Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #1a1e27; --border: #2a2f3a; --text: #e6e6e6; --muted: #9fb4c7;
+    --accent: #2d6cdf; --green: #4caf7d; --red: #d9615b; --amber: #d9a63a;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", Arial, sans-serif; margin: 0; background: var(--bg); color: var(--text); }
+  header { padding: 1rem 1.5rem 0; }
+  h1 { font-size: 1.3rem; margin: 0 0 0.75rem; }
+  nav { display: flex; gap: 4px; border-bottom: 1px solid var(--border); padding: 0 1.5rem; }
+  nav button {
+    background: none; border: none; color: var(--muted); padding: 10px 16px; font-size: 0.92rem;
+    cursor: pointer; border-bottom: 2px solid transparent;
+  }
+  nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+  main { padding: 1.25rem 1.5rem 3rem; max-width: 1100px; margin: 0 auto; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 1.1rem; }
+  label { font-size: 0.8rem; color: var(--muted); }
+  input, select { background: var(--card); color: var(--text); border: 1px solid var(--border); padding: 6px 8px; border-radius: 4px; font-size: 0.85rem; }
+  button.action { background: var(--accent); color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 0.88rem; }
+  button.action:disabled { opacity: 0.6; cursor: default; }
+  button.secondary { background: var(--card); color: var(--text); border: 1px solid var(--border); padding: 8px 14px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
+  button.danger { background: #4a2323; color: #f0b0ac; border: none; padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 0.78rem; }
+  .cards-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 1.25rem; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; min-width: 150px; flex: 1; }
+  .card .label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+  .card .value { font-size: 1.35rem; margin-top: 4px; font-weight: 600; }
+  .value.pos { color: var(--green); } .value.neg { color: var(--red); }
+  section.block { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 1.1rem; }
+  section.block h3 { margin: 0 0 10px; font-size: 0.95rem; color: var(--muted); font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.83rem; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  .bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 0.82rem; }
+  .bar-label { width: 90px; flex-shrink: 0; color: var(--muted); }
+  .bar-track { flex: 1; background: #11141b; border-radius: 3px; height: 14px; overflow: hidden; }
+  .bar-fill { height: 100%; background: var(--accent); }
+  .bar-fill.flagged { background: var(--amber); }
+  .bar-pct { width: 48px; text-align: right; flex-shrink: 0; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.72rem; font-weight: 600; }
+  .badge.bullish, .badge.positive { background: #1f3a2c; color: var(--green); }
+  .badge.bearish, .badge.negative { background: #3a2323; color: var(--red); }
+  .badge.neutral, .badge.no.data { background: #2a2f3a; color: var(--muted); }
+  .news-card, .mover-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+  .news-card .ticker, .mover-card .ticker { font-weight: 600; margin-right: 8px; }
+  .mover-card .drop-pct { color: var(--red); font-weight: 600; }
+  .mover-card .rebound { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 0.85rem; }
+  .mover-card .rebound h4 { margin: 8px 0 3px; font-size: 0.78rem; color: var(--muted); text-transform: uppercase; }
+  .disclaimer { font-style: italic; color: var(--muted); font-size: 0.75rem; margin-top: 8px; }
+  #status { margin: 10px 0; padding: 8px 12px; border-radius: 4px; display: none; font-size: 0.85rem; }
+  #status.ok { background: #1f3a24; color: #8fe0a0; display: block; }
+  #status.err { background: #3a1f1f; color: #e08f8f; display: block; }
+  .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; margin-right: 6px; vertical-align: -2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .muted { color: var(--muted); }
+  .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+  .key-row { display: flex; gap: 6px; margin-top: 8px; }
+  .source-tag { font-size: 0.7rem; color: var(--muted); }
+  .col-actions { width: 36px; }
+</style>
+</head>
+<body>
+
+<header><h1>Portfolio Dashboard</h1></header>
+<nav>
+  <button class="tab-btn active" data-tab="portfolio">Portfolio</button>
+  <button class="tab-btn" data-tab="movers">Top Movers</button>
+  <button class="tab-btn" data-tab="positions">Positions</button>
+  <button class="tab-btn" data-tab="settings">Settings</button>
+  <button class="tab-btn" data-tab="more">More</button>
+</nav>
+
+<main>
+
+  <!-- ===================== PORTFOLIO TAB ===================== -->
+  <div class="tab-panel active" id="tab-portfolio">
+    <div class="controls">
+      <div><label>As of</label><br><input type="date" id="p-asof"></div>
+      <div><label>News provider</label><br>
+        <select id="p-provider">
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="openai">OpenAI (GPT)</option>
+          <option value="gemini">Google (Gemini)</option>
+        </select>
+      </div>
+      <div><label><input type="checkbox" id="p-skip-macro"> Skip macro gate</label></div>
+      <div><label><input type="checkbox" id="p-skip-news"> Skip news</label></div>
+      <button class="action" id="p-run-btn" onclick="runPortfolioAnalysis()">Run Analysis</button>
+    </div>
+    <div id="p-status"></div>
+    <div id="p-results" style="display:none">
+      <div class="cards-row">
+        <div class="card"><div class="label">Total Value</div><div class="value" id="p-total-value">--</div></div>
+        <div class="card"><div class="label">Net Delta</div><div class="value" id="p-net-delta">--</div></div>
+        <div class="card"><div class="label">Daily Theta ($)</div><div class="value" id="p-theta">--</div></div>
+        <div class="card"><div class="label">Macro Gate</div><div class="value" id="p-macro-score">--</div></div>
+      </div>
+
+      <section class="block">
+        <h3>Positions</h3>
+        <table><thead><tr><th>Position</th><th>Mark</th><th>Value</th><th>P&amp;L</th><th>DTE</th></tr></thead>
+        <tbody id="p-positions-body"></tbody></table>
+      </section>
+
+      <section class="block">
+        <h3>Allocation by Ticker</h3>
+        <div id="p-alloc-ticker"></div>
+      </section>
+      <section class="block">
+        <h3>Allocation by Sector</h3>
+        <div id="p-alloc-sector"></div>
+      </section>
+
+      <section class="block">
+        <h3>IV Environment</h3>
+        <table><thead><tr><th>Position</th><th>IV</th><th>Rank</th><th>Status</th></tr></thead>
+        <tbody id="p-iv-body"></tbody></table>
+      </section>
+
+      <section class="block">
+        <h3>Upcoming Expiries</h3>
+        <div id="p-expiries"></div>
+      </section>
+
+      <section class="block" id="p-macro-block" style="display:none">
+        <h3>Macro Gate Detail</h3>
+        <div id="p-macro-detail"></div>
+      </section>
+
+      <section class="block" id="p-news-block" style="display:none">
+        <h3>News</h3>
+        <div id="p-news-cards"></div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ===================== TOP MOVERS TAB ===================== -->
+  <div class="tab-panel" id="tab-movers">
+    <div class="controls">
+      <div><label>Provider</label><br>
+        <select id="m-provider">
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="openai">OpenAI (GPT)</option>
+          <option value="gemini">Google (Gemini)</option>
+        </select>
+      </div>
+      <button class="action" id="m-run-btn" onclick="runMoversNow()">Run Now</button>
+      <span class="muted" id="m-scheduler-status">Scheduler status: loading...</span>
+    </div>
+    <div id="m-status"></div>
+    <div id="m-as-of" class="muted" style="margin-bottom:8px;"></div>
+    <div id="m-cards"></div>
+  </div>
+
+  <!-- ===================== POSITIONS TAB ===================== -->
+  <div class="tab-panel" id="tab-positions">
+    <h2 style="font-size:1rem;">Upload a screenshot</h2>
+    <div class="controls">
+      <select id="v-provider">
+        <option value="anthropic">Anthropic (Claude)</option>
+        <option value="openai">OpenAI (GPT)</option>
+        <option value="gemini">Google (Gemini)</option>
+      </select>
+      <input type="file" id="imageInput" accept="image/*" multiple>
+      <button class="action" onclick="parseScreenshots()">Parse screenshot(s)</button>
+    </div>
+    <div id="v-status"></div>
+
+    <h2 style="font-size:1rem;">Positions</h2>
+    <table id="positionsTable">
+      <thead>
+        <tr>
+          <th>Type</th><th>Ticker</th><th>Opt Type</th><th>Strike</th><th>Expiry</th>
+          <th>Entry Price</th><th>Contracts/Shares</th><th>Entry Date</th>
+          <th>Target</th><th>Stop</th><th class="col-actions"></th>
+        </tr>
+      </thead>
+      <tbody id="positionsBody"></tbody>
+    </table>
+    <div class="controls" style="margin-top: 1rem;">
+      <button class="secondary" onclick="addRow()">+ Add row</button>
+      <button class="action" onclick="savePositions()">Save positions.json</button>
+    </div>
+  </div>
+
+  <!-- ===================== SETTINGS TAB ===================== -->
+  <div class="tab-panel" id="tab-settings">
+    <h2 style="font-size:1rem;">AI provider API keys</h2>
+    <p class="muted">Saved locally to .credentials.json on this machine -- never committed to git, never sent anywhere but the provider you choose.</p>
+    <div class="settings-grid" id="settings-keys"></div>
+
+    <h2 style="font-size:1rem; margin-top: 1.5rem;">Daily Top Movers scheduler</h2>
+    <p class="muted" id="settings-scheduler-info">loading...</p>
+  </div>
+
+  <!-- ===================== MORE TAB (placeholder) ===================== -->
+  <div class="tab-panel" id="tab-more">
+    <p class="muted">More sections coming soon.</p>
+  </div>
+
+</main>
+
+<script>
+// ---------- Tab switching ----------
+document.querySelectorAll(".tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+    btn.classList.add("active");
+    document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
+  });
+});
+
+function showStatus(elId, message, ok) {
+  const el = document.getElementById(elId);
+  el.textContent = message;
+  el.className = ok ? "ok" : "err";
+}
+
+function fmtMoney(n) {
+  if (n === null || n === undefined) return "--";
+  return "$" + Number(n).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+function fmtNum(n, digits) {
+  if (n === null || n === undefined) return "--";
+  return Number(n).toFixed(digits === undefined ? 1 : digits);
+}
+
+// ---------- PORTFOLIO TAB ----------
+document.getElementById("p-asof").valueAsDate = new Date();
+document.getElementById("p-provider").value = "{{ default_provider }}";
+
+async function runPortfolioAnalysis() {
+  const btn = document.getElementById("p-run-btn");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Running...';
+  document.getElementById("p-status").style.display = "none";
+
+  const body = {
+    asof: document.getElementById("p-asof").value,
+    news_provider: document.getElementById("p-provider").value,
+    skip_macro: document.getElementById("p-skip-macro").checked,
+    skip_news: document.getElementById("p-skip-news").checked,
+  };
+
+  try {
+    const res = await fetch("/api/run-analysis", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
+    const data = await res.json();
+    if (!res.ok) { showStatus("p-status", "Error: " + data.error, false); return; }
+    renderPortfolioResults(data);
+    document.getElementById("p-results").style.display = "block";
+  } catch (err) {
+    showStatus("p-status", "Error: " + err, false);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Run Analysis";
+  }
+}
+
+function renderPortfolioResults(data) {
+  document.getElementById("p-total-value").textContent = fmtMoney(data.allocation.total_value);
+  document.getElementById("p-net-delta").textContent = fmtNum(data.aggregate_greeks.net_delta_shares, 1);
+  const theta = data.aggregate_greeks.total_daily_theta;
+  const thetaEl = document.getElementById("p-theta");
+  thetaEl.textContent = fmtMoney(theta);
+  thetaEl.className = "value " + (theta < 0 ? "neg" : "pos");
+
+  const macroEl = document.getElementById("p-macro-score");
+  if (data.macro) {
+    macroEl.textContent = fmtNum(data.macro.score, 1) + "/100";
+    document.getElementById("p-macro-block").style.display = "block";
+    renderMacroDetail(data.macro);
+  } else {
+    macroEl.textContent = "skipped";
+    document.getElementById("p-macro-block").style.display = "none";
+  }
+
+  const posBody = document.getElementById("p-positions-body");
+  posBody.innerHTML = "";
+  data.valuations.forEach(v => {
+    const pnlClass = v.unrealized_pnl >= 0 ? "pos" : "neg";
+    posBody.innerHTML += `<tr>
+      <td>${v.position_id}</td><td>${fmtMoney(v.mark)}</td><td>${fmtMoney(v.current_value)}</td>
+      <td class="${pnlClass}">${fmtMoney(v.unrealized_pnl)} (${v.unrealized_pnl_pct !== null ? fmtNum(v.unrealized_pnl_pct) + "%" : "n/a"})</td>
+      <td>${v.dte !== null ? v.dte : "n/a"}</td>
+    </tr>`;
+  });
+
+  renderAllocationBars("p-alloc-ticker", data.allocation.by_ticker);
+  renderAllocationBars("p-alloc-sector", data.allocation.by_sector);
+
+  const ivBody = document.getElementById("p-iv-body");
+  ivBody.innerHTML = "";
+  data.iv_environment.forEach(r => {
+    const status = r.status === "building history"
+      ? `building history (${r.history_days}/20)`
+      : `rank ${fmtNum(r.iv_rank, 0)} ${r.rich ? "RICH" : (r.cheap ? "CHEAP" : "")}`;
+    ivBody.innerHTML += `<tr><td>${r.position_id}</td><td>${fmtNum(r.current_iv, 3)}</td><td>${r.iv_rank !== null ? fmtNum(r.iv_rank, 0) : "--"}</td><td>${status}</td></tr>`;
+  });
+
+  const expiriesEl = document.getElementById("p-expiries");
+  const flagged = data.upcoming_expiries.filter(e => e.within_threshold);
+  expiriesEl.innerHTML = flagged.length === 0
+    ? '<span class="muted">none within the warning window</span>'
+    : flagged.map(e => `<div>${e.position_id} -- expires ${e.expiry} (${e.dte}d)</div>`).join("");
+
+  const newsBlock = document.getElementById("p-news-block");
+  const newsCards = document.getElementById("p-news-cards");
+  if (data.news && data.news.length > 0) {
+    newsBlock.style.display = "block";
+    newsCards.innerHTML = data.news.map(n => {
+      if (n.status !== "ok") {
+        return `<div class="news-card"><span class="ticker">${n.ticker}</span><span class="muted">skipped (${n.status})</span></div>`;
+      }
+      const flag = n.position_flag ? ' <span class="badge negative">AFFECTS POSITION</span>' : "";
+      return `<div class="news-card">
+        <span class="ticker">${n.ticker}</span><span class="badge ${n.sentiment}">${n.sentiment}</span>${flag}
+        <div style="margin-top:6px;">${n.summary || ""}</div>
+        ${n.position_flag && n.position_flag_reason ? `<div class="muted" style="margin-top:4px;">why: ${n.position_flag_reason}</div>` : ""}
+      </div>`;
+    }).join("");
+  } else {
+    newsBlock.style.display = "none";
+  }
+}
+
+function renderMacroDetail(macro) {
+  const el = document.getElementById("p-macro-detail");
+  const ratio = macro.term_structure.ratio !== null ? fmtNum(macro.term_structure.ratio, 3) : "n/a";
+  el.innerHTML = `
+    <div>VIX level: vix=${fmtNum(macro.vix_level.vix,1)} percentile=${fmtNum(macro.vix_level.vix_percentile,0)} score=${fmtNum(macro.vix_level.score,1)}</div>
+    <div>Term structure: vix3m=${fmtNum(macro.term_structure.vix3m,1)} ratio=${ratio} score=${fmtNum(macro.term_structure.score,1)}</div>
+    <div>Breadth: ${fmtNum(macro.breadth.pct_above_200dma,0)}% above 200dma (${macro.breadth.constituents} names) score=${fmtNum(macro.breadth.score,1)}</div>
+    <div>Credit spread: HYG/TLT=${fmtNum(macro.credit_spread.credit_ratio,4)} percentile=${fmtNum(macro.credit_spread.credit_percentile,0)} score=${fmtNum(macro.credit_spread.score,1)}</div>
+  `;
+}
+
+function renderAllocationBars(elId, rows) {
+  const el = document.getElementById(elId);
+  el.innerHTML = rows.map(r => `
+    <div class="bar-row">
+      <div class="bar-label">${r.name}</div>
+      <div class="bar-track"><div class="bar-fill ${r.flagged ? 'flagged' : ''}" style="width:${Math.min(r.pct_of_total, 100)}%"></div></div>
+      <div class="bar-pct">${fmtNum(r.pct_of_total, 1)}%</div>
+    </div>
+  `).join("");
+}
+
+// ---------- TOP MOVERS TAB ----------
+async function loadMovers() {
+  const res = await fetch("/api/movers");
+  const data = await res.json();
+  renderMovers(data);
+}
+
+async function runMoversNow() {
+  const btn = document.getElementById("m-run-btn");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Scanning...';
+  document.getElementById("m-status").style.display = "none";
+  try {
+    const res = await fetch("/api/movers/run", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ provider: document.getElementById("m-provider").value }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showStatus("m-status", "Error: " + data.error, false); return; }
+    renderMovers(data);
+    showStatus("m-status", `Found ${data.movers.length} stock(s) down more than the threshold today.`, true);
+  } catch (err) {
+    showStatus("m-status", "Error: " + err, false);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Run Now";
+  }
+}
+
+function renderMovers(data) {
+  document.getElementById("m-as-of").textContent = data.asof_date ? `As of ${data.asof_date}` : "No scan has run yet.";
+  const container = document.getElementById("m-cards");
+  if (!data.movers || data.movers.length === 0) {
+    container.innerHTML = '<p class="muted">No stocks matched the drop threshold. Click "Run Now" to scan today\\'s market.</p>';
+    return;
+  }
+  container.innerHTML = data.movers.map(m => {
+    const r = m.rebound || {};
+    const sentimentClass = (r.analyst_sentiment || "no data").replace(" ", "-");
+    const riskList = (r.risk_factors || []).map(rf => `<li>${rf}</li>`).join("");
+    return `<div class="mover-card">
+      <span class="ticker">${m.ticker}</span> ${m.name ? `<span class="muted">${m.name}</span>` : ""}
+      <span class="drop-pct">${fmtNum(m.pct_change, 1)}%</span> to ${fmtMoney(m.price)}
+      ${r.status && r.status !== "ok" ? `<div class="muted">AI analysis skipped (${r.status})</div>` : `
+      <div class="rebound">
+        <span class="badge ${sentimentClass}">${r.analyst_sentiment || "no data"}</span>
+        <h4>What happened</h4><div>${r.cause_summary || "n/a"}</div>
+        <h4>Rebound case</h4><div>${r.rebound_case || "n/a"}</div>
+        ${riskList ? `<h4>Risk factors</h4><ul>${riskList}</ul>` : ""}
+        <h4>Macro context</h4><div>${r.macro_context || "n/a"}</div>
+        <div class="disclaimer">${r.disclaimer || "This is not investment advice."}</div>
+      </div>`}
+    </div>`;
+  }).join("");
+}
+
+async function loadSchedulerStatus() {
+  const res = await fetch("/api/scheduler/status");
+  const data = await res.json();
+  const text = data.running
+    ? (data.next_run ? `Scheduler running -- next scan: ${new Date(data.next_run).toLocaleString()}` : "Scheduler running")
+    : "Scheduler not running (start via python app.py)";
+  document.getElementById("m-scheduler-status").textContent = text;
+  document.getElementById("settings-scheduler-info").textContent =
+    text + ". Fires automatically at 3:30pm US/Eastern on weekdays while this app is running; use \\'Run Now\\' on the Top Movers tab any other time.";
+}
+
+// ---------- POSITIONS TAB ----------
+let rows = [];
+
+function emptyRow(source) {
+  return {
+    asset_type: "shares", ticker: "", option_type: "", strike: "", expiry: "",
+    entry_price: "", contracts: "", entry_date: "", target_price: "", stop_price: "",
+    _source: source || "manual",
+  };
+}
+
+function renderPositionsTable() {
+  const body = document.getElementById("positionsBody");
+  body.innerHTML = "";
+  rows.forEach((row, i) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><select onchange="updateField(${i}, 'asset_type', this.value)">
+            <option value="shares" ${row.asset_type === "shares" ? "selected" : ""}>shares</option>
+            <option value="option" ${row.asset_type === "option" ? "selected" : ""}>option</option>
+          </select></td>
+      <td><input value="${row.ticker ?? ""}" onchange="updateField(${i}, 'ticker', this.value)"></td>
+      <td><select onchange="updateField(${i}, 'option_type', this.value)">
+            <option value="" ${!row.option_type ? "selected" : ""}></option>
+            <option value="call" ${row.option_type === "call" ? "selected" : ""}>call</option>
+            <option value="put" ${row.option_type === "put" ? "selected" : ""}>put</option>
+          </select></td>
+      <td><input value="${row.strike ?? ""}" onchange="updateField(${i}, 'strike', this.value)"></td>
+      <td><input value="${row.expiry ?? ""}" placeholder="YYYY-MM-DD" onchange="updateField(${i}, 'expiry', this.value)"></td>
+      <td><input value="${row.entry_price ?? ""}" onchange="updateField(${i}, 'entry_price', this.value)"></td>
+      <td><input value="${row.contracts ?? ""}" onchange="updateField(${i}, 'contracts', this.value)"></td>
+      <td><input value="${row.entry_date ?? ""}" placeholder="YYYY-MM-DD" onchange="updateField(${i}, 'entry_date', this.value)"></td>
+      <td><input value="${row.target_price ?? ""}" onchange="updateField(${i}, 'target_price', this.value)"></td>
+      <td><input value="${row.stop_price ?? ""}" onchange="updateField(${i}, 'stop_price', this.value)"></td>
+      <td class="col-actions"><button class="danger" onclick="deleteRow(${i})">x</button></td>
+    `;
+    body.appendChild(tr);
+    if (row._source && row._source !== "manual") {
+      const tag = document.createElement("tr");
+      tag.innerHTML = `<td colspan="11" class="source-tag">from screenshot -- please verify every field above</td>`;
+      body.appendChild(tag);
+    }
+  });
+}
+
+function updateField(i, field, value) { rows[i][field] = value; }
+function addRow() { rows.push(emptyRow("manual")); renderPositionsTable(); }
+function deleteRow(i) { rows.splice(i, 1); renderPositionsTable(); }
+
+async function loadPositions() {
+  const res = await fetch("/api/positions");
+  const data = await res.json();
+  rows = data.map(r => ({ ...emptyRow("manual"), ...r, _source: "manual" }));
+  renderPositionsTable();
+}
+
+function toNumberOrNull(v) {
+  if (v === "" || v === null || v === undefined) return null;
+  const n = Number(v);
+  return Number.isNaN(n) ? null : n;
+}
+
+async function savePositions() {
+  const payload = rows.map(r => {
+    const row = {
+      asset_type: r.asset_type, ticker: r.ticker,
+      entry_price: toNumberOrNull(r.entry_price), contracts: toNumberOrNull(r.contracts),
+      entry_date: r.entry_date || null, target_price: toNumberOrNull(r.target_price), stop_price: toNumberOrNull(r.stop_price),
+    };
+    if (r.asset_type === "option") { row.option_type = r.option_type; row.strike = toNumberOrNull(r.strike); row.expiry = r.expiry; }
+    return row;
+  });
+  const res = await fetch("/api/positions", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload) });
+  const data = await res.json();
+  if (res.ok) showStatus("v-status", `Saved ${data.count} position(s) to positions.json.`, true);
+  else showStatus("v-status", `Error: ${data.error}`, false);
+}
+
+async function parseScreenshots() {
+  const provider = document.getElementById("v-provider").value;
+  const files = document.getElementById("imageInput").files;
+  if (files.length === 0) { showStatus("v-status", "Choose at least one screenshot first.", false); return; }
+  showStatus("v-status", `Parsing ${files.length} screenshot(s) with ${provider}...`, true);
+  for (const file of files) {
+    const form = new FormData();
+    form.append("image", file);
+    form.append("provider", provider);
+    try {
+      const res = await fetch("/api/parse-screenshot", { method: "POST", body: form });
+      const data = await res.json();
+      if (!res.ok) { showStatus("v-status", `Error parsing ${file.name}: ${data.error}`, false); return; }
+      data.positions.forEach(p => rows.push({ ...emptyRow("screenshot"), ...p, _source: "screenshot" }));
+    } catch (err) { showStatus("v-status", `Error parsing ${file.name}: ${err}`, false); return; }
+  }
+  renderPositionsTable();
+  showStatus("v-status", "Screenshot(s) parsed -- review the highlighted rows below, then Save.", true);
+}
+
+// ---------- SETTINGS TAB ----------
+const PROVIDER_LABELS = { anthropic: "Anthropic (Claude)", openai: "OpenAI (GPT)", gemini: "Google (Gemini)" };
+
+async function loadSettings() {
+  const container = document.getElementById("settings-keys");
+  container.innerHTML = Object.keys(PROVIDER_LABELS).map(p => `
+    <div class="card">
+      <div class="label">${PROVIDER_LABELS[p]}</div>
+      <div id="key-status-${p}" class="muted" style="margin: 6px 0;">checking...</div>
+      <div class="key-row">
+        <input type="password" id="key-input-${p}" placeholder="Paste API key">
+        <button class="secondary" onclick="saveKey('${p}')">Save</button>
+      </div>
+    </div>
+  `).join("");
+
+  for (const p of Object.keys(PROVIDER_LABELS)) {
+    const res = await fetch("/api/settings/has-key?provider=" + p);
+    const data = await res.json();
+    document.getElementById(`key-status-${p}`).textContent = data.has_key ? "Key saved" : "No key saved";
+  }
+}
+
+async function saveKey(provider) {
+  const input = document.getElementById(`key-input-${provider}`);
+  const apiKey = input.value.trim();
+  if (!apiKey) return;
+  const res = await fetch("/api/settings/api-key", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ provider, api_key: apiKey }),
+  });
+  const data = await res.json();
+  if (res.ok) {
+    document.getElementById(`key-status-${provider}`).textContent = "Key saved";
+    input.value = "";
+  } else {
+    document.getElementById(`key-status-${provider}`).textContent = "Error: " + data.error;
+  }
+}
+
+// ---------- init ----------
+loadPositions();
+loadMovers();
+loadSchedulerStatus();
+loadSettings();
+</script>
+</body>
+</html>
+"""
+
+
+if __name__ == "__main__":
+    scheduler.start_scheduler(_scheduled_movers_job)
+    url = "http://127.0.0.1:5050"
+    threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    print(f"Portfolio dashboard running at {url}")
+    app.run(host="127.0.0.1", port=5050, debug=False, use_reloader=False)

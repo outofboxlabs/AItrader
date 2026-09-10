@@ -12,12 +12,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 
 import config
-from portfolio_monitor import analytics, credentials, data, db, macro, news, snapshots
-from portfolio_monitor.models import load_positions
-from portfolio_monitor.valuation import to_db_row, value_option_position, value_shares_position
+from portfolio_monitor import credentials, news, pipeline
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -149,175 +147,72 @@ def prompt_for_model(provider: str, api_key: str | None) -> str | None:
 
 def run(args: argparse.Namespace) -> None:
     asof_date = datetime.strptime(args.asof, "%Y-%m-%d").date() if args.asof else date.today()
-    pulled_at = datetime.now(timezone.utc).isoformat()
 
-    positions = load_positions(args.positions)
-    db.init_db(args.db)
+    news_api_key = None
+    if not args.skip_news:
+        if args.interactive:
+            args.news_provider = prompt_for_provider(args.news_provider)
 
-    tickers = sorted({p.ticker for p in positions})
-    option_tickers = sorted({p.ticker for p in positions if p.is_option})
-    spots: dict[str, float] = {}
-    chains: dict[str, dict] = {}
+        cli_key = {
+            "anthropic": args.anthropic_api_key,
+            "openai": args.openai_api_key,
+            "gemini": args.gemini_api_key,
+        }[args.news_provider]
+        news_api_key = credentials.resolve_api_key(args.news_provider, cli_value=cli_key, interactive=args.interactive)
 
-    with db.connect(args.db) as conn:
-        for ticker in tickers:
-            spots[ticker] = data.get_spot_price(ticker)
+        if args.interactive or args.choose_model:
+            chosen_model = prompt_for_model(args.news_provider, news_api_key)
+            if chosen_model:
+                args.news_model = chosen_model
 
-        for ticker in option_tickers:
-            prior_dates = db.get_prior_snapshot_dates(conn, ticker, asof_date.isoformat())
-            prior_keys = db.get_snapshot_keys(conn, ticker, prior_dates[0]) if prior_dates else set()
+    result = pipeline.run_full_analysis(
+        positions_path=args.positions,
+        db_path=args.db,
+        snapshots_dir=args.snapshots_dir,
+        asof_date=asof_date,
+        risk_free_rate=args.risk_free_rate,
+        ticker_cap_pct=args.ticker_cap_pct,
+        sector_cap_pct=args.sector_cap_pct,
+        iv_lookback_days=args.iv_lookback_days,
+        iv_min_history_days=args.iv_min_history_days,
+        iv_rich_threshold=args.iv_rich_threshold,
+        iv_cheap_threshold=args.iv_cheap_threshold,
+        expiry_warning_days=args.expiry_warning_days,
+        skip_macro=args.skip_macro,
+        macro_lookback_days=args.macro_lookback_days,
+        vix_term_calm_ratio=args.vix_term_calm_ratio,
+        vix_term_stress_ratio=args.vix_term_stress_ratio,
+        skip_news=args.skip_news,
+        news_window_days=args.news_window_days,
+        news_provider=args.news_provider,
+        news_model=args.news_model,
+        news_api_key=news_api_key,
+    )
 
-            chain = data.pull_full_chain(ticker)
-            chains[ticker] = chain
-            snapshots.save_snapshot_json(args.snapshots_dir, ticker, asof_date, chain)
-            db.save_chain_snapshot_rows(conn, ticker, asof_date.isoformat(), pulled_at, chain)
+    for d in result["diffs"]:
+        if d["new_expiries"]:
+            print(f"[{d['ticker']}] new expiries since last run: {d['new_expiries']}")
+        if d["new_strikes"]:
+            print(f"[{d['ticker']}] {d['new_strikes']} new strike(s) since last run")
+    for w in result["warnings"]:
+        print(f"WARNING: {w}")
 
-            if prior_keys:
-                current_keys = db.get_snapshot_keys(conn, ticker, asof_date.isoformat())
-                diff = snapshots.diff_new_strikes_and_expiries(prior_keys, current_keys)
-                if diff["new_expiries"]:
-                    print(f"[{ticker}] new expiries since last run: {diff['new_expiries']}")
-                if diff["new_strikes"]:
-                    print(f"[{ticker}] {len(diff['new_strikes'])} new strike(s) since last run")
-
-        valuations = []
-        for position in positions:
-            if position.is_option:
-                quote = data.find_quote(
-                    chains[position.ticker], position.expiry.isoformat(), position.option_type, position.strike
-                )
-                if quote is None:
-                    print(f"WARNING: no live quote found for {position.id}, skipping")
-                    continue
-                valuation = value_option_position(
-                    position, spots[position.ticker], quote, asof_date, args.risk_free_rate
-                )
-            else:
-                valuation = value_shares_position(position, spots[position.ticker])
-            valuations.append(valuation)
-
-        db.save_valuations(conn, [to_db_row(v, asof_date) for v in valuations])
-        print_valuation_table(valuations)
-
-        allocation = analytics.compute_allocation(
-            valuations, config.TICKER_SECTOR_MAP, args.ticker_cap_pct, args.sector_cap_pct
-        )
-        aggregate_greeks = analytics.compute_aggregate_greeks(valuations)
-        iv_environment = analytics.compute_iv_environment(
-            conn,
-            valuations,
-            asof_date,
-            args.iv_lookback_days,
-            args.iv_min_history_days,
-            args.iv_rich_threshold,
-            args.iv_cheap_threshold,
-        )
-        upcoming_expiries = analytics.compute_upcoming_expiries(valuations, args.expiry_warning_days)
-
-        db.save_allocation(
-            conn,
-            [
-                (asof_date.isoformat(), r["level"], r["name"], r["value"], r["pct_of_total"], int(r["flagged"]), r["cap_pct"])
-                for r in allocation["by_ticker"] + allocation["by_sector"]
-            ],
-        )
-        db.save_portfolio_greeks(
-            conn,
-            asof_date.isoformat(),
-            aggregate_greeks["net_delta_shares"],
-            aggregate_greeks["total_daily_theta"],
-            aggregate_greeks["net_vega"],
-        )
-        db.save_iv_environment(
-            conn,
-            [
-                (
-                    asof_date.isoformat(),
-                    r["position_id"],
-                    r["ticker"],
-                    r["current_iv"],
-                    r["iv_rank"],
-                    r["iv_percentile"],
-                    r["history_days"],
-                    r["status"],
-                    int(r["rich"]),
-                    int(r["cheap"]),
-                )
-                for r in iv_environment
-            ],
-        )
-        db.save_upcoming_expiries(
-            conn,
-            [
-                (asof_date.isoformat(), r["position_id"], r["ticker"], r["expiry"], r["dte"], int(r["within_threshold"]))
-                for r in upcoming_expiries
-            ],
-        )
-
-        macro_result = None
-        if not args.skip_macro:
-            breadth_tickers = config.SPY_CONSTITUENTS or config.BREADTH_PROXY_TICKERS
-            macro_result = macro.compute_macro_gate(
-                weights=config.MACRO_WEIGHTS,
-                lookback_days=args.macro_lookback_days,
-                calm_ratio=args.vix_term_calm_ratio,
-                stress_ratio=args.vix_term_stress_ratio,
-                breadth_tickers=breadth_tickers,
-            )
-            db.save_macro_gate(conn, asof_date.isoformat(), macro_result)
-
-        news_results = []
-        if not args.skip_news:
-            if args.interactive:
-                args.news_provider = prompt_for_provider(args.news_provider)
-
-            cli_key = {
-                "anthropic": args.anthropic_api_key,
-                "openai": args.openai_api_key,
-                "gemini": args.gemini_api_key,
-            }[args.news_provider]
-            api_key = credentials.resolve_api_key(args.news_provider, cli_value=cli_key, interactive=args.interactive)
-
-            default_model = {
-                "anthropic": config.ANTHROPIC_NEWS_MODEL,
-                "openai": config.OPENAI_NEWS_MODEL,
-                "gemini": config.GEMINI_NEWS_MODEL,
-            }[args.news_provider]
-
-            if args.interactive or args.choose_model:
-                chosen_model = prompt_for_model(args.news_provider, api_key)
-                if chosen_model:
-                    args.news_model = chosen_model
-
-            news_model = args.news_model or default_model
-            for ticker in tickers:
-                news_results.append(
-                    news.get_or_analyze_news(
-                        conn,
-                        ticker,
-                        asof_date,
-                        args.news_window_days,
-                        news_model,
-                        provider=args.news_provider,
-                        api_key=api_key,
-                    )
-                )
-
-    print_analytics_summary(allocation, aggregate_greeks, iv_environment, upcoming_expiries, args)
-    if macro_result is not None:
-        print_macro_summary(macro_result)
-    if news_results:
-        print_news_summary(news_results)
+    print_valuation_table(result["valuations"])
+    print_analytics_summary(result["allocation"], result["aggregate_greeks"], result["iv_environment"], result["upcoming_expiries"], args)
+    if result["macro"] is not None:
+        print_macro_summary(result["macro"])
+    if result["news"]:
+        print_news_summary(result["news"])
 
 
-def print_valuation_table(valuations) -> None:
+def print_valuation_table(valuations: list[dict]) -> None:
     print(f"\n=== Positions ({len(valuations)}) ===")
     for v in valuations:
-        pnl_pct = f"{v.unrealized_pnl_pct:.1f}%" if v.unrealized_pnl_pct is not None else "n/a"
-        dte = v.dte if v.dte is not None else "n/a"
+        pnl_pct = f"{v['unrealized_pnl_pct']:.1f}%" if v["unrealized_pnl_pct"] is not None else "n/a"
+        dte = v["dte"] if v["dte"] is not None else "n/a"
         print(
-            f"{v.position.id:28s} mark={v.mark:8.2f} value={v.current_value:10.2f} "
-            f"pnl={v.unrealized_pnl:9.2f} ({pnl_pct}) dte={dte}"
+            f"{v['position_id']:28s} mark={v['mark']:8.2f} value={v['current_value']:10.2f} "
+            f"pnl={v['unrealized_pnl']:9.2f} ({pnl_pct}) dte={dte}"
         )
 
 

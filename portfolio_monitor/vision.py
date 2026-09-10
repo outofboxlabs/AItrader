@@ -1,7 +1,7 @@
 """Extract draft position entries from a screenshot of a brokerage app,
 using whichever AI provider is configured. This never writes to
 positions.json itself -- it only returns candidate rows for a human to
-review, edit, and save (see web_ui.py), since misreading a number here
+review, edit, and save (see app.py), since misreading a number here
 touches real position data.
 """
 

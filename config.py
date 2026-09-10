@@ -66,7 +66,7 @@ OPENAI_NEWS_MODEL = "gpt-4o-mini"  # verify against OpenAI's current model list 
 GEMINI_NEWS_MODEL = "gemini-2.0-flash"  # UNVERIFIED -- no live Gemini reference in this session, confirm against Google's current docs
 NEWS_WINDOW_DAYS = 3
 
-# --- Vision extraction (screenshot -> positions.json draft), used by web_ui.py ---
+# --- Vision extraction (screenshot -> positions.json draft), used by app.py ---
 # Extracting numbers (strikes, prices, share counts) from an image is a
 # harder task than summarizing text, so these default to each provider's
 # strongest vision-capable model rather than the cheap news-analysis one.

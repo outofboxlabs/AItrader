@@ -125,6 +125,34 @@ CREATE TABLE IF NOT EXISTS news_analysis (
     created_at TEXT NOT NULL,
     PRIMARY KEY (asof_date, ticker)
 );
+
+CREATE TABLE IF NOT EXISTS market_movers (
+    asof_date TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    name TEXT,
+    pct_change REAL,
+    price REAL,
+    volume REAL,
+    market_cap REAL,
+    PRIMARY KEY (asof_date, ticker)
+);
+
+CREATE TABLE IF NOT EXISTS rebound_analysis (
+    asof_date TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    status TEXT,
+    provider TEXT,
+    model TEXT,
+    cause_summary TEXT,
+    rebound_case TEXT,
+    risk_factors_json TEXT,
+    analyst_sentiment TEXT,
+    macro_context TEXT,
+    disclaimer TEXT,
+    parse_error INTEGER,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (asof_date, ticker)
+);
 """
 
 
@@ -335,6 +363,75 @@ def save_news_analysis(conn, result: dict) -> None:
             result.get("window_days"),
             result.get("provider"),
             result.get("model"),
+            int(bool(result.get("parse_error"))),
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+
+
+def save_market_movers(conn, asof_date: str, drops: list[dict]) -> None:
+    conn.executemany(
+        """INSERT OR REPLACE INTO market_movers
+           (asof_date, ticker, name, pct_change, price, volume, market_cap)
+           VALUES (?,?,?,?,?,?,?)""",
+        [
+            (asof_date, d["ticker"], d.get("name"), d.get("pct_change"), d.get("price"), d.get("volume"), d.get("market_cap"))
+            for d in drops
+        ],
+    )
+
+
+def get_market_movers(conn, asof_date: str) -> list[dict]:
+    rows = conn.execute("SELECT * FROM market_movers WHERE asof_date=? ORDER BY pct_change ASC", (asof_date,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_latest_market_movers_date(conn) -> Optional[str]:
+    row = conn.execute("SELECT MAX(asof_date) AS d FROM market_movers").fetchone()
+    return row["d"] if row else None
+
+
+def get_rebound_analysis(conn, asof_date: str, ticker: str) -> Optional[dict]:
+    row = conn.execute(
+        "SELECT * FROM rebound_analysis WHERE asof_date=? AND ticker=?", (asof_date, ticker)
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "ticker": row["ticker"],
+        "asof_date": row["asof_date"],
+        "status": row["status"],
+        "provider": row["provider"],
+        "model": row["model"],
+        "cause_summary": row["cause_summary"],
+        "rebound_case": row["rebound_case"],
+        "risk_factors": json.loads(row["risk_factors_json"]) if row["risk_factors_json"] else [],
+        "analyst_sentiment": row["analyst_sentiment"],
+        "macro_context": row["macro_context"],
+        "disclaimer": row["disclaimer"],
+        "parse_error": bool(row["parse_error"]),
+    }
+
+
+def save_rebound_analysis(conn, result: dict) -> None:
+    conn.execute(
+        """INSERT OR REPLACE INTO rebound_analysis
+           (asof_date, ticker, status, provider, model, cause_summary, rebound_case,
+            risk_factors_json, analyst_sentiment, macro_context, disclaimer,
+            parse_error, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            result["asof_date"],
+            result["ticker"],
+            result.get("status"),
+            result.get("provider"),
+            result.get("model"),
+            result.get("cause_summary"),
+            result.get("rebound_case"),
+            json.dumps(result.get("risk_factors") or []),
+            result.get("analyst_sentiment"),
+            result.get("macro_context"),
+            result.get("disclaimer"),
             int(bool(result.get("parse_error"))),
             datetime.now(timezone.utc).isoformat(),
         ),

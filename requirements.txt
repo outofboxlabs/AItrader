@@ -3,3 +3,4 @@ anthropic>=0.40
 openai>=1.50
 google-genai>=0.3.0
 flask>=3.0
+apscheduler>=3.10
