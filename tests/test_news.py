@@ -199,3 +199,66 @@ def test_get_or_analyze_news_with_openai_provider_caches(tmp_path, monkeypatch):
     assert first["provider"] == "openai"
     assert second["provider"] == "openai"
     assert second["sentiment"] == "negative"
+
+
+class _FakeModel:
+    def __init__(self, id):
+        self.id = id
+
+
+def test_list_models_anthropic_returns_live_ids(monkeypatch):
+    import anthropic
+
+    class FakeModels:
+        def list(self):
+            return [_FakeModel("claude-opus-5"), _FakeModel("claude-haiku-4-5")]
+
+    class FakeClient:
+        def __init__(self, api_key=None):
+            self.models = FakeModels()
+
+    monkeypatch.setattr(anthropic, "Anthropic", FakeClient)
+    result = news_mod.list_models("anthropic", api_key="sk-test")
+    assert result == ["claude-opus-5", "claude-haiku-4-5"]
+
+
+def test_list_models_openai_filters_to_chat_models(monkeypatch):
+    import openai
+
+    class FakeModels:
+        def list(self):
+            return [
+                _FakeModel("text-embedding-3-small"),
+                _FakeModel("gpt-4o-mini"),
+                _FakeModel("gpt-4o"),
+                _FakeModel("whisper-1"),
+            ]
+
+    class FakeClient:
+        def __init__(self, api_key=None):
+            self.models = FakeModels()
+
+    monkeypatch.setattr(openai, "OpenAI", FakeClient)
+    result = news_mod.list_models("openai", api_key="sk-test")
+    assert result == ["gpt-4o", "gpt-4o-mini"]  # sorted, non-chat models filtered out
+
+
+def test_list_models_openai_falls_back_to_full_list_if_no_chat_models_match(monkeypatch):
+    import openai
+
+    class FakeModels:
+        def list(self):
+            return [_FakeModel("text-embedding-3-small"), _FakeModel("whisper-1")]
+
+    class FakeClient:
+        def __init__(self, api_key=None):
+            self.models = FakeModels()
+
+    monkeypatch.setattr(openai, "OpenAI", FakeClient)
+    result = news_mod.list_models("openai", api_key="sk-test")
+    assert result == ["text-embedding-3-small", "whisper-1"]
+
+
+def test_list_models_rejects_unknown_provider():
+    with pytest.raises(ValueError, match="Unknown NEWS_PROVIDER"):
+        news_mod.list_models("not-a-real-provider")

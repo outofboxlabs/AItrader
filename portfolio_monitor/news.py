@@ -164,6 +164,31 @@ def analyze_headlines(
     raise ValueError(f"Unknown NEWS_PROVIDER: {provider!r} (expected 'anthropic' or 'openai')")
 
 
+# Heuristic filter for OpenAI's model list, which also includes embeddings,
+# audio, image, and moderation models alongside chat-capable ones.
+_OPENAI_CHAT_MODEL_PREFIXES = ("gpt-", "chatgpt-", "o1", "o3", "o4")
+
+
+def list_models(provider: str, api_key: Optional[str] = None) -> list[str]:
+    """Live model IDs available to this account for the given provider,
+    newest/most relevant first where the API tells us that."""
+    if provider == "anthropic":
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+        return [m.id for m in client.models.list()]
+
+    if provider == "openai":
+        import openai
+
+        client = openai.OpenAI(api_key=api_key) if api_key else openai.OpenAI()
+        all_ids = [m.id for m in client.models.list()]
+        chat_ids = sorted(i for i in all_ids if i.startswith(_OPENAI_CHAT_MODEL_PREFIXES))
+        return chat_ids or sorted(all_ids)
+
+    raise ValueError(f"Unknown NEWS_PROVIDER: {provider!r} (expected 'anthropic' or 'openai')")
+
+
 def _parse_analysis_json(text: str) -> dict:
     try:
         parsed = json.loads(text)

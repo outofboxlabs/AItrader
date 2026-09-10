@@ -73,7 +73,42 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=None,
         help="defaults to the OPENAI_API_KEY environment variable",
     )
+    parser.add_argument(
+        "--choose-model",
+        action="store_true",
+        help="prompt with a numbered list of live models from --news-provider before running "
+        "(skip for unattended/scheduled runs -- it waits on terminal input)",
+    )
     return parser.parse_args(argv)
+
+
+def prompt_for_model(provider: str, api_key: str | None) -> str | None:
+    """Fetch live models for `provider`, print them numbered, and ask the
+    user to pick one. Returns None (caller falls back to the configured
+    default) on any failure, empty input, or invalid selection."""
+    try:
+        models = news.list_models(provider, api_key=api_key)
+    except Exception as exc:
+        print(f"Could not fetch model list from {provider} ({exc}); using the configured default.")
+        return None
+
+    if not models:
+        print(f"No models returned for {provider}; using the configured default.")
+        return None
+
+    print(f"\nAvailable {provider} models:")
+    for i, model_id in enumerate(models, start=1):
+        print(f"  {i}. {model_id}")
+
+    choice = input(f"Select a model [1-{len(models)}] (Enter to keep the configured default): ").strip()
+    if not choice:
+        return None
+
+    if choice.isdigit() and 1 <= int(choice) <= len(models):
+        return models[int(choice) - 1]
+
+    print("Invalid selection; using the configured default.")
+    return None
 
 
 def run(args: argparse.Namespace) -> None:
@@ -198,11 +233,18 @@ def run(args: argparse.Namespace) -> None:
         news_results = []
         if not args.skip_news:
             if args.news_provider == "anthropic":
-                news_model = args.news_model or config.ANTHROPIC_NEWS_MODEL
                 api_key = args.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+                default_model = config.ANTHROPIC_NEWS_MODEL
             else:
-                news_model = args.news_model or config.OPENAI_NEWS_MODEL
                 api_key = args.openai_api_key or os.environ.get("OPENAI_API_KEY")
+                default_model = config.OPENAI_NEWS_MODEL
+
+            if args.choose_model:
+                chosen_model = prompt_for_model(args.news_provider, api_key)
+                if chosen_model:
+                    args.news_model = chosen_model
+
+            news_model = args.news_model or default_model
             for ticker in tickers:
                 news_results.append(
                     news.get_or_analyze_news(
