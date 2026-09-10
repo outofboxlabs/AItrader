@@ -12,6 +12,7 @@ pretending to a 1-month forecast that doesn't exist.
 
 from __future__ import annotations
 
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
@@ -41,37 +42,39 @@ def _is_majority_strong_buy(ratings: dict) -> bool:
     return ratings.get("strongBuy", 0) / total > 0.5
 
 
-def _enrich_candidate(q: dict, target_upside_threshold: float) -> Optional[dict]:
+def _enrich_candidate(q: dict, target_upside_threshold: float) -> tuple[Optional[dict], str]:
     """Fetch one candidate's analyst data and 52-week range, and apply the
-    upside/majority filters. Returns None if the ticker lacks the data
-    needed to judge it, or doesn't qualify -- never raises, so one bad
-    ticker can't take down a parallel batch of these."""
+    upside/majority filters. Returns (None, reason) if excluded, or
+    (candidate, "included") -- never raises, so one bad ticker can't take
+    down a parallel batch of these. The reason string is only for the
+    diagnostic summary in find_growth_candidates; callers that don't care
+    can ignore it."""
     ticker = q.get("symbol")
     if not ticker:
-        return None
+        return None, "no_symbol"
 
     t = yf.Ticker(ticker)
     try:
         price_targets = t.get_analyst_price_targets() or {}
-    except Exception:
-        price_targets = {}
+    except Exception as exc:
+        return None, f"price_targets_error:{type(exc).__name__}"
     try:
         recommendations = t.get_recommendations_summary(as_dict=True) or {}
-    except Exception:
-        recommendations = {}
+    except Exception as exc:
+        return None, f"recommendations_error:{type(exc).__name__}"
 
     current_price = price_targets.get("current") or q.get("regularMarketPrice")
     mean_target = price_targets.get("mean")
     if not current_price or not mean_target:
-        return None
+        return None, "missing_price_or_target"
 
     target_upside_pct = (mean_target - current_price) / current_price * 100.0
     if target_upside_pct < target_upside_threshold:
-        return None
+        return None, "below_upside_threshold"
 
     ratings = _current_period_ratings(recommendations)
     if not _is_majority_strong_buy(ratings):
-        return None
+        return None, "no_strong_buy_majority"
 
     try:
         fast_info = t.fast_info
@@ -84,7 +87,7 @@ def _enrich_candidate(q: dict, target_upside_threshold: float) -> Optional[dict]
     pct_from_52w_high = (current_price - year_high) / year_high * 100.0 if year_high else None
     pct_from_52w_low = (current_price - year_low) / year_low * 100.0 if year_low else None
 
-    return {
+    candidate = {
         "ticker": ticker,
         "name": q.get("shortName") or q.get("longName"),
         "price": current_price,
@@ -95,6 +98,7 @@ def _enrich_candidate(q: dict, target_upside_threshold: float) -> Optional[dict]
         "pct_from_52w_low": pct_from_52w_low,
         "market_cap": q.get("marketCap"),
     }
+    return candidate, "included"
 
 
 def find_growth_candidates(
@@ -130,12 +134,17 @@ def find_growth_candidates(
     quotes = response.get("quotes", []) if response else []
 
     candidates = []
+    reasons: Counter = Counter()
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(_enrich_candidate, q, target_upside_threshold) for q in quotes]
         for future in as_completed(futures):
-            result = future.result()
+            result, reason = future.result()
+            reasons[reason] += 1
             if result is not None:
                 candidates.append(result)
+
+    breakdown = ", ".join(f"{reason}={count}" for reason, count in reasons.most_common())
+    print(f"[growth_screener] screener_pool={len(quotes)} included={len(candidates)} -- {breakdown or 'no candidates in pool'}")
 
     candidates.sort(key=lambda c: c["target_upside_pct"], reverse=True)
     return candidates[:max_results]
