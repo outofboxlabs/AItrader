@@ -229,6 +229,7 @@ def _run_growth_screen(asof_date: Optional[date] = None) -> list[dict]:
         min_volume=config.GROWTH_MIN_VOLUME,
         target_upside_threshold=config.GROWTH_TARGET_UPSIDE_THRESHOLD_PCT,
         max_results=config.GROWTH_MAX_RESULTS,
+        max_workers=config.GROWTH_MAX_WORKERS,
     )
     with db_mod.connect(config.DB_PATH) as conn:
         db_mod.save_growth_candidates(conn, asof_date.isoformat(), candidates)

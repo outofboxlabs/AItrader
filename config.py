@@ -84,12 +84,13 @@ CREDENTIALS_PATH = ".credentials.json"
 # closest real, checkable proxy is the analyst consensus price target,
 # which is conventionally a ~12-month view, not a 1-month one. Labeled
 # accordingly in the UI as "analyst target upside", not a 1-month forecast.
-GROWTH_CANDIDATE_POOL_SIZE = 200
+GROWTH_CANDIDATE_POOL_SIZE = 60  # each candidate costs a few network round trips -- kept modest so "Run Now" finishes in a reasonable time
 GROWTH_MIN_MARKET_CAP = 300_000_000
 GROWTH_MIN_PRICE = 5.0
 GROWTH_MIN_VOLUME = 100_000
 GROWTH_TARGET_UPSIDE_THRESHOLD_PCT = 50.0
 GROWTH_MAX_RESULTS = 50
+GROWTH_MAX_WORKERS = 20  # per-candidate lookups run in parallel on this many threads
 
 # Storage
 DB_PATH = "portfolio.db"

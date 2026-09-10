@@ -1,3 +1,5 @@
+import time
+
 from portfolio_monitor import growth_screener as gs
 
 
@@ -146,3 +148,44 @@ def test_find_growth_candidates_respects_max_results(monkeypatch):
 
     results = gs.find_growth_candidates(max_results=3)
     assert len(results) == 3
+
+
+def test_find_growth_candidates_enriches_in_parallel_not_sequentially(monkeypatch):
+    """Each per-candidate lookup sleeps 0.2s; with 20 candidates run
+    sequentially that's >= 4s, but on a 20-worker thread pool it should
+    finish in roughly one slot's worth of time. This is what actually
+    fixes the multi-minute "Run Now" hang for a real candidate pool."""
+    n = 20
+    quotes = [{"symbol": f"T{i}", "shortName": f"T{i} Co", "regularMarketPrice": 10.0, "marketCap": 1e9} for i in range(n)]
+
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        return {"quotes": quotes}
+
+    class SlowFakeTicker:
+        def __init__(self, symbol):
+            pass
+
+        def get_analyst_price_targets(self):
+            time.sleep(0.2)
+            return {"current": 10.0, "mean": 20.0}  # 100% upside
+
+        def get_recommendations_summary(self, as_dict=False):
+            return {"strongBuy": {0: 9}, "buy": {0: 1}, "hold": {0: 0}, "sell": {0: 0}, "strongSell": {0: 0}}
+
+        @property
+        def fast_info(self):
+            class FI:
+                year_high = 15.0
+                year_low = 8.0
+
+            return FI()
+
+    monkeypatch.setattr(gs.yf, "screen", fake_screen)
+    monkeypatch.setattr(gs.yf, "Ticker", SlowFakeTicker)
+
+    start = time.monotonic()
+    results = gs.find_growth_candidates(max_results=n, max_workers=20)
+    elapsed = time.monotonic() - start
+
+    assert len(results) == n
+    assert elapsed < 1.0  # would be >= 4.0s if run sequentially
