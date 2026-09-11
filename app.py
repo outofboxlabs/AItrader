@@ -1517,7 +1517,7 @@ function escapeHtml(str) {
 // for the "no events" case, which is prose rather than bullets by design.
 function renderBulletSummary(text) {
   if (!text) return "<div>n/a</div>";
-  const bulletLines = text.split("\n").map(l => l.trim()).filter(l => l.startsWith("- "));
+  const bulletLines = text.split("\\n").map(l => l.trim()).filter(l => l.startsWith("- "));
   if (bulletLines.length === 0) {
     return `<div>${escapeHtml(text)}</div>`;
   }

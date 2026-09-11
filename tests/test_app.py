@@ -1,6 +1,10 @@
 import calendar
 import io
 import json
+import re
+import shutil
+import subprocess
+import tempfile
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote
 
@@ -1009,3 +1013,31 @@ def test_run_movers_now_writes_csv_export(client, monkeypatch, tmp_path):
     movers_export_dir = tmp_path / "exports" / "top_movers"
     assert movers_export_dir.exists()
     assert len(list(movers_export_dir.glob("*.csv"))) == 1
+
+
+def test_index_page_javascript_has_no_syntax_errors(client):
+    """Regression guard: PAGE_TEMPLATE is a plain (non-raw) Python triple-
+    quoted string, so a stray single backslash in embedded JS (e.g. "\\n"
+    meant for JS but written as a Python escape) silently turns into a
+    real newline or other character, breaking the *entire* inline
+    <script> block's syntax -- which means no JS on the page runs at all,
+    including tab-switching, since nothing else in the file is wrapped
+    in its own try/catch. That's a silent, page-wide failure a human
+    only discovers by clicking around, so catch it here by actually
+    parsing the rendered script with node. Skips (doesn't fail) if node
+    isn't installed in the test environment."""
+    if not shutil.which("node"):
+        pytest.skip("node not installed; can't syntax-check embedded JS")
+
+    html = client.get("/").get_data(as_text=True)
+    scripts = re.findall(r"<script[^>]*>(.*?)</script>", html, re.S)
+    assert scripts, "expected at least one <script> block in the rendered page"
+
+    for script in scripts:
+        if not script.strip():
+            continue
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(script)
+            path = f.name
+        result = subprocess.run(["node", "--check", path], capture_output=True, text=True)
+        assert result.returncode == 0, f"embedded JS failed to parse:\n{result.stderr}"
