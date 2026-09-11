@@ -14,13 +14,14 @@ Opens automatically at http://127.0.0.1:5050
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import shutil
 import threading
 import traceback
 import webbrowser
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from flask import Flask, jsonify, render_template_string, request
@@ -356,11 +357,13 @@ def _enrich_with_live_actuals(events: list[dict]) -> None:
     """Mutates each event dict in place, filling in "actual"/"direction"/
     "surprise_pct" by checking Forex Factory's LIVE calendar page --
     the JSON feed above never carries these (confirmed empirically; see
-    forex_calendar.py). One fetch per unique day covered, not per event,
-    to keep this light -- and only for days that have already started,
-    since a future day can't have an actual yet. Never raises: a scrape
-    failure for one day just leaves that day's events as "n/a", exactly
-    as they were before this enrichment step existed.
+    forex_calendar.py). Skips any event that already has an actual
+    (e.g. one that came from _fetch_month_events' day-by-day live scrape,
+    which already includes it -- no need to fetch that day twice). One
+    fetch per unique remaining day covered, not per event, and only for
+    days that have already started, since a future day can't have an
+    actual yet. Never raises: a scrape failure for one day just leaves
+    that day's events as "n/a", exactly as before this step existed.
 
     This scrapes forexfactory.com's live HTML page directly, the same
     ToS tradeoff as forex_monitor.py -- made explicitly, at the user's
@@ -368,7 +371,7 @@ def _enrich_with_live_actuals(events: list[dict]) -> None:
     now = datetime.now(timezone.utc)
     events_by_day: dict = {}
     for e in events:
-        if not e.get("date"):
+        if e.get("actual") or not e.get("date"):
             continue
         try:
             event_time = datetime.fromisoformat(e["date"])
@@ -392,14 +395,66 @@ def _enrich_with_live_actuals(events: list[dict]) -> None:
                 e["surprise_pct"] = forex_calendar._surprise_pct(result["actual"], e.get("forecast"))
 
 
+def _fetch_month_events() -> list[dict]:
+    """This calendar month's events (the 1st through the last day),
+    across every currency -- the country/impact filtering happens
+    client-side in the UI, same as the impact filter already did,
+    since narrowing server-side wouldn't reduce how many pages need
+    fetching anyway (one request per day regardless of how many
+    currencies are on it).
+
+    The JSON feed only ever covers "this week" (confirmed -- Forex
+    Factory doesn't publish a month variant), so every other day in the
+    month is filled in by live-scraping that day's page individually;
+    each of those already includes the schedule AND the actual in one
+    pass (see forex_live_monitor.find_all_events_for_day), unlike the
+    JSON-feed days which still need _enrich_with_live_actuals separately
+    afterward. Costs one extra live request per day of the month not
+    already covered by the JSON feed (up to ~24) -- gated by the same
+    cooldown as the rest of "Run Now" in _run_forex_calendar_refresh, so
+    this only actually runs once per cooldown window regardless of how
+    many times the button is clicked."""
+    today = date.today()
+    month_start = today.replace(day=1)
+    _, last_day_num = calendar.monthrange(today.year, today.month)
+    month_end = today.replace(day=last_day_num)
+
+    week_events = forex_calendar.fetch_calendar_events(config.FOREX_CALENDAR_FEED_URL)
+    covered_days = set()
+    for e in week_events:
+        if not e.get("date"):
+            continue
+        try:
+            covered_days.add(datetime.fromisoformat(e["date"]).date())
+        except ValueError:
+            pass
+
+    all_events = list(week_events)
+    day = month_start
+    scraped_days = 0
+    while day <= month_end:
+        if day not in covered_days:
+            try:
+                html = forex_live_monitor.fetch_live_day_html(day)
+                all_events.extend(forex_live_monitor.find_all_events_for_day(html, day))
+                scraped_days += 1
+            except Exception as exc:
+                print(f"[forex_calendar] month scrape failed for {day}: {exc}")
+        day += timedelta(days=1)
+
+    print(f"[forex_calendar] month view: {len(week_events)} from the JSON feed + {scraped_days} day(s) live-scraped = {len(all_events)} total")
+    return all_events
+
+
 def _run_forex_calendar_refresh(force: bool = False) -> tuple[list[dict], bool]:
     """Returns (events, did_refetch). Enforces
     config.FOREX_CALENDAR_MIN_REFRESH_SECONDS between real upstream
     fetches -- Forex Factory's feed is rate-limited, so a request inside
     that window re-serves the cached copy instead of risking a block.
-    The same cooldown also gates the live-actuals check below, since
-    there's no confirmed rate limit for that separate live page either
-    -- better to be conservative on both fetches together."""
+    The same cooldown also gates the live-actuals check and the
+    whole-month scrape below, since there's no confirmed rate limit for
+    those separate live pages either -- better to be conservative on
+    all of it together."""
     db_mod.init_db(config.DB_PATH)
     with db_mod.connect(config.DB_PATH) as conn:
         last_fetch = db_mod.get_latest_forex_calendar_fetch(conn)
@@ -409,7 +464,7 @@ def _run_forex_calendar_refresh(force: bool = False) -> tuple[list[dict], bool]:
             if elapsed < config.FOREX_CALENDAR_MIN_REFRESH_SECONDS:
                 return db_mod.get_forex_calendar_events(conn), False
 
-        events = forex_calendar.fetch_calendar_events(config.FOREX_CALENDAR_FEED_URL)
+        events = _fetch_month_events()
         _enrich_with_live_actuals(events)
         db_mod.save_forex_calendar_events(conn, events, fetched_at=now.isoformat())
         return db_mod.get_forex_calendar_events(conn), True
@@ -726,18 +781,20 @@ PAGE_TEMPLATE = """<!doctype html>
         <option value="medium+">Medium + High</option>
         <option value="all">All impact levels</option>
       </select>
+      <label><input type="checkbox" id="fx-include-non-us" onchange="renderForexTable()"> Include non-US events</label>
       <button class="action" id="fx-run-btn" onclick="runForexNow()">Run Now</button>
     </div>
     <p class="muted" style="max-width:640px;">
-      Forex Factory's scheduled economic calendar (rate decisions, CPI, NFP, GDP, etc.) --
-      the releases that tend to move currency markets sharply the instant they print. The
-      schedule/forecast/previous come from Forex Factory's public calendar feed, which is unofficial
-      and rate-limited, so "Run Now" won't fetch more than once every few minutes.
-      <strong>Note:</strong> that feed never carries the <strong>Actual</strong> value even after an
-      event releases (confirmed empirically), so "Run Now" separately checks Forex Factory's live
-      calendar page -- once per already-passed day, not per event -- to fill in Actual/Surprise once
-      available. That live check scrapes their website directly, which is against Forex Factory's
-      Terms of Service; if a value still looks off, check
+      Forex Factory's scheduled economic calendar (rate decisions, CPI, NFP, GDP, etc.) for the whole
+      calendar month -- the releases that tend to move currency markets sharply the instant they
+      print. Defaults to US (USD) events only; check "Include non-US events" for every currency.
+      The current week's schedule/forecast/previous come from Forex Factory's public calendar feed
+      (unofficial and rate-limited, so "Run Now" won't fetch more than once every few minutes); every
+      other day in the month, plus the <strong>Actual</strong>/<strong>Surprise</strong> columns for
+      any already-released event (that feed never carries actuals, confirmed empirically), come from
+      checking Forex Factory's live calendar page directly instead -- against their Terms of Service,
+      the same tradeoff already made for forex_monitor.py. Covering a whole month this way means
+      "Run Now" can take up to a minute; watch the terminal for progress. If a value looks off, check
       <a href="https://www.forexfactory.com/calendar" target="_blank" rel="noopener">forexfactory.com/calendar</a>
       directly. This tab is informational only -- it does not place, size, or evaluate any trade, and
       never will run unattended.
@@ -1234,7 +1291,7 @@ async function loadForex() {
 async function runForexNow() {
   const btn = document.getElementById("fx-run-btn");
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>Fetching...';
+  btn.innerHTML = '<span class="spinner"></span>Fetching month (can take up to a minute)...';
   document.getElementById("fx-status").style.display = "none";
   try {
     const res = await fetch("/api/forex-calendar/run", { method: "POST" });
@@ -1286,16 +1343,19 @@ function renderForexTable() {
   const body = document.getElementById("fx-body");
   const { field, dir } = forexSort;
   const filter = document.getElementById("fx-impact-filter").value;
+  const includeNonUs = document.getElementById("fx-include-non-us").checked;
 
   document.querySelectorAll("#fx-head th.sortable").forEach(th => {
     const arrow = th.querySelector(".arrow");
     arrow.textContent = th.dataset.sort === field ? (dir === 1 ? "\\u25b2" : "\\u25bc") : "";
   });
 
-  const filtered = forexRows.filter(e => forexImpactMatches(e.impact, filter));
+  const filtered = forexRows.filter(e =>
+    forexImpactMatches(e.impact, filter) && (includeNonUs || e.country === "USD")
+  );
 
   if (filtered.length === 0) {
-    body.innerHTML = '<tr><td colspan="8" class="muted">No events match this filter. Click "Run Now" to fetch this week\\'s calendar.</td></tr>';
+    body.innerHTML = '<tr><td colspan="8" class="muted">No events match this filter. Click "Run Now" to fetch this month\\'s calendar.</td></tr>';
     return;
   }
 

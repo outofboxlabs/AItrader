@@ -66,6 +66,131 @@ def test_find_actual_for_event_title_matches_but_wrong_currency():
     assert flm.find_actual_for_event(html, "GDP m/m", "USD") is None
 
 
+def test_parse_event_time_am_pm():
+    assert flm._parse_event_time("8:30am", date(2026, 9, 11)) == "2026-09-11T08:30:00-04:00"
+    assert flm._parse_event_time("2:00pm", date(2026, 9, 11)) == "2026-09-11T14:00:00-04:00"
+
+
+def test_parse_event_time_noon_and_midnight_edge_cases():
+    assert flm._parse_event_time("12:00pm", date(2026, 9, 11)) == "2026-09-11T12:00:00-04:00"
+    assert flm._parse_event_time("12:00am", date(2026, 9, 11)) == "2026-09-11T00:00:00-04:00"
+
+
+def test_parse_event_time_handles_dst_offset_correctly():
+    """zoneinfo, not a hardcoded offset -- January is EST (-05:00), not EDT."""
+    assert flm._parse_event_time("8:30am", date(2026, 1, 15)) == "2026-01-15T08:30:00-05:00"
+
+
+def test_parse_event_time_non_clock_text_returns_none():
+    assert flm._parse_event_time("All Day", date(2026, 9, 11)) is None
+    assert flm._parse_event_time("Tentative", date(2026, 9, 11)) is None
+    assert flm._parse_event_time("", date(2026, 9, 11)) is None
+
+
+def test_normalize_impact_maps_known_levels():
+    assert flm._normalize_impact("High Impact Expected") == "High"
+    assert flm._normalize_impact("Medium Impact Expected") == "Medium"
+    assert flm._normalize_impact("Low Impact Expected") == "Low"
+    assert flm._normalize_impact("Non-Economic / Holiday") == "Holiday"
+
+
+def test_normalize_impact_unknown_text_passed_through():
+    assert flm._normalize_impact("Some New Label") == "Some New Label"
+
+
+_DAY_TABLE_TEMPLATE = """
+<table class="calendar__table">
+  <tr class="calendar__row calendar_row">
+    <td class="calendar__cell calendar__time time">8:30am</td>
+    <td class="calendar__cell calendar__currency currency">USD</td>
+    <td class="calendar__cell calendar__impact impact"><span title="High Impact Expected"></span></td>
+    <td class="calendar__cell calendar__event event"><span class="calendar__event-title">Core CPI m/m</span></td>
+    <td class="calendar__cell calendar__actual actual"><span class="better">0.3%</span></td>
+    <td class="calendar__cell calendar__forecast forecast">0.2%</td>
+    <td class="calendar__cell calendar__previous previous">0.2%</td>
+  </tr>
+  <tr class="calendar__row calendar_row">
+    <td class="calendar__cell calendar__time time"></td>
+    <td class="calendar__cell calendar__currency currency">USD</td>
+    <td class="calendar__cell calendar__impact impact"><span title="High Impact Expected"></span></td>
+    <td class="calendar__cell calendar__event event"><span class="calendar__event-title">Core CPI y/y</span></td>
+    <td class="calendar__cell calendar__actual actual"><span class="worse">2.4%</span></td>
+    <td class="calendar__cell calendar__forecast forecast">2.4%</td>
+    <td class="calendar__cell calendar__previous previous">2.5%</td>
+  </tr>
+  <tr class="calendar__row calendar_row">
+    <td class="calendar__cell calendar__time time">10:00am</td>
+    <td class="calendar__cell calendar__currency currency">USD</td>
+    <td class="calendar__cell calendar__impact impact"><span title="Medium Impact Expected"></span></td>
+    <td class="calendar__cell calendar__event event"><span class="calendar__event-title">Prelim UoM Consumer Sentiment</span></td>
+    <td class="calendar__cell calendar__actual actual"><!----></td>
+    <td class="calendar__cell calendar__forecast forecast">51.0</td>
+    <td class="calendar__cell calendar__previous previous">51.0</td>
+  </tr>
+</table>
+"""
+
+
+def test_find_all_events_for_day_parses_every_row():
+    day = date(2026, 9, 11)
+    events = flm.find_all_events_for_day(_DAY_TABLE_TEMPLATE, day)
+    assert len(events) == 3
+    assert [e["title"] for e in events] == ["Core CPI m/m", "Core CPI y/y", "Prelim UoM Consumer Sentiment"]
+
+
+def test_find_all_events_for_day_forward_fills_blank_time_cells():
+    """Confirmed from a real Forex Factory screenshot: the time is only
+    printed on the first row of a same-time group, left blank after --
+    the second row here (Core CPI y/y) has an empty time cell and must
+    inherit 8:30am from the row above it, not be dropped."""
+    day = date(2026, 9, 11)
+    events = flm.find_all_events_for_day(_DAY_TABLE_TEMPLATE, day)
+    assert events[0]["date"] == "2026-09-11T08:30:00-04:00"
+    assert events[1]["date"] == "2026-09-11T08:30:00-04:00"  # forward-filled
+    assert events[2]["date"] == "2026-09-11T10:00:00-04:00"
+
+
+def test_find_all_events_for_day_extracts_impact_forecast_previous_and_actual():
+    day = date(2026, 9, 11)
+    events = flm.find_all_events_for_day(_DAY_TABLE_TEMPLATE, day)
+    first = events[0]
+    assert first["country"] == "USD"
+    assert first["impact"] == "High"
+    assert first["forecast"] == "0.2%"
+    assert first["previous"] == "0.2%"
+    assert first["actual"] == "0.3%"
+    assert first["direction"] == "better"
+    assert first["surprise_pct"] is not None
+
+
+def test_find_all_events_for_day_empty_actual_cell_stays_none():
+    day = date(2026, 9, 11)
+    events = flm.find_all_events_for_day(_DAY_TABLE_TEMPLATE, day)
+    not_yet_released = events[2]
+    assert not_yet_released["actual"] is None
+    assert not_yet_released["direction"] is None
+    assert not_yet_released["surprise_pct"] is None
+
+
+def test_find_all_events_for_day_skips_rows_with_no_parseable_time():
+    """A row with no time cell text and nothing to forward-fill from yet
+    (the very first row of the table) can't be placed in a time-sorted
+    table or stored (the db's primary key needs a non-null date) --
+    it must be skipped, not crash the whole parse."""
+    html = """
+    <table class="calendar__table">
+      <tr class="calendar__row calendar_row">
+        <td class="calendar__cell calendar__time time"></td>
+        <td class="calendar__cell calendar__currency currency">USD</td>
+        <td class="calendar__cell calendar__event event"><span class="calendar__event-title">Untimed Event</span></td>
+        <td class="calendar__cell calendar__actual actual"></td>
+      </tr>
+    </table>
+    """
+    events = flm.find_all_events_for_day(html, date(2026, 9, 11))
+    assert events == []
+
+
 def test_poll_for_actual_returns_immediately_when_found(monkeypatch):
     past_time = datetime.now(timezone.utc) - timedelta(seconds=5)
     monkeypatch.setattr(flm, "fetch_live_day_html", lambda day: "<html></html>")

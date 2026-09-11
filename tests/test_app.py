@@ -1,3 +1,4 @@
+import calendar
 import io
 import json
 from datetime import date, datetime, timedelta, timezone
@@ -14,6 +15,19 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod.config, "DB_PATH", str(tmp_path / "test.db"))
     monkeypatch.setattr(app_mod.config, "SNAPSHOTS_DIR", str(tmp_path / "snapshots"))
     monkeypatch.setattr(app_mod.config, "EXPORTS_DIR", str(tmp_path / "exports"))
+
+    # _fetch_month_events live-scrapes every day of the month the JSON
+    # feed doesn't cover (up to ~30 real HTTP calls) -- default that to
+    # an instant, harmless failure so any test that doesn't specifically
+    # care about the month scrape (most forex-calendar tests) can't
+    # accidentally make real network calls. Tests that DO care override
+    # this themselves via their own monkeypatch.setattr, which takes
+    # precedence since it runs later, inside the test body.
+    def _no_live_data(day):
+        raise RuntimeError("live fetch not mocked for this test")
+
+    monkeypatch.setattr(app_mod.forex_live_monitor, "fetch_live_day_html", _no_live_data)
+
     app_mod.app.config.update(TESTING=True)
     with app_mod.app.test_client() as c:
         yield c
@@ -385,6 +399,62 @@ def _future_event(**overrides):
     return event
 
 
+def test_fetch_month_events_merges_json_feed_and_live_scraped_days(monkeypatch):
+    """The JSON feed only ever covers "this week" -- every other day in
+    the calendar month must come from live-scraping that day
+    individually, and a day the JSON feed already returned must not
+    also be live-scraped (that would be a wasted, redundant request)."""
+    today = date.today()
+    _, last_day_num = calendar.monthrange(today.year, today.month)
+
+    today_midnight_utc = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc).isoformat()
+    monkeypatch.setattr(
+        app_mod.forex_calendar,
+        "fetch_calendar_events",
+        lambda feed_url: [
+            {
+                "date": today_midnight_utc, "country": "USD", "title": "Today's Event", "impact": "High",
+                "forecast": "0.1%", "previous": "0.1%", "actual": None, "direction": None, "surprise_pct": None,
+            }
+        ],
+    )
+
+    scraped_days = []
+    monkeypatch.setattr(
+        app_mod.forex_live_monitor, "fetch_live_day_html", lambda day: (scraped_days.append(day), "<html></html>")[1]
+    )
+    monkeypatch.setattr(
+        app_mod.forex_live_monitor,
+        "find_all_events_for_day",
+        lambda html, day: [
+            {
+                "date": f"{day.isoformat()}T09:00:00-04:00", "country": "USD", "title": f"Scraped {day}",
+                "impact": "Low", "forecast": "", "previous": "", "actual": None, "direction": None, "surprise_pct": None,
+            }
+        ],
+    )
+
+    events = app_mod._fetch_month_events()
+
+    assert today not in scraped_days  # already covered by the JSON feed -- must not be re-scraped
+    assert len(scraped_days) == last_day_num - 1  # every other day of the month
+    assert any(e["title"] == "Today's Event" for e in events)
+    assert len(events) == 1 + len(scraped_days)
+
+
+def test_fetch_month_events_survives_one_days_scrape_failing(monkeypatch):
+    today = date.today()
+    monkeypatch.setattr(app_mod.forex_calendar, "fetch_calendar_events", lambda feed_url: [])
+
+    def boom(day):
+        raise RuntimeError("forexfactory.com unreachable")
+
+    monkeypatch.setattr(app_mod.forex_live_monitor, "fetch_live_day_html", boom)
+
+    events = app_mod._fetch_month_events()  # must not raise
+    assert events == []
+
+
 def test_run_forex_calendar_now_fetches_and_persists(client, monkeypatch):
     monkeypatch.setattr(app_mod.forex_calendar, "fetch_calendar_events", lambda feed_url: [_future_event()])
     scheduled_at = _future_event()["date"]
@@ -436,17 +506,36 @@ def test_run_forex_calendar_now_handles_fetch_failure(client, monkeypatch):
     assert "error" in res.get_json()
 
 
-def test_run_forex_calendar_now_skips_live_check_for_future_events(client, monkeypatch):
-    """A future event can't have an actual yet -- _enrich_with_live_actuals
-    must not even attempt a live fetch for it."""
-    monkeypatch.setattr(app_mod.forex_calendar, "fetch_calendar_events", lambda feed_url: [_future_event()])
+def test_enrich_with_live_actuals_skips_future_events(monkeypatch):
+    """A future event can't have an actual yet -- must not even attempt
+    a live fetch for it. (Unit-tested directly against
+    _enrich_with_live_actuals, not through the full "Run Now" route --
+    that route's month-wide schedule scrape legitimately does cover
+    future days too, just not for their actual.)"""
+    events = [_future_event()]
     live_fetch_called = []
     monkeypatch.setattr(app_mod.forex_live_monitor, "fetch_live_day_html", lambda day: live_fetch_called.append(day) or "<html></html>")
 
-    res = client.post("/api/forex-calendar/run")
-    assert res.status_code == 200
+    app_mod._enrich_with_live_actuals(events)
+
     assert live_fetch_called == []
-    assert res.get_json()["events"][0]["actual"] is None
+    assert events[0]["actual"] is None
+
+
+def test_enrich_with_live_actuals_skips_events_that_already_have_an_actual(monkeypatch):
+    """A day already live-scraped in full by _fetch_month_events (which
+    gets the actual directly, in the same pass as the schedule) must
+    not be fetched a second time here."""
+    past_event = _future_event(
+        date=(datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(), actual="227K", direction="better"
+    )
+    live_fetch_called = []
+    monkeypatch.setattr(app_mod.forex_live_monitor, "fetch_live_day_html", lambda day: live_fetch_called.append(day) or "<html></html>")
+
+    app_mod._enrich_with_live_actuals([past_event])
+
+    assert live_fetch_called == []
+    assert past_event["actual"] == "227K"  # untouched, not overwritten
 
 
 def test_run_forex_calendar_now_enriches_past_event_with_live_actual(client, monkeypatch):

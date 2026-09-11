@@ -27,11 +27,13 @@ from __future__ import annotations
 
 import csv
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, asdict
 from datetime import date, datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
@@ -40,6 +42,7 @@ from . import forex_calendar
 
 LIVE_CALENDAR_URL = "https://www.forexfactory.com/calendar"
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+_EASTERN = ZoneInfo("America/New_York")
 
 
 def _day_query_value(d: date) -> str:
@@ -99,6 +102,110 @@ def find_actual_for_event(html: str, title: str, country: str) -> Optional[dict]
         return {"actual": actual_text, "direction": _normalize_direction(raw_class), "raw_class": raw_class}
 
     return None
+
+
+def _parse_event_time(time_text: str, day: date) -> Optional[str]:
+    """Combine a live-page time cell's text (e.g. "8:30am") with the day
+    it's on into a full ISO datetime string in US/Eastern -- matching
+    the JSON feed's own "-04:00"/"-05:00" shape, via zoneinfo so DST is
+    handled correctly for any date rather than a hardcoded offset.
+    Returns None for anything that isn't a plain clock time ("All Day",
+    "Tentative", a truly blank cell with nothing to forward-fill from)."""
+    match = re.match(r"^(\d{1,2}):(\d{2})(am|pm)$", time_text.strip().lower())
+    if not match:
+        return None
+    hour, minute, meridiem = int(match.group(1)), int(match.group(2)), match.group(3)
+    if meridiem == "pm" and hour != 12:
+        hour += 12
+    elif meridiem == "am" and hour == 12:
+        hour = 0
+    return datetime(day.year, day.month, day.day, hour, minute, tzinfo=_EASTERN).isoformat()
+
+
+def _normalize_impact(raw: str) -> str:
+    """Live-page impact is an icon with descriptive text (e.g. a title
+    attribute like "High Impact Expected"), not the clean "High"/
+    "Medium"/"Low"/"Holiday" the JSON feed uses -- normalize to match,
+    falling back to the raw text if it doesn't contain a recognized
+    level (never silently drop it)."""
+    text = (raw or "").lower()
+    for level in ("high", "medium", "low", "holiday"):
+        if level in text:
+            return level.capitalize()
+    return raw or ""
+
+
+def find_all_events_for_day(html: str, day: date) -> list[dict]:
+    """Extract every event on one live day-view page -- schedule AND
+    actual in one pass, since the live page has both (unlike the JSON
+    feed, which only has the schedule). Used to fill in days the JSON
+    feed's "this week" window doesn't cover, for a whole-month view.
+
+    Forex Factory only prints the time on the first row of a group of
+    same-time events, leaving it blank on the rows after -- confirmed
+    directly from a user's own screenshot of the live page (six GBP
+    rows at 2:00am showed the time once, then five blank cells). This
+    forward-fills the last seen time for any row with an empty time
+    cell, or every row after the first in a group would otherwise lose
+    its time entirely.
+
+    Currency/title/actual selectors are confirmed against real
+    output (see find_actual_for_event); impact/forecast/previous are
+    only grounded in a third-party scraper's selectors, not
+    independently confirmed here -- if any of those three look wrong on
+    a real run, that's the first thing to check."""
+    soup = BeautifulSoup(html, "html.parser")
+    events = []
+    last_time_text = ""
+
+    skipped_no_time = 0
+    for row in soup.select("tr"):
+        currency_cell = row.select_one("td.calendar__currency")
+        title_span = row.select_one("span.calendar__event-title")
+        if currency_cell is None or title_span is None:
+            continue  # not an event row (header, day divider, etc.)
+
+        time_cell = row.select_one("td.calendar__time")
+        time_text = time_cell.get_text(strip=True) if time_cell else ""
+        if time_text:
+            last_time_text = time_text
+        event_date = _parse_event_time(last_time_text, day)
+        if event_date is None:
+            # "Tentative"/"All Day"/genuinely no time to forward-fill from
+            # (first row of the day) -- this app's tables are time-sorted
+            # and the db's primary key requires a non-null date, so these
+            # can't be stored; skip rather than crash the whole save.
+            skipped_no_time += 1
+            continue
+
+        impact_cell = row.select_one("td.calendar__impact")
+        impact_span = impact_cell.find("span") if impact_cell else None
+        impact_raw = ((impact_span.get("title") or impact_span.get_text(strip=True)) if impact_span else "")
+
+        forecast_cell = row.select_one("td.calendar__forecast")
+        previous_cell = row.select_one("td.calendar__previous")
+        actual_cell = row.select_one("td.calendar__actual")
+        actual_span = actual_cell.find("span") if actual_cell else None
+        actual_text = (actual_span.get_text(strip=True) if actual_span else actual_cell.get_text(strip=True)) if actual_cell else ""
+        raw_class = " ".join(actual_span.get("class", [])) if actual_span else ""
+
+        forecast_text = forecast_cell.get_text(strip=True) if forecast_cell else ""
+        events.append(
+            {
+                "date": event_date,
+                "country": currency_cell.get_text(strip=True),
+                "title": title_span.get_text(strip=True),
+                "impact": _normalize_impact(impact_raw),
+                "forecast": forecast_text,
+                "previous": previous_cell.get_text(strip=True) if previous_cell else "",
+                "actual": actual_text or None,
+                "direction": _normalize_direction(raw_class) if actual_text else None,
+                "surprise_pct": forex_calendar._surprise_pct(actual_text, forecast_text) if actual_text else None,
+            }
+        )
+
+    print(f"[forex_live_monitor] parsed {len(events)} event(s) for {day} ({skipped_no_time} skipped -- no parseable time)")
+    return events
 
 
 @dataclass
