@@ -1,10 +1,12 @@
 """On-demand AI analysis for the Near-52-Week-Low screen: a single ~200-word
-expert take with a buy-opportunity verdict, and a 5-persona "panel
-discussion" (technical / fundamental / news / analyst-ratings-timing /
-macro-risk) that argues the stock from different angles. Both are
-informational only -- never a buy/sell/hold instruction -- and only run
-when a human clicks a button for one specific ticker; nothing here runs
-automatically across a whole screen.
+expert take with a buy-opportunity verdict, and 5 independent single-focus
+analyst inquiries (technical / fundamental / news / analyst-ratings-timing /
+macro-risk) about the same stock. The 5 are genuinely separate calls, each
+given only the narrow slice of data its own question needs -- not one
+prompt told "you are 5 agents on a panel" with the full context repeated
+five times. Both are informational only -- never a buy/sell/hold
+instruction -- and only run when a human clicks a button for one specific
+ticker; nothing here runs automatically across a whole screen.
 """
 
 from __future__ import annotations
@@ -220,44 +222,149 @@ def analyze_expert_take(
     return _parse_expert_json(text)
 
 
-# --- 5-persona panel discussion ----------------------------------------------
+# --- 5 independent single-focus analyst inquiries ---------------------------
+#
+# These are 5 separate, independent calls -- each persona gets its OWN
+# narrow slice of the data (see PANEL_CONTEXT_BUILDERS below) and answers
+# its own question with no idea the other 4 exist. Earlier system prompts
+# framed this as "you are one of 5 panelists discussing this stock", which
+# read as one role-play prompt wearing different hats rather than 5
+# genuinely separate inquiries -- these are written as standalone analyst
+# briefs instead, with no reference to a panel or other agents.
+
+
+def _price_range_lines(ticker: str, candidate: dict, rating_timeline: dict) -> list[str]:
+    lines = [
+        f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})",
+        f"Current price: {candidate.get('price')}",
+        f"52-week range: low {candidate.get('year_low')}, high {candidate.get('year_high')}",
+        f"% above 52-week low: {candidate.get('pct_from_52w_low')}",
+    ]
+    week_52_low = rating_timeline.get("week_52_low")
+    if week_52_low:
+        lines.append(f"Date of the stock's own 52-week low: {week_52_low['date']} (close {week_52_low['close']})")
+    else:
+        lines.append("Date of the 52-week low: unknown (price history unavailable)")
+    return lines
+
+
+def _fundamental_lines(ticker: str, candidate: dict) -> list[str]:
+    return [
+        f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})",
+        f"Market cap: {candidate.get('market_cap')}",
+        f"Analyst mean price target: {candidate.get('target_mean')} "
+        f"({candidate.get('target_upside_pct')}% upside from current price {candidate.get('price')})",
+        f"Current analyst ratings breakdown: {candidate.get('analyst_ratings')} "
+        f"({candidate.get('buy_ratio_pct')}% buy/strong-buy)",
+    ]
+
+
+def _headline_lines(ticker: str, candidate: dict, headlines: list[dict]) -> list[str]:
+    lines = [f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})", "", "Recent headlines:"]
+    if headlines:
+        for h in headlines:
+            when = h["published_at"].isoformat() if h.get("published_at") else "unknown date"
+            lines.append(f"- [{when}] {h['title']}")
+    else:
+        lines.append("(none found in the lookback window)")
+    return lines
+
+
+def _rating_timeline_lines(ticker: str, candidate: dict, rating_timeline: dict) -> list[str]:
+    lines = [f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})", ""]
+    week_52_low = rating_timeline.get("week_52_low")
+    if week_52_low:
+        lines.append(f"Date of the stock's own 52-week low: {week_52_low['date']} (close {week_52_low['close']})")
+    else:
+        lines.append("Date of the 52-week low: unknown (price history unavailable)")
+    lines.append("")
+    lines.append("Recent analyst rating changes (most recent first):")
+    actions = rating_timeline.get("actions") or []
+    if actions:
+        for a in actions:
+            price_note = f", price then ~{a['price_at_rating']:.2f}" if a.get("price_at_rating") is not None else ""
+            move_note = (
+                f", stock has moved {a['pct_move_since_rating']:+.1f}% since"
+                if a.get("pct_move_since_rating") is not None
+                else ""
+            )
+            lines.append(
+                f"- [{a.get('date')}] {a.get('firm')}: {a.get('action')} "
+                f"({a.get('from_grade')} -> {a.get('to_grade')}) -- {_timing_label(a)} the 52-week low"
+                f"{price_note}{move_note}"
+            )
+    else:
+        lines.append("(none found)")
+    return lines
+
+
+def _macro_lines(ticker: str, candidate: dict, macro_score: Optional[float]) -> list[str]:
+    lines = [
+        f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})",
+        f"% above its 52-week low: {candidate.get('pct_from_52w_low')}",
+    ]
+    if macro_score is not None:
+        lines.append(f"Current macro gate score: {macro_score:.1f}/100 (higher = calmer environment)")
+    else:
+        lines.append("Macro gate score: not available")
+    return lines
+
+
+PANEL_CONTEXT_BUILDERS = {
+    "technical": lambda ticker, candidate, rating_timeline, headlines, macro_score: _price_range_lines(
+        ticker, candidate, rating_timeline
+    ),
+    "fundamental": lambda ticker, candidate, rating_timeline, headlines, macro_score: _fundamental_lines(
+        ticker, candidate
+    ),
+    "news_sentiment": lambda ticker, candidate, rating_timeline, headlines, macro_score: _headline_lines(
+        ticker, candidate, headlines
+    ),
+    "ratings_timing": lambda ticker, candidate, rating_timeline, headlines, macro_score: _rating_timeline_lines(
+        ticker, candidate, rating_timeline
+    ),
+    "macro_risk": lambda ticker, candidate, rating_timeline, headlines, macro_score: _macro_lines(
+        ticker, candidate, macro_score
+    ),
+}
 
 
 PANEL_SYSTEM_PROMPTS = {
     "technical": (
         "Technical Analyst",
-        """You are a technical analyst on a panel discussing one stock trading \
-near its 52-week low. You're given its current price, 52-week high/low, and \
-the date of its own 52-week low. Give a short (60-100 word) technical read: \
-where the current price sits in its range, whether the low looks like it \
-may be forming a base or still falling, and what price level would change \
-your mind either way. You have no chart or indicator data beyond what's \
-given -- be honest about that limit rather than inventing patterns you \
-can't see. Never say to buy, sell, or hold.
+        """You are a technical analyst. You're asked to independently assess one \
+stock trading near its 52-week low, given only its current price, 52-week \
+high/low, and the date of its own 52-week low. Give a short (60-100 word) \
+technical read: where the current price sits in its range, whether the low \
+looks like it may be forming a base or still falling, and what price level \
+would change your mind either way. You have no chart or indicator data \
+beyond what's given -- be honest about that limit rather than inventing \
+patterns you can't see. Never say to buy, sell, or hold.
 
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",
     ),
     "fundamental": (
         "Fundamental Analyst",
-        """You are a fundamental analyst on a panel discussing one stock trading \
-near its 52-week low. You're given its market cap, analyst mean price \
-target, and the buy-ratio among current ratings. Give a short (60-100 word) \
-fundamental read on whether the current price plausibly undervalues the \
-business given what analysts are pricing in via their target, and what \
-would need to be true about the business for the stock to re-rate higher. \
-Be explicit when you lack real fundamental data (earnings, margins, balance \
-sheet) to go on -- don't invent figures. Never say to buy, sell, or hold.
+        """You are a fundamental analyst. You're asked to independently assess \
+one stock trading near its 52-week low, given only its market cap, analyst \
+mean price target, and the buy-ratio among current ratings. Give a short \
+(60-100 word) fundamental read on whether the current price plausibly \
+undervalues the business given what analysts are pricing in via their \
+target, and what would need to be true about the business for the stock to \
+re-rate higher. Be explicit when you lack real fundamental data (earnings, \
+margins, balance sheet) to go on -- don't invent figures. Never say to buy, \
+sell, or hold.
 
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",
     ),
     "news_sentiment": (
         "News & Sentiment Analyst",
-        """You are a news/sentiment analyst on a panel discussing one stock \
-trading near its 52-week low. You're given its recent headlines. Give a \
-short (60-100 word) read on what the news flow suggests is driving the \
-price action, and whether sentiment looks like it's stabilizing, still \
+        """You are a news/sentiment analyst. You're asked to independently assess \
+one stock trading near its 52-week low, given only its recent headlines. \
+Give a short (60-100 word) read on what the news flow suggests is driving \
+the price action, and whether sentiment looks like it's stabilizing, still \
 deteriorating, or already reflects a worst case. If no headlines were \
 given, say so plainly rather than guessing. Never say to buy, sell, or hold.
 
@@ -266,32 +373,34 @@ Respond with ONLY a JSON object, no other text: \
     ),
     "ratings_timing": (
         "Analyst-Ratings Auditor",
-        """You are the analyst-ratings auditor on a panel discussing one stock \
-trading near its 52-week low. Your ONE job is to check the TIMING of recent \
-analyst rating changes against the stock's own price action. You are given \
-each recent rating change's date, the stock's price on/near that date, \
-whether it fell before or after the date of the stock's 52-week low, and \
-the % the price has moved since that rating. Reason explicitly about \
-staleness: a Buy issued well BEFORE the slide to the low may not reflect \
-today's reality and could be stale; a Buy reaffirmed or issued AFTER the \
-low (or a recent downgrade) is a stronger, more current signal either way. \
-Name the specific firm(s) and date(s) you're weighing. If no rating-change \
-data was given, say so plainly rather than guessing. Give a short (80-120 \
-word) take. Never say to buy, sell, or hold.
+        """You are an analyst-ratings auditor. Your ONLY job is to independently \
+check the TIMING of recent analyst rating changes for one stock trading near \
+its 52-week low against the stock's own price action -- nothing else about \
+this stock is in scope for you. You are given each recent rating change's \
+date, the stock's price on/near that date, whether it fell before or after \
+the date of the stock's 52-week low, and the % the price has moved since \
+that rating. Reason explicitly about staleness: a Buy issued well BEFORE \
+the slide to the low may not reflect today's reality and could be stale; a \
+Buy reaffirmed or issued AFTER the low (or a recent downgrade) is a \
+stronger, more current signal either way. Name the specific firm(s) and \
+date(s) you're weighing. If no rating-change data was given, say so \
+plainly rather than guessing. Give a short (80-120 word) take. Never say \
+to buy, sell, or hold.
 
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",
     ),
     "macro_risk": (
-        "Macro & Risk Manager",
-        """You are the macro/risk manager on a panel discussing one stock \
-trading near its 52-week low. You're given the current macro "calm" score \
-(0-100, higher = calmer) and everything else given about the stock. Give a \
-short (60-100 word) devil's-advocate read: what could keep this stock down \
-further regardless of company-specific factors (macro conditions, sector \
-rotation, liquidity), and whether the current macro backdrop supports or \
-argues against adding risk to a name like this right now. Never say to \
-buy, sell, or hold.
+        "Macro & Risk Analyst",
+        """You are a macro/risk analyst. You're asked to independently assess one \
+stock trading near its 52-week low, given only how far above that low it \
+currently sits and the current macro "calm" score (0-100, higher = \
+calmer) -- no company-specific fundamentals or news are in scope for you. \
+Give a short (60-100 word) devil's-advocate read: what could keep a stock \
+like this down further regardless of company-specific factors (macro \
+conditions, sector rotation, liquidity), and whether the current macro \
+backdrop supports or argues against adding risk to a name like this right \
+now. Never say to buy, sell, or hold.
 
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",
@@ -326,14 +435,17 @@ def run_expert_panel(
     model: str,
     api_key: Optional[str] = None,
 ) -> list[dict]:
-    """Run all 5 panelist personas against the same shared context, one at
-    a time. Each persona's own failure (rate limit, transient network
-    error) is isolated to its own entry rather than aborting the whole
-    panel -- a partial panel with 4 good takes and one clearly-marked
-    error is more useful than losing all 5 over one bad call."""
-    user_message = build_context_user_message(ticker, candidate, rating_timeline, headlines, macro_score)
+    """Run 5 independent single-focus analyst inquiries, one at a time --
+    each gets ONLY the data relevant to its own question (see
+    PANEL_CONTEXT_BUILDERS), not the full shared context, so this is 5
+    genuinely separate calls rather than one prompt wearing 5 hats. Each
+    persona's own failure (rate limit, transient network error) is
+    isolated to its own entry rather than aborting the rest -- a partial
+    result with 4 good takes and one clearly-marked error is more useful
+    than losing all 5 over one bad call."""
     results = []
     for key, (label, system_prompt) in PANEL_SYSTEM_PROMPTS.items():
+        user_message = "\n".join(PANEL_CONTEXT_BUILDERS[key](ticker, candidate, rating_timeline, headlines, macro_score))
         try:
             text = ai_client.call_provider(
                 provider, system_prompt, user_message, model, api_key=api_key, max_tokens=400
