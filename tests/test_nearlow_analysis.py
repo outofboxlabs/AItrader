@@ -65,11 +65,13 @@ def test_get_rating_timeline_finds_52w_low_and_annotates_actions(monkeypatch):
     assert result["actions"][0]["before_52w_low"] is False  # issued after the low
     assert result["actions"][0]["price_at_rating"] == 40.0  # closest bar on/before 2026-02-15
     assert result["actions"][0]["pct_move_since_rating"] == pytest.approx(50.0)  # 40 -> 60
+    assert result["actions"][0]["pct_above_low_at_rating"] == pytest.approx(0.0)  # already at the eventual low
 
     assert result["actions"][1]["date"] == "2026-01-15"
     assert result["actions"][1]["firm"] == "Big Bank"
     assert result["actions"][1]["before_52w_low"] is True  # issued before the low
     assert result["actions"][1]["price_at_rating"] == 100.0
+    assert result["actions"][1]["pct_above_low_at_rating"] == pytest.approx(150.0)  # was performing well at the time
 
 
 def test_get_rating_timeline_handles_no_price_history(monkeypatch):
@@ -127,6 +129,7 @@ def test_build_context_user_message_includes_key_facts():
                 "before_52w_low": False,
                 "price_at_rating": 40.0,
                 "pct_move_since_rating": 50.0,
+                "pct_above_low_at_rating": 0.0,
             }
         ],
     }
@@ -137,8 +140,34 @@ def test_build_context_user_message_includes_key_facts():
     assert "40.0" in message  # 52-week low close appears
     assert "Small Shop" in message
     assert "AFTER the 52-week low" in message
+    assert "0% above what would become its 52-week low when issued" in message
     assert "Acme misses on guidance" in message
     assert "65.0/100" in message
+
+
+def test_format_rating_action_line_states_pct_above_low_plainly():
+    action = {
+        "date": "2026-01-15",
+        "firm": "Big Bank",
+        "to_grade": "Buy",
+        "from_grade": "Hold",
+        "action": "up",
+        "before_52w_low": True,
+        "price_at_rating": 44.0,
+        "pct_move_since_rating": -4.5,
+        "pct_above_low_at_rating": 10.0,
+    }
+    line = nla._format_rating_action_line(action)
+    assert "Big Bank" in line
+    assert "BEFORE the 52-week low" in line
+    assert "was 10% above what would become its 52-week low when issued" in line
+    assert "moved -4.5% since" in line
+
+
+def test_format_rating_action_line_omits_pct_above_low_when_missing():
+    action = {"date": "2026-01-15", "firm": "Big Bank", "to_grade": "Buy", "from_grade": "Hold", "action": "up"}
+    line = nla._format_rating_action_line(action)
+    assert "above what would become its 52-week low" not in line
 
 
 def test_build_context_user_message_handles_missing_data():

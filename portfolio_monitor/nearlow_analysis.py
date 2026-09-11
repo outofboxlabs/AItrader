@@ -70,6 +70,16 @@ def get_rating_timeline(ticker: str) -> dict:
                 action["price_at_rating"] = price_then["close"]
                 latest_close = daily_history[-1]["close"]
                 action["pct_move_since_rating"] = (latest_close - price_then["close"]) / price_then["close"] * 100.0
+                if week_52_low:
+                    # How far above what would LATER become the 52-week low
+                    # the price already was when this rating was issued --
+                    # e.g. "only 10% above" means it was issued into an
+                    # already-weak, sliding price; "50% above" means it was
+                    # issued while the stock was still performing well,
+                    # well before the decline that followed.
+                    action["pct_above_low_at_rating"] = (
+                        (price_then["close"] - week_52_low["close"]) / week_52_low["close"] * 100.0
+                    )
             actions.append(action)
 
     actions.sort(key=lambda a: a["date"], reverse=True)
@@ -87,6 +97,30 @@ def _timing_label(action: dict) -> str:
     if before is False:
         return "AFTER"
     return "unknown timing vs."
+
+
+def _format_rating_action_line(a: dict) -> str:
+    """One rating change as a plain factual line -- states the raw %
+    above the eventual 52-week low at issuance (e.g. "was 10% above what
+    would become its 52-week low") rather than pre-labeling it "stale" or
+    "conviction" here; that judgment call is exactly what the AI reading
+    this is asked to make."""
+    price_note = f", price then ~{a['price_at_rating']:.2f}" if a.get("price_at_rating") is not None else ""
+    above_low_note = (
+        f", was {a['pct_above_low_at_rating']:.0f}% above what would become its 52-week low when issued"
+        if a.get("pct_above_low_at_rating") is not None
+        else ""
+    )
+    move_note = (
+        f", stock has moved {a['pct_move_since_rating']:+.1f}% since"
+        if a.get("pct_move_since_rating") is not None
+        else ""
+    )
+    return (
+        f"- [{a.get('date')}] {a.get('firm')}: {a.get('action')} "
+        f"({a.get('from_grade')} -> {a.get('to_grade')}) -- {_timing_label(a)} the 52-week low"
+        f"{price_note}{above_low_note}{move_note}"
+    )
 
 
 def build_context_user_message(
@@ -118,18 +152,7 @@ def build_context_user_message(
     lines.append("Recent analyst rating changes (most recent first):")
     actions = rating_timeline.get("actions") or []
     if actions:
-        for a in actions:
-            price_note = f", price then ~{a['price_at_rating']:.2f}" if a.get("price_at_rating") is not None else ""
-            move_note = (
-                f", stock has moved {a['pct_move_since_rating']:+.1f}% since"
-                if a.get("pct_move_since_rating") is not None
-                else ""
-            )
-            lines.append(
-                f"- [{a.get('date')}] {a.get('firm')}: {a.get('action')} "
-                f"({a.get('from_grade')} -> {a.get('to_grade')}) -- {_timing_label(a)} the 52-week low"
-                f"{price_note}{move_note}"
-            )
+        lines.extend(_format_rating_action_line(a) for a in actions)
     else:
         lines.append("(none found)")
 
@@ -165,8 +188,12 @@ Write ONE analysis of about 200 words (180-220 is fine) covering:
 - Why the stock may be down near its low, based on the headlines/data given.
 - Whether the current analyst consensus and any recent rating changes still \
 look credible given how much time has passed and how the price has moved \
-since -- an old Buy rating from well before a big slide carries less weight \
-than one reaffirmed, or issued, after it.
+since. Use the "% above what would become its 52-week low when issued" \
+figure given for each rating: a Buy issued when the price was already close \
+to that eventual low was made despite visible weakness (a stronger, more \
+current signal); a Buy issued while the price was still well above that \
+low (i.e. the stock was performing well at the time) predates the decline \
+and may simply be stale.
 - The strongest case FOR this being a buy opportunity, and the strongest \
 case AGAINST, laid out side by side rather than staked as a single opinion.
 
@@ -281,18 +308,7 @@ def _rating_timeline_lines(ticker: str, candidate: dict, rating_timeline: dict) 
     lines.append("Recent analyst rating changes (most recent first):")
     actions = rating_timeline.get("actions") or []
     if actions:
-        for a in actions:
-            price_note = f", price then ~{a['price_at_rating']:.2f}" if a.get("price_at_rating") is not None else ""
-            move_note = (
-                f", stock has moved {a['pct_move_since_rating']:+.1f}% since"
-                if a.get("pct_move_since_rating") is not None
-                else ""
-            )
-            lines.append(
-                f"- [{a.get('date')}] {a.get('firm')}: {a.get('action')} "
-                f"({a.get('from_grade')} -> {a.get('to_grade')}) -- {_timing_label(a)} the 52-week low"
-                f"{price_note}{move_note}"
-            )
+        lines.extend(_format_rating_action_line(a) for a in actions)
     else:
         lines.append("(none found)")
     return lines
@@ -376,16 +392,34 @@ Respond with ONLY a JSON object, no other text: \
         """You are an analyst-ratings auditor. Your ONLY job is to independently \
 check the TIMING of recent analyst rating changes for one stock trading near \
 its 52-week low against the stock's own price action -- nothing else about \
-this stock is in scope for you. You are given each recent rating change's \
-date, the stock's price on/near that date, whether it fell before or after \
-the date of the stock's 52-week low, and the % the price has moved since \
-that rating. Reason explicitly about staleness: a Buy issued well BEFORE \
-the slide to the low may not reflect today's reality and could be stale; a \
-Buy reaffirmed or issued AFTER the low (or a recent downgrade) is a \
-stronger, more current signal either way. Name the specific firm(s) and \
-date(s) you're weighing. If no rating-change data was given, say so \
-plainly rather than guessing. Give a short (80-120 word) take. Never say \
-to buy, sell, or hold.
+this stock is in scope for you. For each recent rating change you are given \
+its date, the stock's price on/near that date, how far above what LATER \
+became the stock's 52-week low that price already was at the time (e.g. \
+"was 10% above what would become its 52-week low when issued"), whether the \
+rating fell before or after the date of the 52-week low itself, and the % \
+the price has moved since that rating.
+
+Use the "how far above the eventual low" figure to judge WHAT THE ANALYST \
+WAS SEEING when they made the call, not just whether the calendar date was \
+before or after the low:
+- If a Buy was issued when the price was ALREADY close to what became its \
+52-week low (a small % above it), the analyst was looking at a stock \
+already sliding/weak and chose to call it a buy anyway -- that's a real \
+conviction call made despite visible weakness, and a fresher, more \
+relevant signal today.
+- If a Buy was issued while the price was still well above what became its \
+52-week low (a large % above it, i.e. the stock was performing well at the \
+time), the analyst had not yet seen the decline that followed -- that \
+rating may simply be stale rather than a considered view of today's \
+weakness.
+- A rating reaffirmed or issued AFTER the low (or a recent downgrade) \
+generally carries more current information than one from well before the \
+decline.
+
+Name the specific firm(s) and date(s) you're weighing, and state plainly \
+how far above the eventual low the price was when each one you cite was \
+issued. If no rating-change data was given, say so plainly rather than \
+guessing. Give a short (80-120 word) take. Never say to buy, sell, or hold.
 
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",
