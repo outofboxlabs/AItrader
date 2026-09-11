@@ -1393,8 +1393,13 @@ function startForexCountdown() {
   const tick = () => {
     const el = document.getElementById("fx-next-event");
     const now = Date.now();
+    const includeNonUs = document.getElementById("fx-include-non-us").checked;
     const upcoming = forexRows
-      .filter(e => (e.impact || "").toLowerCase() === "high" && e.date && new Date(e.date).getTime() > now)
+      .filter(e =>
+        (e.impact || "").toLowerCase() === "high" &&
+        (includeNonUs || e.country === "USD") &&
+        e.date && new Date(e.date).getTime() > now
+      )
       .sort((a, b) => new Date(a.date) - new Date(b.date));
     if (upcoming.length === 0) { el.textContent = ""; return; }
     const next = upcoming[0];
