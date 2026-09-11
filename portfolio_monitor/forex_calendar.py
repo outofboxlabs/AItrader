@@ -7,12 +7,16 @@ for this. This pulls their public JSON feed that powers their own
 embeddable calendar widget -- unofficial and undocumented, but the
 standard way the retail trading-bot community reads this data, since
 scraping the HTML calendar page directly is fragile and against their
-ToS. The field names below (title, country, date, impact, forecast,
-previous, actual) are inferred from consistent third-party usage, not
-confirmed against Forex Factory's own docs (there aren't any) -- this
-session's network access could not reach forexfactory.com or its CDN to
-verify directly. Sanity-check the first real pull against
-https://www.forexfactory.com/calendar.
+ToS. The field names below (title, country, impact, forecast, previous,
+actual) were confirmed against a real pull -- they came through
+correctly on the first try. The timestamp field did not: a first guess
+of a "date" ISO string was wrong (every row rendered "n/a"). Later
+research points to a "dateline" field carrying a Unix UTC timestamp
+instead, which is what's implemented below, but this STILL hasn't been
+confirmed against a real response (this session's network access can't
+reach forexfactory.com or its CDN to verify directly) -- fetch_calendar_events
+prints the first raw event to the terminal on every call specifically so
+this can be checked/fixed quickly if it's still wrong.
 
 This module only reads the calendar. It does not place or evaluate any
 trade -- see app.py's Forex Calendar tab docstring for why.
@@ -20,6 +24,7 @@ trade -- see app.py's Forex Calendar tab docstring for why.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Optional
 
 import requests
@@ -61,6 +66,26 @@ def _surprise_pct(actual, forecast) -> Optional[float]:
     return (a - f) / abs(f) * 100.0
 
 
+def _extract_iso_datetime(e: dict) -> Optional[str]:
+    """Best-effort event timestamp as an ISO 8601 string. Prefers a
+    "dateline" field (a Unix UTC timestamp, per third-party reports on
+    this feed's shape) over a plain "date" string, since a first attempt
+    using "date" alone came back as unparseable/missing on a real pull.
+    Never raises -- falls back to whatever "date" holds (possibly None,
+    rendered as "n/a" downstream) rather than blocking the rest of the
+    row's real data (title/impact/forecast/etc, which came through fine)."""
+    dateline = e.get("dateline")
+    if dateline is not None:
+        try:
+            ts = float(dateline)
+            if ts > 1e12:  # looks like milliseconds, not seconds
+                ts /= 1000.0
+            return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        except (TypeError, ValueError, OSError):
+            pass
+    return e.get("date")
+
+
 def fetch_calendar_events(feed_url: str = DEFAULT_FEED_URL, timeout: float = 15.0) -> list[dict]:
     """Pull and normalize this week's calendar from Forex Factory's feed.
     Raises on network/parse failure -- callers decide how to degrade
@@ -69,13 +94,20 @@ def fetch_calendar_events(feed_url: str = DEFAULT_FEED_URL, timeout: float = 15.
     response.raise_for_status()
     raw_events = response.json()
 
+    if raw_events:
+        # This feed is unofficial and undocumented -- if any column ever
+        # looks wrong again, this line in the terminal shows exactly what
+        # Forex Factory actually sent, so the parser can be fixed against
+        # real data instead of another guess.
+        print(f"[forex_calendar] raw sample event (verify field names against this): {raw_events[0]}")
+
     events = []
     for e in raw_events:
         actual = e.get("actual")
         forecast = e.get("forecast")
         events.append(
             {
-                "date": e.get("date"),
+                "date": _extract_iso_datetime(e),
                 "country": e.get("country"),
                 "title": e.get("title"),
                 "impact": e.get("impact"),

@@ -93,3 +93,54 @@ def test_fetch_calendar_events_normalizes_shape(monkeypatch):
 
     holiday = events[1]
     assert holiday["surprise_pct"] is None
+
+
+def test_fetch_calendar_events_prefers_dateline_unix_timestamp(monkeypatch):
+    """A first guess that the feed used a plain "date" ISO string was
+    wrong on a real pull -- every row came back with a missing/unparseable
+    timestamp. Later research points to "dateline" (a Unix UTC timestamp)
+    instead; this is what _extract_iso_datetime now prefers."""
+    raw = [
+        {
+            "title": "Non-Farm Payrolls",
+            "country": "USD",
+            "dateline": 1757579400,  # 2025-09-11T08:30:00 UTC
+            "date": "",
+            "impact": "High",
+            "forecast": "180K",
+            "previous": "150K",
+            "actual": "227K",
+        }
+    ]
+
+    def fake_get(url, timeout=None, headers=None):
+        return _FakeResponse(raw)
+
+    monkeypatch.setattr(fx.requests, "get", fake_get)
+
+    events = fx.fetch_calendar_events()
+
+    assert events[0]["date"] == "2025-09-11T08:30:00+00:00"
+
+
+def test_fetch_calendar_events_falls_back_to_date_field_when_no_dateline(monkeypatch):
+    raw = [
+        {
+            "title": "GDP m/m",
+            "country": "GBP",
+            "date": "2026-09-11T04:30:00-04:00",
+            "impact": "High",
+            "forecast": "0.3%",
+            "previous": "0.0%",
+            "actual": "",
+        }
+    ]
+
+    def fake_get(url, timeout=None, headers=None):
+        return _FakeResponse(raw)
+
+    monkeypatch.setattr(fx.requests, "get", fake_get)
+
+    events = fx.fetch_calendar_events()
+
+    assert events[0]["date"] == "2026-09-11T04:30:00-04:00"
