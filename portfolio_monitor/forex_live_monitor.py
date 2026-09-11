@@ -178,7 +178,13 @@ def find_all_events_for_day(html: str, day: date) -> list[dict]:
             skipped_no_time += 1
             continue
 
-        impact_cell = row.select_one("td.calendar__impact")
+        # Confirmed wrong via a real run: this cell doesn't follow the
+        # "calendar__cell calendar__X" pattern the other cells do -- the
+        # reference selector for it is specifically "td.impact", which
+        # every real row here was silently missing (impact rendered
+        # "n/a" for every live-scraped event). Falls back to the
+        # calendar__impact guess in case a future markup change adds it.
+        impact_cell = row.select_one("td.impact") or row.select_one("td.calendar__impact")
         impact_span = impact_cell.find("span") if impact_cell else None
         impact_raw = ((impact_span.get("title") or impact_span.get_text(strip=True)) if impact_span else "")
 

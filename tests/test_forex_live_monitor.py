@@ -103,7 +103,7 @@ _DAY_TABLE_TEMPLATE = """
   <tr class="calendar__row calendar_row">
     <td class="calendar__cell calendar__time time">8:30am</td>
     <td class="calendar__cell calendar__currency currency">USD</td>
-    <td class="calendar__cell calendar__impact impact"><span title="High Impact Expected"></span></td>
+    <td class="impact"><span title="High Impact Expected"></span></td>
     <td class="calendar__cell calendar__event event"><span class="calendar__event-title">Core CPI m/m</span></td>
     <td class="calendar__cell calendar__actual actual"><span class="better">0.3%</span></td>
     <td class="calendar__cell calendar__forecast forecast">0.2%</td>
@@ -112,7 +112,7 @@ _DAY_TABLE_TEMPLATE = """
   <tr class="calendar__row calendar_row">
     <td class="calendar__cell calendar__time time"></td>
     <td class="calendar__cell calendar__currency currency">USD</td>
-    <td class="calendar__cell calendar__impact impact"><span title="High Impact Expected"></span></td>
+    <td class="impact"><span title="High Impact Expected"></span></td>
     <td class="calendar__cell calendar__event event"><span class="calendar__event-title">Core CPI y/y</span></td>
     <td class="calendar__cell calendar__actual actual"><span class="worse">2.4%</span></td>
     <td class="calendar__cell calendar__forecast forecast">2.4%</td>
@@ -121,7 +121,7 @@ _DAY_TABLE_TEMPLATE = """
   <tr class="calendar__row calendar_row">
     <td class="calendar__cell calendar__time time">10:00am</td>
     <td class="calendar__cell calendar__currency currency">USD</td>
-    <td class="calendar__cell calendar__impact impact"><span title="Medium Impact Expected"></span></td>
+    <td class="impact"><span title="Medium Impact Expected"></span></td>
     <td class="calendar__cell calendar__event event"><span class="calendar__event-title">Prelim UoM Consumer Sentiment</span></td>
     <td class="calendar__cell calendar__actual actual"><!----></td>
     <td class="calendar__cell calendar__forecast forecast">51.0</td>
