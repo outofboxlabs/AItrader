@@ -545,6 +545,46 @@ def test_analyze_forex_impact_requires_saved_api_key(client, monkeypatch):
     assert "No saved API key" in res.get_json()["error"]
 
 
+def test_analyze_forex_impact_auto_detects_provider_with_a_saved_key(client, monkeypatch):
+    """The default provider (anthropic) has no key, but openai does --
+    with no explicit provider requested, it must fall back to openai
+    automatically rather than erroring on the default alone."""
+    assert app_mod.config.NEWS_PROVIDER == "anthropic"
+    monkeypatch.setattr(
+        app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-openai-test" if provider == "openai" else None
+    )
+    captured = {}
+
+    def fake_analyze(event, positions, provider, model, api_key=None):
+        captured["provider"] = provider
+        captured["api_key"] = api_key
+        return {"impact_summary": "n/a", "affected_tickers": [], "disclaimer": "This is not investment advice.", "parse_error": False}
+
+    monkeypatch.setattr(app_mod.forex_calendar, "analyze_portfolio_impact", fake_analyze)
+
+    event = {"title": "CPI m/m", "country": "USD", "date": "2026-09-11T08:30:00-04:00", "impact": "High"}
+    res = client.post("/api/forex-calendar/analyze-impact", data=json.dumps({"event": event}), content_type="application/json")
+
+    assert res.status_code == 200
+    assert captured["provider"] == "openai"
+    assert captured["api_key"] == "sk-openai-test"
+
+
+def test_analyze_forex_impact_explicit_provider_choice_is_not_overridden(client, monkeypatch):
+    """An explicitly requested provider with no key is a clear error --
+    it must not silently fall back to a different provider."""
+    monkeypatch.setattr(
+        app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-openai-test" if provider == "openai" else None
+    )
+    event = {"title": "CPI m/m", "country": "USD", "date": "2026-09-11T08:30:00-04:00", "impact": "High"}
+    res = client.post(
+        "/api/forex-calendar/analyze-impact",
+        data=json.dumps({"event": event, "provider": "anthropic"}),
+        content_type="application/json",
+    )
+    assert res.status_code == 400
+
+
 def test_analyze_forex_impact_rejects_unknown_provider(client, monkeypatch):
     monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
     event = {"title": "CPI m/m", "country": "USD", "date": "2026-09-11T08:30:00-04:00", "impact": "High"}

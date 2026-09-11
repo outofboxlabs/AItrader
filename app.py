@@ -491,6 +491,23 @@ def run_forex_calendar_now():
     return jsonify({"events": events, "last_fetched_at": last_fetch, "refetched": did_refetch})
 
 
+def _resolve_forex_analysis_provider(requested_provider: Optional[str]) -> tuple[str, Optional[str]]:
+    """If a provider was explicitly requested, use exactly that one
+    (and only that one -- an explicit choice with no key is a clear
+    error, not a silent fallback). Otherwise try the app's configured
+    default first, then every other provider, and use whichever
+    actually has a saved key -- so this works with whatever key you've
+    saved rather than only the one that happens to be the overall
+    default."""
+    if requested_provider:
+        return requested_provider, credentials.resolve_api_key(requested_provider, interactive=False)
+    for provider in [config.NEWS_PROVIDER] + [p for p in PROVIDERS if p != config.NEWS_PROVIDER]:
+        api_key = credentials.resolve_api_key(provider, interactive=False)
+        if api_key:
+            return provider, api_key
+    return config.NEWS_PROVIDER, None
+
+
 @app.route("/api/forex-calendar/analyze-impact", methods=["POST"])
 def analyze_forex_impact():
     """On-demand only -- one event at a time, only when a human clicks
@@ -502,14 +519,14 @@ def analyze_forex_impact():
     if not isinstance(event, dict):
         return jsonify({"error": "expected an event object"}), 400
 
-    provider = body.get("provider", config.NEWS_PROVIDER)
-    if provider not in PROVIDERS:
-        return jsonify({"error": f"unknown provider {provider!r}"}), 400
-    model = body.get("model") or NEWS_DEFAULT_MODEL[provider]
+    requested_provider = body.get("provider")
+    if requested_provider and requested_provider not in PROVIDERS:
+        return jsonify({"error": f"unknown provider {requested_provider!r}"}), 400
 
-    api_key = credentials.resolve_api_key(provider, interactive=False)
+    provider, api_key = _resolve_forex_analysis_provider(requested_provider)
     if not api_key:
-        return jsonify({"error": f"No saved API key for {provider}. Add one in the Settings tab first."}), 400
+        return jsonify({"error": "No saved API key for any provider. Add one in the Settings tab first."}), 400
+    model = body.get("model") or NEWS_DEFAULT_MODEL[provider]
 
     positions = _load_positions_raw()
     try:
