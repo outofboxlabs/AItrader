@@ -162,7 +162,12 @@ def build_portfolio_impact_user_message(event: dict, positions: list[dict]) -> s
     return "\n".join(lines)
 
 
-def _parse_portfolio_impact_json(text: str) -> dict:
+def _parse_ai_json_with_fallback(text: str, list_field: str) -> dict:
+    """Shared JSON-with-fallback parsing for both directions of calendar-
+    impact analysis (one event -> whole portfolio, or one ticker -> many
+    events) -- same shape either way, just a different name for the list
+    field. Never raises: an unparseable response degrades to a plain-text
+    summary with parse_error=True rather than blowing up the caller."""
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
@@ -176,14 +181,18 @@ def _parse_portfolio_impact_json(text: str) -> dict:
         if parsed is None:
             return {
                 "impact_summary": text.strip()[:500] or None,
-                "affected_tickers": [],
+                list_field: [],
                 "disclaimer": "This is not investment advice.",
                 "parse_error": True,
             }
     parsed.setdefault("disclaimer", "This is not investment advice.")
-    parsed.setdefault("affected_tickers", [])
+    parsed.setdefault(list_field, [])
     parsed.setdefault("parse_error", False)
     return parsed
+
+
+def _parse_portfolio_impact_json(text: str) -> dict:
+    return _parse_ai_json_with_fallback(text, "affected_tickers")
 
 
 def analyze_portfolio_impact(
@@ -200,3 +209,73 @@ def analyze_portfolio_impact(
         provider, PORTFOLIO_IMPACT_SYSTEM_PROMPT, user_message, model, api_key=api_key, max_tokens=500
     )
     return _parse_portfolio_impact_json(text)
+
+
+STOCK_CALENDAR_IMPACT_SYSTEM_PROMPT = """You are a market analyst embedded in a portfolio \
+monitoring tool. You are given one stock ticker (with the user's specific position(s) \
+in it) and a list of scheduled or recently-released economic calendar events (rate \
+decisions, CPI, NFP, GDP, etc.) at an impact level the user chose to consider. Your \
+job is ONLY to inform, never to advise:
+
+- In 3-5 sentences, explain which of these events (if any) are plausibly relevant to \
+THIS specific stock, and the mechanism by which they could affect it (e.g. sector \
+sensitivity to rates, dollar exposure, consumer-spending links) -- reference the \
+actual ticker and position given, not generic commentary.
+- If an event has already released (an actual value is given), factor in whether it \
+beat, missed, or matched the forecast, and by how much.
+- If you genuinely see no plausible connection between any of these events and this \
+stock, say so plainly rather than forcing a connection.
+- List which of the given events, if any, you consider most relevant, most relevant \
+first.
+
+You must NEVER say to buy, sell, hold, or otherwise act on this position. You are \
+laying out plausible mechanisms for a human to weigh, not telling them what to do.
+
+Respond with ONLY a JSON object, no other text, matching exactly this shape:
+{"impact_summary": "...", "most_relevant_events": ["...", "..."], \
+"disclaimer": "This is not investment advice."}
+"""
+
+
+def build_stock_calendar_impact_user_message(ticker: str, positions: list[dict], events: list[dict]) -> str:
+    lines = [f"Ticker: {ticker}", "", "Position(s) in this ticker:"]
+    if positions:
+        for p in positions:
+            if p.get("asset_type") == "option":
+                lines.append(f"- {p.get('option_type')} option, strike {p.get('strike')}, expiry {p.get('expiry')}")
+            else:
+                lines.append(f"- {p.get('contracts')} shares")
+    else:
+        lines.append("(none saved)")
+
+    lines.append("")
+    lines.append(f"Calendar events at the selected impact level(s) ({len(events)} total):")
+    if events:
+        for e in events:
+            actual_str = f", actual {e['actual']}" if e.get("actual") else ", not yet released"
+            surprise_str = f" (surprise {e['surprise_pct']:+.1f}%)" if e.get("surprise_pct") is not None else ""
+            lines.append(
+                f"- [{e.get('impact')}] {e.get('date')} {e.get('country')} {e.get('title')}: "
+                f"previous {e.get('previous') or 'n/a'}, forecast {e.get('forecast') or 'n/a'}{actual_str}{surprise_str}"
+            )
+    else:
+        lines.append("(none)")
+    return "\n".join(lines)
+
+
+def _parse_stock_calendar_impact_json(text: str) -> dict:
+    return _parse_ai_json_with_fallback(text, "most_relevant_events")
+
+
+def analyze_stock_calendar_impact(
+    ticker: str, positions: list[dict], events: list[dict], provider: str, model: str, api_key: Optional[str] = None
+) -> dict:
+    """How a set of calendar events (already filtered to the impact
+    level(s) a human picked) could plausibly affect one specific stock,
+    via the configured AI provider. Raises on API failure -- the caller
+    decides how to degrade. On-demand only, one ticker at a time."""
+    user_message = build_stock_calendar_impact_user_message(ticker, positions, events)
+    text = ai_client.call_provider(
+        provider, STOCK_CALENDAR_IMPACT_SYSTEM_PROMPT, user_message, model, api_key=api_key, max_tokens=600
+    )
+    return _parse_stock_calendar_impact_json(text)

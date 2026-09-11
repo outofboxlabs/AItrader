@@ -537,6 +537,48 @@ def analyze_forex_impact():
     return jsonify(result)
 
 
+@app.route("/api/forex-calendar/analyze-stock-impact", methods=["POST"])
+def analyze_stock_calendar_impact():
+    """On-demand only -- one ticker at a time, only when a human picks
+    impact level(s) and clicks Analyze in the Portfolio tab's Calendar
+    Impact section. Uses whatever calendar data is already cached from
+    the Forex Calendar tab's "Run Now" -- does not trigger a fetch of
+    its own, so this stays fast and doesn't duplicate that tab's cost."""
+    body = request.get_json(force=True)
+    ticker = (body.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker required"}), 400
+
+    impact_levels = body.get("impact_levels")
+    if not isinstance(impact_levels, list) or not impact_levels:
+        return jsonify({"error": "impact_levels must be a non-empty list"}), 400
+    normalized_levels = {str(lvl).strip().lower() for lvl in impact_levels}
+
+    requested_provider = body.get("provider")
+    if requested_provider and requested_provider not in PROVIDERS:
+        return jsonify({"error": f"unknown provider {requested_provider!r}"}), 400
+    provider, api_key = _resolve_forex_analysis_provider(requested_provider)
+    if not api_key:
+        return jsonify({"error": "No saved API key for any provider. Add one in the Settings tab first."}), 400
+    model = body.get("model") or NEWS_DEFAULT_MODEL[provider]
+
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        all_events = db_mod.get_forex_calendar_events(conn)
+    matching_events = [e for e in all_events if (e.get("impact") or "").lower() in normalized_levels]
+
+    positions = [p for p in _load_positions_raw() if (p.get("ticker") or "").upper() == ticker]
+
+    try:
+        result = forex_calendar.analyze_stock_calendar_impact(
+            ticker, positions, matching_events, provider, model, api_key=api_key
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"error": str(exc)}), 502
+    return jsonify(result)
+
+
 # --- Settings ----------------------------------------------------------
 
 
@@ -741,6 +783,16 @@ PAGE_TEMPLATE = """<!doctype html>
       <section class="block" id="p-news-block" style="display:none">
         <h3>News</h3>
         <div id="p-news-cards"></div>
+      </section>
+
+      <section class="block" id="p-calendar-impact-block" style="display:none">
+        <h3>Calendar Impact</h3>
+        <p class="muted" style="margin-top:-4px;">
+          On demand only -- pick which Forex Factory impact level(s) to consider for each stock, then
+          click Analyze. Uses whatever calendar data is already cached from the Forex Calendar tab's
+          "Run Now" -- run that first if a stock shows no events found.
+        </p>
+        <div id="p-calendar-impact-cards"></div>
       </section>
     </div>
   </div>
@@ -1035,6 +1087,69 @@ function renderPortfolioResults(data) {
     }).join("");
   } else {
     newsBlock.style.display = "none";
+  }
+
+  renderCalendarImpactCards(data.valuations);
+}
+
+function renderCalendarImpactCards(valuations) {
+  const block = document.getElementById("p-calendar-impact-block");
+  const container = document.getElementById("p-calendar-impact-cards");
+  const tickers = [...new Set(valuations.map(v => v.ticker))];
+  if (tickers.length === 0) {
+    block.style.display = "none";
+    return;
+  }
+  block.style.display = "block";
+  container.innerHTML = tickers.map(ticker => `
+    <div class="news-card">
+      <span class="ticker">${ticker}</span>
+      <label style="margin-left:8px;"><input type="checkbox" class="cal-impact-level" data-ticker="${ticker}" value="High" checked> High</label>
+      <label style="margin-left:8px;"><input type="checkbox" class="cal-impact-level" data-ticker="${ticker}" value="Medium"> Medium</label>
+      <label style="margin-left:8px;"><input type="checkbox" class="cal-impact-level" data-ticker="${ticker}" value="Low"> Low</label>
+      <button class="secondary" style="margin-left:8px; font-size:0.75rem; padding:3px 8px;" onclick="analyzeStockCalendarImpact('${ticker}', this)">Analyze</button>
+      <div class="cal-impact-result muted" id="cal-impact-result-${ticker}" style="display:none; margin-top:8px;"></div>
+    </div>
+  `).join("");
+}
+
+async function analyzeStockCalendarImpact(ticker, btn) {
+  const checked = [...document.querySelectorAll(`.cal-impact-level[data-ticker="${ticker}"]:checked`)].map(cb => cb.value);
+  const resultEl = document.getElementById(`cal-impact-result-${ticker}`);
+  if (checked.length === 0) {
+    resultEl.textContent = "Pick at least one impact level.";
+    resultEl.style.display = "block";
+    return;
+  }
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "...";
+  resultEl.style.display = "none";
+  try {
+    const res = await fetch("/api/forex-calendar/analyze-stock-impact", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker, impact_levels: checked }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      resultEl.textContent = "Error: " + data.error;
+      resultEl.style.display = "block";
+      return;
+    }
+    const eventsLine = data.most_relevant_events && data.most_relevant_events.length
+      ? `<div class="muted" style="margin-top:6px;">Most relevant: ${data.most_relevant_events.join(", ")}</div>`
+      : "";
+    resultEl.innerHTML =
+      `<div>${data.impact_summary || "n/a"}</div>` + eventsLine +
+      `<div class="disclaimer" style="margin-top:6px;">${data.disclaimer || "This is not investment advice."}</div>`;
+    resultEl.style.display = "block";
+  } catch (err) {
+    resultEl.textContent = "Error: " + err;
+    resultEl.style.display = "block";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
   }
 }
 

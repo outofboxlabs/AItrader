@@ -585,6 +585,93 @@ def test_analyze_forex_impact_explicit_provider_choice_is_not_overridden(client,
     assert res.status_code == 400
 
 
+def _seed_cached_forex_events(events):
+    app_mod.db_mod.init_db(app_mod.config.DB_PATH)
+    with app_mod.db_mod.connect(app_mod.config.DB_PATH) as conn:
+        app_mod.db_mod.save_forex_calendar_events(conn, events, fetched_at=datetime.now(timezone.utc).isoformat())
+
+
+def test_analyze_stock_impact_filters_cached_events_by_impact_level(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    (tmp_path / "positions.json").write_text(
+        '[{"asset_type": "shares", "ticker": "AAPL", "entry_price": 200.0, "contracts": 10, "entry_date": "2025-01-01"}]'
+    )
+    _seed_cached_forex_events(
+        [
+            {"date": "2026-09-11T08:30:00-04:00", "country": "USD", "title": "CPI m/m", "impact": "High", "forecast": "0.4%", "previous": "0.1%"},
+            {"date": "2026-09-12T08:30:00-04:00", "country": "USD", "title": "Consumer Credit", "impact": "Low", "forecast": "10B", "previous": "9B"},
+        ]
+    )
+
+    captured = {}
+
+    def fake_analyze(ticker, positions, events, provider, model, api_key=None):
+        captured["ticker"] = ticker
+        captured["positions"] = positions
+        captured["events"] = events
+        return {"impact_summary": "n/a", "most_relevant_events": [], "disclaimer": "This is not investment advice.", "parse_error": False}
+
+    monkeypatch.setattr(app_mod.forex_calendar, "analyze_stock_calendar_impact", fake_analyze)
+
+    res = client.post(
+        "/api/forex-calendar/analyze-stock-impact",
+        data=json.dumps({"ticker": "aapl", "impact_levels": ["High"]}),
+        content_type="application/json",
+    )
+
+    assert res.status_code == 200
+    assert captured["ticker"] == "AAPL"
+    assert captured["positions"][0]["ticker"] == "AAPL"
+    assert [e["title"] for e in captured["events"]] == ["CPI m/m"]  # the Low-impact one is filtered out
+
+
+def test_analyze_stock_impact_requires_ticker(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    res = client.post(
+        "/api/forex-calendar/analyze-stock-impact",
+        data=json.dumps({"impact_levels": ["High"]}),
+        content_type="application/json",
+    )
+    assert res.status_code == 400
+
+
+def test_analyze_stock_impact_requires_nonempty_impact_levels(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    res = client.post(
+        "/api/forex-calendar/analyze-stock-impact",
+        data=json.dumps({"ticker": "AAPL", "impact_levels": []}),
+        content_type="application/json",
+    )
+    assert res.status_code == 400
+
+
+def test_analyze_stock_impact_requires_saved_api_key(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: None)
+    res = client.post(
+        "/api/forex-calendar/analyze-stock-impact",
+        data=json.dumps({"ticker": "AAPL", "impact_levels": ["High"]}),
+        content_type="application/json",
+    )
+    assert res.status_code == 400
+    assert "No saved API key" in res.get_json()["error"]
+
+
+def test_analyze_stock_impact_handles_ai_failure(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+
+    def boom(ticker, positions, events, provider, model, api_key=None):
+        raise RuntimeError("rate limited")
+
+    monkeypatch.setattr(app_mod.forex_calendar, "analyze_stock_calendar_impact", boom)
+
+    res = client.post(
+        "/api/forex-calendar/analyze-stock-impact",
+        data=json.dumps({"ticker": "AAPL", "impact_levels": ["High"]}),
+        content_type="application/json",
+    )
+    assert res.status_code == 502
+
+
 def test_analyze_forex_impact_rejects_unknown_provider(client, monkeypatch):
     monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
     event = {"title": "CPI m/m", "country": "USD", "date": "2026-09-11T08:30:00-04:00", "impact": "High"}

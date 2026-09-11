@@ -195,3 +195,53 @@ def test_analyze_portfolio_impact_propagates_api_failure(monkeypatch):
         assert False, "expected RuntimeError to propagate"
     except RuntimeError:
         pass
+
+
+# --- per-stock calendar impact analysis -----------------------------------
+
+
+def test_build_stock_calendar_impact_user_message_includes_ticker_and_events():
+    positions = [{"asset_type": "shares", "ticker": "AAPL", "contracts": 10}]
+    events = [
+        {
+            "title": "CPI m/m", "country": "USD", "date": "2026-09-11T08:30:00-04:00", "impact": "High",
+            "previous": "0.1%", "forecast": "0.4%", "actual": "0.4%", "surprise_pct": 0.0,
+        }
+    ]
+    message = fx.build_stock_calendar_impact_user_message("AAPL", positions, events)
+    assert "AAPL" in message
+    assert "10 shares" in message
+    assert "CPI m/m" in message
+    assert "High" in message
+
+
+def test_build_stock_calendar_impact_user_message_handles_no_events():
+    message = fx.build_stock_calendar_impact_user_message("AAPL", [], [])
+    assert "(none)" in message
+    assert "(none saved)" in message
+
+
+def test_analyze_stock_calendar_impact_calls_ai_client(monkeypatch):
+    captured = {}
+
+    def fake_call_provider(provider, system_prompt, user_message, model, api_key=None, max_tokens=800):
+        captured["user_message"] = user_message
+        return '{"impact_summary": "CPI could pressure rate-sensitive names.", "most_relevant_events": ["CPI m/m"]}'
+
+    monkeypatch.setattr(fx.ai_client, "call_provider", fake_call_provider)
+
+    events = [{"title": "CPI m/m", "country": "USD", "date": "2026-09-11T08:30:00-04:00", "impact": "High"}]
+    result = fx.analyze_stock_calendar_impact("AAPL", [], events, "anthropic", "claude-haiku-4-5", api_key="sk-test")
+
+    assert "AAPL" in captured["user_message"]
+    assert result["impact_summary"] == "CPI could pressure rate-sensitive names."
+    assert result["most_relevant_events"] == ["CPI m/m"]
+    assert result["disclaimer"] == "This is not investment advice."
+    assert result["parse_error"] is False
+
+
+def test_analyze_stock_calendar_impact_degrades_on_unparseable_response(monkeypatch):
+    monkeypatch.setattr(fx.ai_client, "call_provider", lambda *a, **kw: "not valid json")
+    result = fx.analyze_stock_calendar_impact("AAPL", [], [], "anthropic", "claude-haiku-4-5", api_key="sk-test")
+    assert result["parse_error"] is True
+    assert result["most_relevant_events"] == []
