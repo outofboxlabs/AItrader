@@ -95,21 +95,21 @@ def test_fetch_calendar_events_normalizes_shape(monkeypatch):
     assert holiday["surprise_pct"] is None
 
 
-def test_fetch_calendar_events_prefers_dateline_unix_timestamp(monkeypatch):
-    """A first guess that the feed used a plain "date" ISO string was
-    wrong on a real pull -- every row came back with a missing/unparseable
-    timestamp. Later research points to "dateline" (a Unix UTC timestamp)
-    instead; this is what _extract_iso_datetime now prefers."""
+def test_fetch_calendar_events_date_field_is_a_ready_to_use_iso_string(monkeypatch):
+    """Regression test using the actual shape confirmed from a real pull
+    of the feed (pasted by a user straight from the JSON in their
+    browser): "date" is already a complete ISO 8601 string with a UTC
+    offset baked in -- no separate timestamp field, no extra parsing
+    needed. An earlier guess that this needed a Unix-timestamp fallback
+    was chasing a field ("dateline") that doesn't exist in this feed."""
     raw = [
         {
-            "title": "Non-Farm Payrolls",
-            "country": "USD",
-            "dateline": 1757579400,  # 2025-09-11T08:30:00 UTC
-            "date": "",
-            "impact": "High",
-            "forecast": "180K",
-            "previous": "150K",
-            "actual": "227K",
+            "title": "German Industrial Production m/m",
+            "country": "EUR",
+            "date": "2026-09-07T02:00:00-04:00",
+            "impact": "Low",
+            "forecast": "0.1%",
+            "previous": "0.2%",
         }
     ]
 
@@ -120,27 +120,4 @@ def test_fetch_calendar_events_prefers_dateline_unix_timestamp(monkeypatch):
 
     events = fx.fetch_calendar_events()
 
-    assert events[0]["date"] == "2025-09-11T08:30:00+00:00"
-
-
-def test_fetch_calendar_events_falls_back_to_date_field_when_no_dateline(monkeypatch):
-    raw = [
-        {
-            "title": "GDP m/m",
-            "country": "GBP",
-            "date": "2026-09-11T04:30:00-04:00",
-            "impact": "High",
-            "forecast": "0.3%",
-            "previous": "0.0%",
-            "actual": "",
-        }
-    ]
-
-    def fake_get(url, timeout=None, headers=None):
-        return _FakeResponse(raw)
-
-    monkeypatch.setattr(fx.requests, "get", fake_get)
-
-    events = fx.fetch_calendar_events()
-
-    assert events[0]["date"] == "2026-09-11T04:30:00-04:00"
+    assert events[0]["date"] == "2026-09-07T02:00:00-04:00"

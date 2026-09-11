@@ -621,7 +621,12 @@ def save_forex_calendar_events(conn, events: list[dict], fetched_at: str) -> Non
 
 def get_forex_calendar_events(conn) -> list[dict]:
     rows = conn.execute("SELECT * FROM forex_calendar_events ORDER BY event_date ASC").fetchall()
-    return [dict(r) for r in rows]
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["date"] = d.pop("event_date")  # the API/UI field is "date" -- "event_date" is only the SQL column name
+        result.append(d)
+    return result
 
 
 def get_latest_forex_calendar_fetch(conn) -> Optional[str]:

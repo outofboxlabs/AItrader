@@ -387,12 +387,19 @@ def test_run_forex_calendar_now_fetches_and_persists(client, monkeypatch):
     data = res.get_json()
     assert data["refetched"] is True
     assert data["events"][0]["title"] == "Non-Farm Payrolls"
+    # Regression check: the db column is "event_date", but the API/UI
+    # field is "date" -- get_forex_calendar_events must rename it back,
+    # or every row renders "n/a" for its time regardless of what Forex
+    # Factory itself sends.
+    assert data["events"][0]["date"] == "2026-09-11T08:30:00-04:00"
+    assert "event_date" not in data["events"][0]
     assert data["last_fetched_at"] is not None
 
     # Persisted -- a fresh GET reads it back from the db.
     res2 = client.get("/api/forex-calendar")
     data2 = res2.get_json()
     assert data2["events"][0]["country"] == "USD"
+    assert data2["events"][0]["date"] == "2026-09-11T08:30:00-04:00"
 
 
 def test_run_forex_calendar_now_respects_cooldown(client, monkeypatch):
