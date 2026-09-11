@@ -65,7 +65,7 @@ def test_get_price_history_window_uses_1m_for_recent_event(monkeypatch):
         def __init__(self, ticker):
             pass
 
-        def history(self, start=None, end=None, interval=None):
+        def history(self, start=None, end=None, interval=None, prepost=None):
             captured["interval"] = interval
             return df
 
@@ -87,7 +87,7 @@ def test_get_price_history_window_falls_back_to_5m_for_old_event(monkeypatch):
         def __init__(self, ticker):
             pass
 
-        def history(self, start=None, end=None, interval=None):
+        def history(self, start=None, end=None, interval=None, prepost=None):
             captured["intervals"].append(interval)
             return df
 
@@ -108,7 +108,7 @@ def test_get_price_history_window_uses_explicit_interval_without_fallback(monkey
         def __init__(self, ticker):
             pass
 
-        def history(self, start=None, end=None, interval=None):
+        def history(self, start=None, end=None, interval=None, prepost=None):
             calls.append(interval)
             return df
 
@@ -128,7 +128,7 @@ def test_get_price_history_window_explicit_interval_no_fallback_on_empty(monkeyp
         def __init__(self, ticker):
             pass
 
-        def history(self, start=None, end=None, interval=None):
+        def history(self, start=None, end=None, interval=None, prepost=None):
             calls.append(interval)
             return pd.DataFrame()  # empty
 
@@ -150,7 +150,7 @@ def test_get_price_history_window_falls_back_when_1m_pull_is_empty(monkeypatch):
         def __init__(self, ticker):
             pass
 
-        def history(self, start=None, end=None, interval=None):
+        def history(self, start=None, end=None, interval=None, prepost=None):
             calls.append(interval)
             if interval == "1m":
                 return pd.DataFrame()  # empty -- e.g. right at the edge of the 7-day window

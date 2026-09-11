@@ -224,23 +224,28 @@ into two sections by date: "Past" (already released or their scheduled time has 
 passed) and "Future" (still ahead). Your job is ONLY to inform, never to advise.
 
 Write TWO separate summaries, each specific to THIS stock/position -- not generic \
-market commentary:
+market commentary. Format each summary as a bullet list, ONE BULLET PER EVENT, each \
+bullet starting with that event's date, like this:
+"- September 24: <analysis of this one event>"
+"- September 26: <analysis of this one event>"
+Join bullets with a literal "\\n" between them. Never merge more than one event into \
+a single bullet, and never write plain prose paragraphs instead of bullets.
 
-- "past_summary": 1-3 sentences covering the Past events only. Name each specific \
-event with its actual date (e.g. "Wednesday, September 10"), and weigh whether the \
-actual beat, missed, or matched the forecast, and by how much -- this is a known \
-outcome, not a forecast. If there are no Past events, say so explicitly rather than \
-leaving this blank.
-- "future_summary": 1-3 sentences covering the Future events only. Name each specific \
-event with its actual date (e.g. "Wednesday, September 24"), and what could plausibly \
-happen to this stock when it releases -- treat it as a forward-looking risk or \
-catalyst, since no actual exists yet. If there are no Future events, say so explicitly \
-rather than leaving this blank.
+- "past_summary": one bullet per Past event. Start each bullet with its actual date \
+(e.g. "September 10"), and weigh whether the actual beat, missed, or matched the \
+forecast, and by how much -- this is a known outcome, not a forecast. If there are no \
+Past events, this field should just say so explicitly (no bullet needed).
+- "future_summary": one bullet per Future event. Start each bullet with its scheduled \
+date (e.g. "September 24"), and what could plausibly happen to this stock when it \
+releases -- treat it as a forward-looking risk or catalyst, since no actual exists yet. \
+If there are no Future events, this field should just say so explicitly (no bullet \
+needed).
 
-For both summaries: explain the mechanism by which the event could affect THIS stock \
+For every bullet: explain the mechanism by which that event could affect THIS stock \
 (e.g. sector sensitivity to rates, dollar exposure, consumer-spending links) -- \
 reference the actual ticker and position given. If you genuinely see no plausible \
-connection between an event and this stock, say so plainly rather than forcing one.
+connection between an event and this stock, say so plainly in that bullet rather than \
+forcing one.
 
 List which of the given events, if any, you consider most relevant overall, most \
 relevant first.

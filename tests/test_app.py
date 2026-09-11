@@ -702,6 +702,38 @@ def test_match_events_to_price_history_handles_empty_history():
     assert app_mod._match_events_to_price_history([], events) == []
 
 
+def test_center_history_on_marker_trims_to_less_available_side():
+    # marker at index 5, but only 2 bars exist after it -- should trim the
+    # 5-bars-before side down to match, so the marker lands dead center.
+    history = [{"time": str(i), "close": float(i)} for i in range(8)]  # indices 0..7
+    trimmed, new_idx = app_mod._center_history_on_marker(history, 5)
+    assert new_idx == 2
+    assert len(trimmed) == 5  # 2 before, marker, 2 after
+    assert trimmed[new_idx]["close"] == 5.0
+    assert trimmed[0]["close"] == 3.0
+    assert trimmed[-1]["close"] == 7.0
+
+
+def test_center_history_on_marker_already_symmetric_is_unchanged():
+    history = [{"time": str(i), "close": float(i)} for i in range(5)]  # indices 0..4
+    trimmed, new_idx = app_mod._center_history_on_marker(history, 2)
+    assert new_idx == 2
+    assert trimmed == history
+
+
+def test_center_history_on_marker_none_index_passes_through():
+    history = [{"time": "x", "close": 1.0}]
+    trimmed, new_idx = app_mod._center_history_on_marker(history, None)
+    assert new_idx is None
+    assert trimmed == history
+
+
+def test_center_history_on_marker_empty_history_passes_through():
+    trimmed, new_idx = app_mod._center_history_on_marker([], 0)
+    assert trimmed == []
+    assert new_idx == 0
+
+
 def test_get_portfolio_price_chart_marks_close_past_high_impact_event(client, monkeypatch):
     now = datetime.now(timezone.utc)
     bar_time = (now - timedelta(hours=1)).isoformat()
@@ -817,6 +849,28 @@ def test_get_portfolio_price_chart_zoom_marker_index_none_when_no_bar_close_enou
 
     assert res.status_code == 200
     assert res.get_json()["marker_index"] is None
+
+
+def test_get_portfolio_price_chart_zoom_centers_marker_bar(client, monkeypatch):
+    # 10 bars total, event closest to bar index 8 (near the right edge) --
+    # the response should be trimmed so the marker lands dead center, not
+    # jammed against one side.
+    def fake_window(ticker, center_time, **kw):
+        bars = [
+            {"time": (center_time + timedelta(minutes=i - 8)).isoformat(), "close": float(i)}
+            for i in range(10)
+        ]
+        return bars, "5m"
+
+    monkeypatch.setattr(app_mod.data, "get_price_history_window", fake_window)
+
+    event_time = datetime.now(timezone.utc).isoformat()
+    res = client.get(f"/api/portfolio/price-chart-zoom?ticker=AAPL&event_time={quote(event_time)}")
+
+    assert res.status_code == 200
+    body = res.get_json()
+    idx = body["marker_index"]
+    assert idx == len(body["history"]) - 1 - idx  # dead center
 
 
 def test_get_portfolio_price_chart_zoom_requires_ticker_and_event_time(client):

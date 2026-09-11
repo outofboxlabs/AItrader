@@ -71,7 +71,10 @@ def get_price_history_window(
 
     def _pull(iv: str):
         try:
-            hist = t.history(start=start, end=end, interval=iv)
+            # prepost=True so a pre-market release (e.g. an 8:30am economic
+            # print, before the 9:30am open) still has bars on its "before"
+            # side instead of the window starting empty right at the open.
+            hist = t.history(start=start, end=end, interval=iv, prepost=True)
         except Exception:
             return None
         return None if hist.empty else hist

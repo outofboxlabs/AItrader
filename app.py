@@ -597,6 +597,24 @@ def _closest_bar_index(history: list[dict], target_time: datetime) -> Optional[i
     return closest_idx
 
 
+def _center_history_on_marker(
+    history: list[dict], marker_index: Optional[int]
+) -> tuple[list[dict], Optional[int]]:
+    """Trim history to a symmetric number of bars on each side of
+    marker_index, so the event bar always lands exactly in the middle of
+    the zoomed chart -- letting the user compare "before" and "after" at
+    a glance instead of the event landing wherever the fetched window
+    happened to start (e.g. jammed against the left edge for a
+    pre-market event with few earlier bars). Trims to whichever side has
+    less data; returns history unchanged if there's no marker to center
+    on."""
+    if marker_index is None or not history:
+        return history, marker_index
+    half = min(marker_index, len(history) - 1 - marker_index)
+    trimmed = history[marker_index - half : marker_index + half + 1]
+    return trimmed, half
+
+
 def _match_events_to_price_history(history: list[dict], events: list[dict]) -> list[dict]:
     """For each past High-impact event, find the closest 5-minute price
     bar by time and attach a marker there -- this is what lets the chart
@@ -703,6 +721,7 @@ def get_portfolio_price_chart_zoom():
         traceback.print_exc()
         return jsonify({"error": str(exc)}), 502
     marker_index = _closest_bar_index(history, center_time)
+    history, marker_index = _center_history_on_marker(history, marker_index)
     return jsonify(
         {"ticker": ticker, "history": history, "interval": interval, "marker_index": marker_index}
     )
@@ -1488,6 +1507,24 @@ async function loadEventZoom(ticker, marker, granularity) {
   }
 }
 
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// The AI is prompted to write past_summary/future_summary as one "- " bullet
+// per event; renders those as a real <ul> instead of a run-on paragraph so
+// each event's analysis stays visually separate. Falls back to plain text
+// for the "no events" case, which is prose rather than bullets by design.
+function renderBulletSummary(text) {
+  if (!text) return "<div>n/a</div>";
+  const bulletLines = text.split("\n").map(l => l.trim()).filter(l => l.startsWith("- "));
+  if (bulletLines.length === 0) {
+    return `<div>${escapeHtml(text)}</div>`;
+  }
+  const items = bulletLines.map(l => `<li>${escapeHtml(l.slice(2))}</li>`).join("");
+  return `<ul style="margin:4px 0 0 18px; padding:0;">${items}</ul>`;
+}
+
 async function analyzeStockCalendarImpact(ticker, btn) {
   const checked = [...document.querySelectorAll(`.cal-impact-level[data-ticker="${ticker}"]:checked`)].map(cb => cb.value);
   const resultEl = document.getElementById(`cal-impact-result-${ticker}`);
@@ -1516,8 +1553,8 @@ async function analyzeStockCalendarImpact(ticker, btn) {
       ? `<div class="muted" style="margin-top:6px;">Most relevant: ${data.most_relevant_events.join(", ")}</div>`
       : "";
     resultEl.innerHTML =
-      `<div><strong>Past events</strong><br>${data.past_summary || "n/a"}</div>` +
-      `<div style="margin-top:8px;"><strong>Future events</strong><br>${data.future_summary || "n/a"}</div>` +
+      `<div><strong>Past events</strong>${renderBulletSummary(data.past_summary)}</div>` +
+      `<div style="margin-top:8px;"><strong>Future events</strong>${renderBulletSummary(data.future_summary)}</div>` +
       eventsLine +
       `<div class="disclaimer" style="margin-top:6px;">${data.disclaimer || "This is not investment advice."}</div>`;
     resultEl.style.display = "block";
