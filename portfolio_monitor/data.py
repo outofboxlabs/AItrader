@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import yfinance as yf
@@ -40,6 +41,41 @@ def get_price_history(ticker: str, period: str = "60d", interval: str = "5m") ->
     if hist.empty:
         return []
     return [{"time": idx.isoformat(), "close": float(row["Close"])} for idx, row in hist.iterrows()]
+
+
+def get_price_history_window(
+    ticker: str, center_time: datetime, window_hours: float = 2.0
+) -> tuple[list[dict], str]:
+    """Zoomed price history around one specific timestamp -- the "show
+    me the exact reaction" view. Uses 1-minute bars when center_time is
+    within Yahoo's 7-day free-data limit for that interval; otherwise
+    (or if the 1m pull comes back empty near that edge) falls back to
+    5-minute bars, which cover 60 days. Returns (bars, interval_used) so
+    the caller can be honest about precision instead of silently
+    degrading -- older events genuinely can't get true minute-level
+    data from this source, and callers should say so rather than pretend
+    otherwise."""
+    now = datetime.now(timezone.utc)
+    start = center_time - timedelta(hours=window_hours)
+    end = center_time + timedelta(hours=window_hours)
+    interval = "1m" if (now - center_time) <= timedelta(days=7) else "5m"
+
+    t = yf.Ticker(ticker)
+
+    def _pull(iv: str):
+        try:
+            hist = t.history(start=start, end=end, interval=iv)
+        except Exception:
+            return None
+        return None if hist.empty else hist
+
+    hist = _pull(interval)
+    if hist is None and interval == "1m":
+        interval = "5m"
+        hist = _pull(interval)
+    if hist is None:
+        return [], interval
+    return [{"time": idx.isoformat(), "close": float(row["Close"])} for idx, row in hist.iterrows()], interval
 
 
 def get_spot_price(ticker: str) -> float:

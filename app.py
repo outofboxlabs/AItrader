@@ -604,7 +604,19 @@ def _match_events_to_price_history(history: list[dict], events: list[dict]) -> l
         closest_idx = min(range(len(bar_times)), key=lambda i: abs((bar_times[i] - event_time).total_seconds()))
         if abs((bar_times[closest_idx] - event_time).total_seconds()) > _CHART_EVENT_MATCH_TOLERANCE_SECONDS:
             continue
-        markers.append({"bar_index": closest_idx, "bar_time": history[closest_idx]["time"], "title": e.get("title"), "country": e.get("country")})
+        markers.append(
+            {
+                "bar_index": closest_idx,
+                "bar_time": history[closest_idx]["time"],
+                "event_time": e["date"],
+                "title": e.get("title"),
+                "country": e.get("country"),
+                # "better"/"worse" (Forex Factory's own actual-vs-forecast
+                # read) or None if unknown/matched exactly -- lets the UI
+                # color each marker green/red/blue instead of one flat color.
+                "direction": e.get("direction"),
+            }
+        )
     return markers
 
 
@@ -643,6 +655,32 @@ def get_portfolio_price_chart():
 
     markers = _match_events_to_price_history(history, past_high_impact)
     return jsonify({"ticker": ticker, "history": history, "markers": markers})
+
+
+@app.route("/api/portfolio/price-chart-zoom", methods=["GET"])
+def get_portfolio_price_chart_zoom():
+    """Zoomed-in price history around one specific event's real
+    timestamp (not the nearest 5-minute bar) -- the "show me the exact
+    reaction" view a legend click asks for. Only events within the last
+    7 days can get true 1-minute bars (Yahoo's free-data limit for that
+    interval); older ones fall back to 5-minute automatically, and the
+    response says which interval was actually used so the UI can be
+    honest about it rather than implying more precision than exists."""
+    ticker = (request.args.get("ticker") or "").strip().upper()
+    event_time_str = request.args.get("event_time")
+    if not ticker or not event_time_str:
+        return jsonify({"error": "ticker and event_time required"}), 400
+    try:
+        center_time = datetime.fromisoformat(event_time_str)
+    except ValueError:
+        return jsonify({"error": "invalid event_time"}), 400
+
+    try:
+        history, interval = data.get_price_history_window(ticker, center_time)
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"error": str(exc)}), 502
+    return jsonify({"ticker": ticker, "history": history, "interval": interval})
 
 
 # --- Settings ----------------------------------------------------------
@@ -1180,12 +1218,49 @@ function renderCalendarImpactCards(valuations) {
       <div id="chart-wrap-${ticker}" style="display:none; margin-top:10px; max-width:700px;">
         <canvas id="chart-canvas-${ticker}" height="220"></canvas>
         <div class="muted" id="chart-status-${ticker}" style="margin-top:4px; font-size:0.75rem;"></div>
+        <div id="chart-legend-${ticker}" style="margin-top:8px; font-size:0.8rem;"></div>
       </div>
     </div>
   `).join("");
 }
 
 const stockCharts = {};
+const stockZoomCharts = {};
+
+const DIRECTION_COLORS = {
+  better: { bar: "rgba(76, 175, 125, 0.45)", dot: "#4caf7d" },   // green -- actual more favorable than forecast
+  worse: { bar: "rgba(217, 97, 91, 0.45)", dot: "#d9615b" },     // red -- actual less favorable than forecast
+  neutral: { bar: "rgba(45, 108, 223, 0.45)", dot: "#2d6cdf" },  // blue -- matched forecast / direction unknown
+};
+function directionColors(direction) {
+  return DIRECTION_COLORS[direction] || DIRECTION_COLORS.neutral;
+}
+
+// Draws "1", "2", ... above each marked bar in the "High-impact event"
+// dataset, matching the numbers in the legend built alongside the chart --
+// Chart.js has no built-in per-bar text label, so this is a small custom
+// plugin rather than pulling in a whole datalabels library for one thing.
+Chart.register({
+  id: "markerNumbers",
+  afterDatasetsDraw(chart) {
+    const dsIndex = chart.data.datasets.findIndex(d => d.label === "High-impact event");
+    if (dsIndex === -1) return;
+    const meta = chart.getDatasetMeta(dsIndex);
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.fillStyle = "#cfd3dc";
+    ctx.font = "bold 11px sans-serif";
+    ctx.textAlign = "center";
+    let n = 0;
+    chart.data.datasets[dsIndex].data.forEach((v, i) => {
+      if (v === null || v === undefined) return;
+      n++;
+      const point = meta.data[i];
+      if (point) ctx.fillText(String(n), point.x, point.y - 6);
+    });
+    ctx.restore();
+  },
+});
 
 async function toggleStockChart(ticker, btn) {
   const wrap = document.getElementById(`chart-wrap-${ticker}`);
@@ -1214,12 +1289,18 @@ async function toggleStockChart(ticker, btn) {
     const labels = data.history.map(h => new Date(h.time).toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }));
     const closes = data.history.map(h => h.close);
     const maxClose = Math.max(...closes);
-    const markerIndexes = new Set((data.markers || []).map(m => m.bar_index));
+    const sortedMarkers = [...(data.markers || [])].sort((a, b) => a.bar_index - b.bar_index);
+    const markerIndexSet = new Set(sortedMarkers.map(m => m.bar_index));
+    const markerBars = data.history.map((h, i) => markerIndexSet.has(i) ? maxClose : null);
+    const markerColors = data.history.map((h, i) => {
+      const m = sortedMarkers.find(mm => mm.bar_index === i);
+      return m ? directionColors(m.direction).bar : "transparent";
+    });
     const markerByIndex = {};
-    (data.markers || []).forEach(m => { markerByIndex[m.bar_index] = m; });
-    const markerBars = data.history.map((h, i) => markerIndexes.has(i) ? maxClose : null);
+    sortedMarkers.forEach(m => { markerByIndex[m.bar_index] = m; });
 
     const ctx = document.getElementById(`chart-canvas-${ticker}`).getContext("2d");
+    if (stockCharts[ticker]) stockCharts[ticker].destroy();
     stockCharts[ticker] = new Chart(ctx, {
       data: {
         labels,
@@ -1228,7 +1309,7 @@ async function toggleStockChart(ticker, btn) {
             type: "bar",
             label: "High-impact event",
             data: markerBars,
-            backgroundColor: "rgba(217, 97, 91, 0.35)",
+            backgroundColor: markerColors,
             barPercentage: 1.0,
             categoryPercentage: 1.0,
             order: 2,
@@ -1264,7 +1345,57 @@ async function toggleStockChart(ticker, btn) {
         },
       },
     });
-    statusEl.textContent = `${data.history.length} bars (5-minute), last 60 days -- red bars mark a past High-impact event within ~2h of that bar.`;
+
+    const legendHtml = sortedMarkers.length === 0
+      ? '<span class="muted">No past high-impact events landed close enough to a price bar to mark.</span>'
+      : sortedMarkers.map((m, i) => {
+          const dot = directionColors(m.direction).dot;
+          const when = new Date(m.event_time).toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+          return `<div style="margin-top:2px;">
+            <span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:${dot}; margin-right:4px;"></span>
+            <a href="#" onclick="showEventZoom('${ticker}', '${m.event_time}', event)">${i + 1}. ${m.country} ${m.title} (${when})</a>
+          </div>`;
+        }).join("");
+    document.getElementById(`chart-legend-${ticker}`).innerHTML = legendHtml;
+
+    statusEl.textContent = `${data.history.length} bars (5-minute), last 60 days. Bar color: green = better than forecast, red = worse, blue = matched/unknown. Click a legend entry to zoom in.`;
+  } catch (err) {
+    statusEl.textContent = "Error: " + err;
+  }
+}
+
+async function showEventZoom(ticker, eventTimeIso, evt) {
+  evt.preventDefault();
+  let wrap = document.getElementById(`chart-zoom-wrap-${ticker}`);
+  if (!wrap) {
+    wrap = document.createElement("div");
+    wrap.id = `chart-zoom-wrap-${ticker}`;
+    wrap.style.marginTop = "10px";
+    wrap.style.borderTop = "1px solid var(--border)";
+    wrap.style.paddingTop = "10px";
+    wrap.innerHTML = `<canvas id="chart-zoom-canvas-${ticker}" height="180"></canvas><div class="muted" id="chart-zoom-status-${ticker}" style="margin-top:4px; font-size:0.75rem;"></div>`;
+    document.getElementById(`chart-wrap-${ticker}`).appendChild(wrap);
+  }
+  const statusEl = document.getElementById(`chart-zoom-status-${ticker}`);
+  statusEl.textContent = "Loading...";
+  try {
+    const res = await fetch(`/api/portfolio/price-chart-zoom?ticker=${encodeURIComponent(ticker)}&event_time=${encodeURIComponent(eventTimeIso)}`);
+    const data = await res.json();
+    if (!res.ok) { statusEl.textContent = "Error: " + data.error; return; }
+    if (!data.history || data.history.length === 0) { statusEl.textContent = "No price data available around this event."; return; }
+    const labels = data.history.map(h => new Date(h.time).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }));
+    const closes = data.history.map(h => h.close);
+    if (stockZoomCharts[ticker]) stockZoomCharts[ticker].destroy();
+    const ctx = document.getElementById(`chart-zoom-canvas-${ticker}`).getContext("2d");
+    stockZoomCharts[ticker] = new Chart(ctx, {
+      type: "line",
+      data: { labels, datasets: [{ label: ticker + " (zoomed)", data: closes, borderColor: "#2d6cdf", pointRadius: 0, borderWidth: 1.5 }] },
+      options: { animation: false, scales: { y: { position: "right" } } },
+    });
+    const intervalNote = data.interval === "1m"
+      ? "1-minute bars"
+      : "5-minute bars (1-minute data isn't available past 7 days for this event, so this is the finest available)";
+    statusEl.textContent = `${data.history.length} ${intervalNote}, centered on this event.`;
   } catch (err) {
     statusEl.textContent = "Error: " + err;
   }

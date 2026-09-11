@@ -2,6 +2,7 @@ import calendar
 import io
 import json
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import quote
 
 import pytest
 
@@ -681,11 +682,13 @@ def test_match_events_to_price_history_finds_closest_bar_within_tolerance():
         {"time": "2026-09-11T08:30:00-04:00", "close": 101.0},
         {"time": "2026-09-11T08:35:00-04:00", "close": 99.5},
     ]
-    events = [{"date": "2026-09-11T08:31:00-04:00", "title": "CPI m/m", "country": "USD"}]
+    events = [{"date": "2026-09-11T08:31:00-04:00", "title": "CPI m/m", "country": "USD", "direction": "better"}]
     markers = app_mod._match_events_to_price_history(history, events)
     assert len(markers) == 1
     assert markers[0]["bar_index"] == 1
     assert markers[0]["title"] == "CPI m/m"
+    assert markers[0]["event_time"] == "2026-09-11T08:31:00-04:00"
+    assert markers[0]["direction"] == "better"
 
 
 def test_match_events_to_price_history_skips_event_too_far_from_any_bar():
@@ -756,6 +759,49 @@ def test_get_portfolio_price_chart_handles_data_failure(client, monkeypatch):
 
     monkeypatch.setattr(app_mod.data, "get_price_history", boom)
     res = client.get("/api/portfolio/price-chart?ticker=AAPL")
+    assert res.status_code == 502
+
+
+def test_get_portfolio_price_chart_zoom_returns_history_and_interval(client, monkeypatch):
+    captured = {}
+
+    def fake_window(ticker, center_time, **kw):
+        captured["ticker"] = ticker
+        captured["center_time"] = center_time
+        return [{"time": center_time.isoformat(), "close": 150.0}], "1m"
+
+    monkeypatch.setattr(app_mod.data, "get_price_history_window", fake_window)
+
+    event_time = datetime.now(timezone.utc).isoformat()
+    res = client.get(f"/api/portfolio/price-chart-zoom?ticker=aapl&event_time={quote(event_time)}")
+
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["ticker"] == "AAPL"
+    assert data["interval"] == "1m"
+    assert len(data["history"]) == 1
+    assert captured["ticker"] == "AAPL"
+
+
+def test_get_portfolio_price_chart_zoom_requires_ticker_and_event_time(client):
+    res = client.get("/api/portfolio/price-chart-zoom?ticker=AAPL")
+    assert res.status_code == 400
+    res2 = client.get("/api/portfolio/price-chart-zoom?event_time=2026-09-11T08:30:00-04:00")
+    assert res2.status_code == 400
+
+
+def test_get_portfolio_price_chart_zoom_rejects_invalid_event_time(client):
+    res = client.get("/api/portfolio/price-chart-zoom?ticker=AAPL&event_time=not-a-date")
+    assert res.status_code == 400
+
+
+def test_get_portfolio_price_chart_zoom_handles_data_failure(client, monkeypatch):
+    def boom(ticker, center_time, **kw):
+        raise RuntimeError("yfinance down")
+
+    monkeypatch.setattr(app_mod.data, "get_price_history_window", boom)
+    event_time = datetime.now(timezone.utc).isoformat()
+    res = client.get(f"/api/portfolio/price-chart-zoom?ticker=AAPL&event_time={quote(event_time)}")
     assert res.status_code == 502
 
 
