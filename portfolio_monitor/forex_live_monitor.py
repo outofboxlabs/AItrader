@@ -159,6 +159,7 @@ def find_all_events_for_day(html: str, day: date) -> list[dict]:
     last_time_text = ""
 
     skipped_no_time = 0
+    logged_impact_sample = False
     for row in soup.select("tr"):
         currency_cell = row.select_one("td.calendar__currency")
         title_span = row.select_one("span.calendar__event-title")
@@ -178,13 +179,15 @@ def find_all_events_for_day(html: str, day: date) -> list[dict]:
             skipped_no_time += 1
             continue
 
-        # Confirmed wrong via a real run: this cell doesn't follow the
-        # "calendar__cell calendar__X" pattern the other cells do -- the
-        # reference selector for it is specifically "td.impact", which
-        # every real row here was silently missing (impact rendered
-        # "n/a" for every live-scraped event). Falls back to the
-        # calendar__impact guess in case a future markup change adds it.
+        # Two attempted selectors for this cell have both failed against
+        # real output ("td.calendar__impact", then "td.impact") -- rather
+        # than guess a third time, print the first row's actual impact
+        # cell HTML on every call, so the terminal shows the real markup
+        # to select against directly instead of another guess.
         impact_cell = row.select_one("td.impact") or row.select_one("td.calendar__impact")
+        if not logged_impact_sample:
+            print(f"[forex_live_monitor] impact cell sample for {day}: {impact_cell}")
+            logged_impact_sample = True
         impact_span = impact_cell.find("span") if impact_cell else None
         impact_raw = ((impact_span.get("title") or impact_span.get_text(strip=True)) if impact_span else "")
 
