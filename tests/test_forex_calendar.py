@@ -249,7 +249,11 @@ def test_analyze_stock_calendar_impact_calls_ai_client(monkeypatch):
 
     def fake_call_provider(provider, system_prompt, user_message, model, api_key=None, max_tokens=800):
         captured["user_message"] = user_message
-        return '{"impact_summary": "CPI could pressure rate-sensitive names.", "most_relevant_events": ["CPI m/m"]}'
+        return (
+            '{"past_summary": "CPI came in on forecast.", '
+            '"future_summary": "The FOMC decision could pressure rate-sensitive names.", '
+            '"most_relevant_events": ["CPI m/m"]}'
+        )
 
     monkeypatch.setattr(fx.ai_client, "call_provider", fake_call_provider)
 
@@ -257,7 +261,8 @@ def test_analyze_stock_calendar_impact_calls_ai_client(monkeypatch):
     result = fx.analyze_stock_calendar_impact("AAPL", [], events, "anthropic", "claude-haiku-4-5", api_key="sk-test")
 
     assert "AAPL" in captured["user_message"]
-    assert result["impact_summary"] == "CPI could pressure rate-sensitive names."
+    assert result["past_summary"] == "CPI came in on forecast."
+    assert result["future_summary"] == "The FOMC decision could pressure rate-sensitive names."
     assert result["most_relevant_events"] == ["CPI m/m"]
     assert result["disclaimer"] == "This is not investment advice."
     assert result["parse_error"] is False
@@ -267,4 +272,6 @@ def test_analyze_stock_calendar_impact_degrades_on_unparseable_response(monkeypa
     monkeypatch.setattr(fx.ai_client, "call_provider", lambda *a, **kw: "not valid json")
     result = fx.analyze_stock_calendar_impact("AAPL", [], [], "anthropic", "claude-haiku-4-5", api_key="sk-test")
     assert result["parse_error"] is True
+    assert result["past_summary"] == "not valid json"
+    assert result["future_summary"] is None
     assert result["most_relevant_events"] == []

@@ -1141,7 +1141,9 @@ async function analyzeStockCalendarImpact(ticker, btn) {
       ? `<div class="muted" style="margin-top:6px;">Most relevant: ${data.most_relevant_events.join(", ")}</div>`
       : "";
     resultEl.innerHTML =
-      `<div>${data.impact_summary || "n/a"}</div>` + eventsLine +
+      `<div><strong>Past events</strong><br>${data.past_summary || "n/a"}</div>` +
+      `<div style="margin-top:8px;"><strong>Future events</strong><br>${data.future_summary || "n/a"}</div>` +
+      eventsLine +
       `<div class="disclaimer" style="margin-top:6px;">${data.disclaimer || "This is not investment advice."}</div>`;
     resultEl.style.display = "block";
   } catch (err) {

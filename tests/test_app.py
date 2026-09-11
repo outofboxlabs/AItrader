@@ -609,7 +609,7 @@ def test_analyze_stock_impact_filters_cached_events_by_impact_level(client, monk
         captured["ticker"] = ticker
         captured["positions"] = positions
         captured["events"] = events
-        return {"impact_summary": "n/a", "most_relevant_events": [], "disclaimer": "This is not investment advice.", "parse_error": False}
+        return {"past_summary": "n/a", "future_summary": "n/a", "most_relevant_events": [], "disclaimer": "This is not investment advice.", "parse_error": False}
 
     monkeypatch.setattr(app_mod.forex_calendar, "analyze_stock_calendar_impact", fake_analyze)
 
