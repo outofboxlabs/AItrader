@@ -1515,13 +1515,22 @@ function escapeHtml(str) {
 // per event; renders those as a real <ul> instead of a run-on paragraph so
 // each event's analysis stays visually separate. Falls back to plain text
 // for the "no events" case, which is prose rather than bullets by design.
+// The AI is asked to use "- " but doesn't always comply -- it sometimes
+// writes "*", a bullet char (•, ‣, ◦, ●, ▪, ·), or a numbered list
+// instead. Match any of those rather than only the literal "- ", so a
+// model that ignores the formatting instruction still renders as a
+// clean list instead of falling back to one run-on paragraph with a
+// stray bullet character left in the text.
+const BULLET_LINE_RE = /^(?:[-*•‣◦●▪·]|\\d+[.)])\\s+/;
+
 function renderBulletSummary(text) {
   if (!text) return "<div>n/a</div>";
-  const bulletLines = text.split("\\n").map(l => l.trim()).filter(l => l.startsWith("- "));
+  const lines = text.split("\\n").map(l => l.trim()).filter(Boolean);
+  const bulletLines = lines.filter(l => BULLET_LINE_RE.test(l));
   if (bulletLines.length === 0) {
     return `<div>${escapeHtml(text)}</div>`;
   }
-  const items = bulletLines.map(l => `<li>${escapeHtml(l.slice(2))}</li>`).join("");
+  const items = bulletLines.map(l => `<li>${escapeHtml(l.replace(BULLET_LINE_RE, ""))}</li>`).join("");
   return `<ul style="margin:4px 0 0 18px; padding:0;">${items}</ul>`;
 }
 
