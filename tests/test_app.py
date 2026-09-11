@@ -780,7 +780,43 @@ def test_get_portfolio_price_chart_zoom_returns_history_and_interval(client, mon
     assert data["ticker"] == "AAPL"
     assert data["interval"] == "1m"
     assert len(data["history"]) == 1
+    assert data["marker_index"] == 0  # the one bar is at exactly the event's timestamp
     assert captured["ticker"] == "AAPL"
+
+
+def test_get_portfolio_price_chart_zoom_passes_interval_and_widens_window_for_hourly(client, monkeypatch):
+    captured = {}
+
+    def fake_window(ticker, center_time, window_hours=2.0, interval=None):
+        captured["window_hours"] = window_hours
+        captured["interval"] = interval
+        return [{"time": center_time.isoformat(), "close": 150.0}], "1h"
+
+    monkeypatch.setattr(app_mod.data, "get_price_history_window", fake_window)
+
+    event_time = datetime.now(timezone.utc).isoformat()
+    res = client.get(
+        f"/api/portfolio/price-chart-zoom?ticker=AAPL&event_time={quote(event_time)}&interval=1h"
+    )
+
+    assert res.status_code == 200
+    assert captured["interval"] == "1h"
+    assert captured["window_hours"] == 24.0
+    assert res.get_json()["interval"] == "1h"
+
+
+def test_get_portfolio_price_chart_zoom_marker_index_none_when_no_bar_close_enough(client, monkeypatch):
+    def fake_window(ticker, center_time, **kw):
+        far_bar_time = center_time - timedelta(hours=5)
+        return [{"time": far_bar_time.isoformat(), "close": 150.0}], "5m"
+
+    monkeypatch.setattr(app_mod.data, "get_price_history_window", fake_window)
+
+    event_time = datetime.now(timezone.utc).isoformat()
+    res = client.get(f"/api/portfolio/price-chart-zoom?ticker=AAPL&event_time={quote(event_time)}")
+
+    assert res.status_code == 200
+    assert res.get_json()["marker_index"] is None
 
 
 def test_get_portfolio_price_chart_zoom_requires_ticker_and_event_time(client):

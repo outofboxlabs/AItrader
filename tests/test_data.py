@@ -98,6 +98,48 @@ def test_get_price_history_window_falls_back_to_5m_for_old_event(monkeypatch):
     assert captured["intervals"] == ["5m"]  # never even tried 1m for an event this old
 
 
+def test_get_price_history_window_uses_explicit_interval_without_fallback(monkeypatch):
+    center = datetime.now(timezone.utc) - timedelta(hours=3)  # would normally auto-pick 1m
+    idx = pd.DatetimeIndex([center])
+    df = pd.DataFrame({"Close": [150.0]}, index=idx)
+    calls = []
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def history(self, start=None, end=None, interval=None):
+            calls.append(interval)
+            return df
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+
+    history, interval = data_mod.get_price_history_window("AAPL", center, interval="1h")
+    assert interval == "1h"
+    assert calls == ["1h"]  # honored the explicit request, no 1m attempt first
+    assert history[0]["close"] == 150.0
+
+
+def test_get_price_history_window_explicit_interval_no_fallback_on_empty(monkeypatch):
+    center = datetime.now(timezone.utc) - timedelta(hours=3)
+    calls = []
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def history(self, start=None, end=None, interval=None):
+            calls.append(interval)
+            return pd.DataFrame()  # empty
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+
+    history, interval = data_mod.get_price_history_window("AAPL", center, interval="1h")
+    assert history == []
+    assert interval == "1h"
+    assert calls == ["1h"]  # never silently tried a different interval
+
+
 def test_get_price_history_window_falls_back_when_1m_pull_is_empty(monkeypatch):
     center = datetime.now(timezone.utc) - timedelta(hours=3)
     idx = pd.DatetimeIndex([center])

@@ -44,21 +44,28 @@ def get_price_history(ticker: str, period: str = "60d", interval: str = "5m") ->
 
 
 def get_price_history_window(
-    ticker: str, center_time: datetime, window_hours: float = 2.0
+    ticker: str, center_time: datetime, window_hours: float = 2.0, interval: Optional[str] = None
 ) -> tuple[list[dict], str]:
     """Zoomed price history around one specific timestamp -- the "show
-    me the exact reaction" view. Uses 1-minute bars when center_time is
-    within Yahoo's 7-day free-data limit for that interval; otherwise
-    (or if the 1m pull comes back empty near that edge) falls back to
-    5-minute bars, which cover 60 days. Returns (bars, interval_used) so
-    the caller can be honest about precision instead of silently
-    degrading -- older events genuinely can't get true minute-level
-    data from this source, and callers should say so rather than pretend
+    me the exact reaction" view. When `interval` is left as None, uses
+    1-minute bars if center_time is within Yahoo's 7-day free-data limit
+    for that interval, else 5-minute bars (which cover 60 days), falling
+    back from 1m to 5m automatically if the 1m pull comes back empty near
+    that edge. Passing an explicit `interval` (e.g. "1h" for the "switch
+    to hourly" zoom-out view) skips all of that guessing and uses exactly
+    what was asked for, with no fallback -- the caller made a deliberate
+    choice and an empty result should say so rather than silently
+    switching resolution underneath them. Returns (bars, interval_used)
+    so the caller can be honest about precision instead of silently
+    degrading -- older events genuinely can't get true minute-level data
+    from this source, and callers should say so rather than pretend
     otherwise."""
     now = datetime.now(timezone.utc)
     start = center_time - timedelta(hours=window_hours)
     end = center_time + timedelta(hours=window_hours)
-    interval = "1m" if (now - center_time) <= timedelta(days=7) else "5m"
+    auto_fallback = interval is None
+    if interval is None:
+        interval = "1m" if (now - center_time) <= timedelta(days=7) else "5m"
 
     t = yf.Ticker(ticker)
 
@@ -70,7 +77,7 @@ def get_price_history_window(
         return None if hist.empty else hist
 
     hist = _pull(interval)
-    if hist is None and interval == "1m":
+    if hist is None and auto_fallback and interval == "1m":
         interval = "5m"
         hist = _pull(interval)
     if hist is None:
