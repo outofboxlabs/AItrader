@@ -194,6 +194,7 @@ CREATE TABLE IF NOT EXISTS forex_calendar_events (
     forecast TEXT,
     previous TEXT,
     actual TEXT,
+    direction TEXT,
     surprise_pct REAL,
     fetched_at TEXT NOT NULL,
     PRIMARY KEY (event_date, country, title)
@@ -221,6 +222,7 @@ def connect(db_path: str):
 _ADDED_COLUMNS = {
     "news_analysis": [("provider", "TEXT")],
     "growth_candidates": [("strong_buy_ratio_pct", "REAL")],
+    "forex_calendar_events": [("direction", "TEXT")],
 }
 
 
@@ -600,8 +602,8 @@ def save_forex_calendar_events(conn, events: list[dict], fetched_at: str) -> Non
     fills in once released), rather than accumulating duplicate rows."""
     conn.executemany(
         """INSERT OR REPLACE INTO forex_calendar_events
-           (event_date, country, title, impact, forecast, previous, actual, surprise_pct, fetched_at)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
+           (event_date, country, title, impact, forecast, previous, actual, direction, surprise_pct, fetched_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
         [
             (
                 e["date"],
@@ -611,6 +613,7 @@ def save_forex_calendar_events(conn, events: list[dict], fetched_at: str) -> Non
                 e.get("forecast"),
                 e.get("previous"),
                 e.get("actual"),
+                e.get("direction"),
                 e.get("surprise_pct"),
                 fetched_at,
             )

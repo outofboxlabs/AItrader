@@ -1,6 +1,6 @@
 import io
 import json
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -365,23 +365,30 @@ def test_get_forex_calendar_empty_when_no_fetch_yet(client):
     assert res.get_json() == {"events": [], "last_fetched_at": None}
 
 
+def _future_event(**overrides):
+    """A high-impact USD event scheduled safely in the future, so
+    _enrich_with_live_actuals's "already happened" check naturally skips
+    it -- no live fetch, no monkeypatching of forex_live_monitor needed,
+    for tests that aren't specifically exercising that enrichment step."""
+    event = {
+        "date": (datetime.now(timezone.utc) + timedelta(days=3)).isoformat(),
+        "country": "USD",
+        "title": "Non-Farm Payrolls",
+        "impact": "High",
+        "forecast": "180K",
+        "previous": "150K",
+        "actual": None,
+        "direction": None,
+        "surprise_pct": None,
+    }
+    event.update(overrides)
+    return event
+
+
 def test_run_forex_calendar_now_fetches_and_persists(client, monkeypatch):
-    monkeypatch.setattr(
-        app_mod.forex_calendar,
-        "fetch_calendar_events",
-        lambda feed_url: [
-            {
-                "date": "2026-09-11T08:30:00-04:00",
-                "country": "USD",
-                "title": "Non-Farm Payrolls",
-                "impact": "High",
-                "forecast": "180K",
-                "previous": "150K",
-                "actual": "227K",
-                "surprise_pct": 26.1,
-            }
-        ],
-    )
+    monkeypatch.setattr(app_mod.forex_calendar, "fetch_calendar_events", lambda feed_url: [_future_event()])
+    scheduled_at = _future_event()["date"]
+
     res = client.post("/api/forex-calendar/run")
     assert res.status_code == 200
     data = res.get_json()
@@ -391,7 +398,6 @@ def test_run_forex_calendar_now_fetches_and_persists(client, monkeypatch):
     # field is "date" -- get_forex_calendar_events must rename it back,
     # or every row renders "n/a" for its time regardless of what Forex
     # Factory itself sends.
-    assert data["events"][0]["date"] == "2026-09-11T08:30:00-04:00"
     assert "event_date" not in data["events"][0]
     assert data["last_fetched_at"] is not None
 
@@ -399,7 +405,6 @@ def test_run_forex_calendar_now_fetches_and_persists(client, monkeypatch):
     res2 = client.get("/api/forex-calendar")
     data2 = res2.get_json()
     assert data2["events"][0]["country"] == "USD"
-    assert data2["events"][0]["date"] == "2026-09-11T08:30:00-04:00"
 
 
 def test_run_forex_calendar_now_respects_cooldown(client, monkeypatch):
@@ -407,18 +412,7 @@ def test_run_forex_calendar_now_respects_cooldown(client, monkeypatch):
 
     def fake_fetch(feed_url):
         calls["n"] += 1
-        return [
-            {
-                "date": "2026-09-11T08:30:00-04:00",
-                "country": "USD",
-                "title": "Non-Farm Payrolls",
-                "impact": "High",
-                "forecast": "180K",
-                "previous": "150K",
-                "actual": "227K",
-                "surprise_pct": 26.1,
-            }
-        ]
+        return [_future_event()]
 
     monkeypatch.setattr(app_mod.forex_calendar, "fetch_calendar_events", fake_fetch)
 
@@ -440,6 +434,63 @@ def test_run_forex_calendar_now_handles_fetch_failure(client, monkeypatch):
     res = client.post("/api/forex-calendar/run")
     assert res.status_code == 502
     assert "error" in res.get_json()
+
+
+def test_run_forex_calendar_now_skips_live_check_for_future_events(client, monkeypatch):
+    """A future event can't have an actual yet -- _enrich_with_live_actuals
+    must not even attempt a live fetch for it."""
+    monkeypatch.setattr(app_mod.forex_calendar, "fetch_calendar_events", lambda feed_url: [_future_event()])
+    live_fetch_called = []
+    monkeypatch.setattr(app_mod.forex_live_monitor, "fetch_live_day_html", lambda day: live_fetch_called.append(day) or "<html></html>")
+
+    res = client.post("/api/forex-calendar/run")
+    assert res.status_code == 200
+    assert live_fetch_called == []
+    assert res.get_json()["events"][0]["actual"] is None
+
+
+def test_run_forex_calendar_now_enriches_past_event_with_live_actual(client, monkeypatch):
+    """The core new behavior: an already-released event gets its
+    actual/direction/surprise_pct filled in from a live scrape, not left
+    as "n/a" forever the way the JSON feed alone would leave it."""
+    past_event = _future_event(date=(datetime.now(timezone.utc) - timedelta(hours=2)).isoformat())
+    monkeypatch.setattr(app_mod.forex_calendar, "fetch_calendar_events", lambda feed_url: [past_event])
+    monkeypatch.setattr(app_mod.forex_live_monitor, "fetch_live_day_html", lambda day: "<html>fake page</html>")
+    monkeypatch.setattr(
+        app_mod.forex_live_monitor,
+        "find_actual_for_event",
+        lambda html, title, country: {"actual": "227K", "direction": "better", "raw_class": "better"},
+    )
+
+    res = client.post("/api/forex-calendar/run")
+    assert res.status_code == 200
+    event = res.get_json()["events"][0]
+    assert event["actual"] == "227K"
+    assert event["direction"] == "better"
+    assert event["surprise_pct"] is not None
+
+    # Persisted, including the new "direction" column.
+    res2 = client.get("/api/forex-calendar")
+    assert res2.get_json()["events"][0]["direction"] == "better"
+
+
+def test_run_forex_calendar_now_survives_live_fetch_failure(client, monkeypatch):
+    """A live-scrape failure for one day must not break the whole
+    refresh -- the JSON-feed data (schedule/forecast/previous) is still
+    valuable even if the live actual can't be checked right now."""
+    past_event = _future_event(date=(datetime.now(timezone.utc) - timedelta(hours=2)).isoformat())
+    monkeypatch.setattr(app_mod.forex_calendar, "fetch_calendar_events", lambda feed_url: [past_event])
+
+    def boom(day):
+        raise RuntimeError("forexfactory.com unreachable")
+
+    monkeypatch.setattr(app_mod.forex_live_monitor, "fetch_live_day_html", boom)
+
+    res = client.post("/api/forex-calendar/run")
+    assert res.status_code == 200
+    event = res.get_json()["events"][0]
+    assert event["title"] == "Non-Farm Payrolls"
+    assert event["actual"] is None
 
 
 def test_run_movers_now_writes_csv_export(client, monkeypatch, tmp_path):

@@ -26,7 +26,7 @@ from typing import Optional
 from flask import Flask, jsonify, render_template_string, request
 
 import config
-from portfolio_monitor import credentials, exports, forex_calendar, growth_screener, movers, nearlow_screener, news, pipeline, scheduler, vision
+from portfolio_monitor import credentials, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_screener, news, pipeline, scheduler, vision
 from portfolio_monitor import db as db_mod
 from portfolio_monitor.models import Position
 
@@ -352,11 +352,54 @@ def run_nearlow_now():
 # around events, not for winning that race.
 
 
+def _enrich_with_live_actuals(events: list[dict]) -> None:
+    """Mutates each event dict in place, filling in "actual"/"direction"/
+    "surprise_pct" by checking Forex Factory's LIVE calendar page --
+    the JSON feed above never carries these (confirmed empirically; see
+    forex_calendar.py). One fetch per unique day covered, not per event,
+    to keep this light -- and only for days that have already started,
+    since a future day can't have an actual yet. Never raises: a scrape
+    failure for one day just leaves that day's events as "n/a", exactly
+    as they were before this enrichment step existed.
+
+    This scrapes forexfactory.com's live HTML page directly, the same
+    ToS tradeoff as forex_monitor.py -- made explicitly, at the user's
+    direction, not silently."""
+    now = datetime.now(timezone.utc)
+    events_by_day: dict = {}
+    for e in events:
+        if not e.get("date"):
+            continue
+        try:
+            event_time = datetime.fromisoformat(e["date"])
+        except ValueError:
+            continue
+        if event_time > now:
+            continue
+        events_by_day.setdefault(event_time.date(), []).append(e)
+
+    for day, day_events in events_by_day.items():
+        try:
+            html = forex_live_monitor.fetch_live_day_html(day)
+        except Exception as exc:
+            print(f"[forex_calendar] live actual fetch failed for {day}: {exc}")
+            continue
+        for e in day_events:
+            result = forex_live_monitor.find_actual_for_event(html, e["title"], e["country"])
+            if result:
+                e["actual"] = result["actual"]
+                e["direction"] = result["direction"]
+                e["surprise_pct"] = forex_calendar._surprise_pct(result["actual"], e.get("forecast"))
+
+
 def _run_forex_calendar_refresh(force: bool = False) -> tuple[list[dict], bool]:
     """Returns (events, did_refetch). Enforces
     config.FOREX_CALENDAR_MIN_REFRESH_SECONDS between real upstream
     fetches -- Forex Factory's feed is rate-limited, so a request inside
-    that window re-serves the cached copy instead of risking a block."""
+    that window re-serves the cached copy instead of risking a block.
+    The same cooldown also gates the live-actuals check below, since
+    there's no confirmed rate limit for that separate live page either
+    -- better to be conservative on both fetches together."""
     db_mod.init_db(config.DB_PATH)
     with db_mod.connect(config.DB_PATH) as conn:
         last_fetch = db_mod.get_latest_forex_calendar_fetch(conn)
@@ -367,6 +410,7 @@ def _run_forex_calendar_refresh(force: bool = False) -> tuple[list[dict], bool]:
                 return db_mod.get_forex_calendar_events(conn), False
 
         events = forex_calendar.fetch_calendar_events(config.FOREX_CALENDAR_FEED_URL)
+        _enrich_with_live_actuals(events)
         db_mod.save_forex_calendar_events(conn, events, fetched_at=now.isoformat())
         return db_mod.get_forex_calendar_events(conn), True
 
@@ -500,6 +544,8 @@ PAGE_TEMPLATE = """<!doctype html>
   .badge.impact-high { background: #3a2323; color: var(--red); }
   .badge.impact-medium { background: #3a3220; color: var(--amber); }
   .badge.impact-low, .badge.impact-holiday { background: #2a2f3a; color: var(--muted); }
+  .actual-better { color: var(--green); font-weight: 600; }
+  .actual-worse { color: var(--red); font-weight: 600; }
   .news-card, .mover-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
   .news-card .ticker, .mover-card .ticker { font-weight: 600; margin-right: 8px; }
   a.ticker-link { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--muted); }
@@ -684,14 +730,17 @@ PAGE_TEMPLATE = """<!doctype html>
     </div>
     <p class="muted" style="max-width:640px;">
       Forex Factory's scheduled economic calendar (rate decisions, CPI, NFP, GDP, etc.) --
-      the releases that tend to move currency markets sharply the instant they print. Pulled from
-      Forex Factory's public calendar feed, which is unofficial and rate-limited, so "Run Now" won't
-      fetch more than once every few minutes. This is informational only -- it does not place, size,
-      or evaluate any trade, and never will run unattended.
-      <strong>Note:</strong> this feed is a forecast-only snapshot for the week -- it never fills in
-      the <strong>Actual</strong>/<strong>Surprise</strong> columns even after an event has released
-      (confirmed: none of this week's ~80 events carried one, past or future). For what actually
-      printed, check <a href="https://www.forexfactory.com/calendar" target="_blank" rel="noopener">forexfactory.com/calendar</a> directly.
+      the releases that tend to move currency markets sharply the instant they print. The
+      schedule/forecast/previous come from Forex Factory's public calendar feed, which is unofficial
+      and rate-limited, so "Run Now" won't fetch more than once every few minutes.
+      <strong>Note:</strong> that feed never carries the <strong>Actual</strong> value even after an
+      event releases (confirmed empirically), so "Run Now" separately checks Forex Factory's live
+      calendar page -- once per already-passed day, not per event -- to fill in Actual/Surprise once
+      available. That live check scrapes their website directly, which is against Forex Factory's
+      Terms of Service; if a value still looks off, check
+      <a href="https://www.forexfactory.com/calendar" target="_blank" rel="noopener">forexfactory.com/calendar</a>
+      directly. This tab is informational only -- it does not place, size, or evaluate any trade, and
+      never will run unattended.
     </p>
     <div id="fx-status"></div>
     <div id="fx-next-event" class="muted" style="margin-bottom:4px; font-weight: 600;"></div>
@@ -1267,6 +1316,7 @@ function renderForexTable() {
       ? `${e.surprise_pct >= 0 ? "+" : ""}${fmtNum(e.surprise_pct, 1)}%`
       : "--";
     const when = e.date ? new Date(e.date) : null;
+    const actualClass = e.direction === "better" ? "actual-better" : e.direction === "worse" ? "actual-worse" : "";
     return `<tr>
       <td>${when && !isNaN(when) ? when.toLocaleString() : "n/a"}</td>
       <td>${e.country || "n/a"}</td>
@@ -1274,7 +1324,7 @@ function renderForexTable() {
       <td><span class="badge impact-${impactClass}">${e.impact || "n/a"}</span></td>
       <td>${e.previous ?? "n/a"}</td>
       <td>${e.forecast ?? "n/a"}</td>
-      <td>${e.actual ?? "n/a"}</td>
+      <td class="${actualClass}">${e.actual ?? "n/a"}</td>
       <td>${surpriseCell}</td>
     </tr>`;
   }).join("");
