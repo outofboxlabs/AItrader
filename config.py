@@ -6,6 +6,23 @@ defaults below if you want them to stick without passing flags every run.
 
 from __future__ import annotations
 
+import os
+
+# All of the relative paths below are anchored to this file's own directory
+# rather than left as bare relative paths. A bare relative path resolves
+# against the process's current working directory, which silently differs
+# depending on how python app.py was launched (a terminal cd'ed elsewhere,
+# a double-clicked shortcut, an IDE run config with its own working
+# directory) -- so the exact same "positions.json" string can point at a
+# different file on disk from one launch to the next, making saved data
+# (positions, credentials, the db) appear to vanish for no visible reason.
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _here(name: str) -> str:
+    return os.path.join(_BASE_DIR, name)
+
+
 # Black-Scholes
 RISK_FREE_RATE = 0.045  # annual, e.g. 3-month T-bill yield
 
@@ -77,7 +94,7 @@ GEMINI_VISION_MODEL = "gemini-2.0-flash"  # UNVERIFIED -- see note above
 
 # Local, gitignored cache of API keys entered interactively -- see
 # portfolio_monitor/credentials.py. Never commit this file.
-CREDENTIALS_PATH = ".credentials.json"
+CREDENTIALS_PATH = _here(".credentials.json")
 
 # --- Market movers screener (Top Movers tab) ---
 # A >40% single-day drop is a genuinely rare, severe event -- realistically
@@ -118,7 +135,7 @@ NEARLOW_MAX_RESULTS = 100
 NEARLOW_MAX_WORKERS = 20
 
 # Storage
-DB_PATH = "portfolio.db"
-SNAPSHOTS_DIR = "snapshots"
-POSITIONS_PATH = "positions.json"
-EXPORTS_DIR = "exports"  # timestamped CSVs from Top Movers / Top Growth scans
+DB_PATH = _here("portfolio.db")
+SNAPSHOTS_DIR = _here("snapshots")
+POSITIONS_PATH = _here("positions.json")
+EXPORTS_DIR = _here("exports")  # timestamped CSVs from Top Movers / Top Growth scans

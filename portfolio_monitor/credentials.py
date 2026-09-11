@@ -46,6 +46,7 @@ def _save(creds: dict) -> None:
         os.chmod(config.CREDENTIALS_PATH, stat.S_IRUSR | stat.S_IWUSR)  # 600: owner read/write only
     except OSError:
         pass  # best-effort; not every platform/filesystem supports chmod
+    print(f"[credentials] saved key(s) for {sorted(creds.keys())} to {os.path.abspath(config.CREDENTIALS_PATH)}")
 
 
 def get_saved_key(provider: str) -> Optional[str]:

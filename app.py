@@ -345,6 +345,7 @@ def run_nearlow_now():
 def has_key():
     provider = request.args.get("provider", config.NEWS_PROVIDER)
     key = credentials.resolve_api_key(provider, interactive=False)
+    print(f"[settings] has-key({provider}) -> {bool(key)}, reading {os.path.abspath(config.CREDENTIALS_PATH)}")
     return jsonify({"has_key": bool(key)})
 
 
