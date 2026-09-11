@@ -784,21 +784,14 @@ PAGE_TEMPLATE = """<!doctype html>
       <label><input type="checkbox" id="fx-include-non-us" onchange="renderForexTable()"> Include non-US events</label>
       <button class="action" id="fx-run-btn" onclick="runForexNow()">Run Now</button>
     </div>
-    <p class="muted" style="max-width:640px;">
-      Forex Factory's scheduled economic calendar (rate decisions, CPI, NFP, GDP, etc.) for the whole
-      calendar month -- the releases that tend to move currency markets sharply the instant they
-      print. Defaults to US (USD) events only; check "Include non-US events" for every currency.
-      The current week's schedule/forecast/previous come from Forex Factory's public calendar feed
-      (unofficial and rate-limited, so "Run Now" won't fetch more than once every few minutes); every
-      other day in the month, plus the <strong>Actual</strong>/<strong>Surprise</strong> columns for
-      any already-released event (that feed never carries actuals, confirmed empirically), come from
-      checking Forex Factory's live calendar page directly instead -- against their Terms of Service,
-      the same tradeoff already made for forex_monitor.py. Covering a whole month this way means
-      "Run Now" can take up to a minute; watch the terminal for progress. If a value looks off, check
-      <a href="https://www.forexfactory.com/calendar" target="_blank" rel="noopener">forexfactory.com/calendar</a>
-      directly. This tab is informational only -- it does not place, size, or evaluate any trade, and
-      never will run unattended.
-    </p>
+    <ul class="muted" style="max-width:640px; margin: 0 0 12px; padding-left: 18px;">
+      <li>Forex Factory's high-impact economic calendar (rate decisions, CPI, NFP, GDP...) for the whole month.</li>
+      <li>USD events only by default -- check "Include non-US events" for every currency.</li>
+      <li>This week's schedule comes from Forex Factory's public feed; every other day, plus Actual/Surprise once released, comes from checking their live page directly -- against their Terms of Service.</li>
+      <li>Covering a whole month can take up to a minute -- watch the terminal for progress.</li>
+      <li>If a value looks off, check <a href="https://www.forexfactory.com/calendar" target="_blank" rel="noopener">forexfactory.com/calendar</a> directly.</li>
+      <li><strong>Informational only</strong> -- never places a trade or runs unattended.</li>
+    </ul>
     <div id="fx-status"></div>
     <div id="fx-next-event" class="muted" style="margin-bottom:4px; font-weight: 600;"></div>
     <div id="fx-as-of" class="muted" style="margin-bottom:8px;"></div>
