@@ -1041,3 +1041,119 @@ def test_index_page_javascript_has_no_syntax_errors(client):
             path = f.name
         result = subprocess.run(["node", "--check", path], capture_output=True, text=True)
         assert result.returncode == 0, f"embedded JS failed to parse:\n{result.stderr}"
+
+
+# --- Near 52W Low: per-stock AI analysis --------------------------------
+
+
+def _seed_nearlow_candidate(**overrides):
+    candidate = {
+        "ticker": "ACME",
+        "name": "Acme Corp",
+        "price": 42.0,
+        "year_low": 40.0,
+        "year_high": 90.0,
+        "pct_from_52w_low": 5.0,
+        "pct_from_52w_high": -53.3,
+        "target_mean": 60.0,
+        "target_upside_pct": 42.9,
+        "analyst_ratings": {"buy": 5, "hold": 2},
+        "buy_ratio_pct": 71.4,
+        "market_cap": 5_000_000_000,
+    }
+    candidate.update(overrides)
+    app_mod.db_mod.init_db(app_mod.config.DB_PATH)
+    with app_mod.db_mod.connect(app_mod.config.DB_PATH) as conn:
+        app_mod.db_mod.save_nearlow_candidates(conn, date.today().isoformat(), [candidate])
+    return candidate
+
+
+def test_analyze_nearlow_stock_requires_ticker(client):
+    res = client.post("/api/nearlow/analyze", data=json.dumps({}), content_type="application/json")
+    assert res.status_code == 400
+
+
+def test_analyze_nearlow_stock_requires_ticker_to_be_a_current_candidate(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    res = client.post("/api/nearlow/analyze", data=json.dumps({"ticker": "NOPE"}), content_type="application/json")
+    assert res.status_code == 400
+    assert "Run the screen first" in res.get_json()["error"]
+
+
+def test_analyze_nearlow_stock_rejects_unknown_provider(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    _seed_nearlow_candidate()
+    res = client.post(
+        "/api/nearlow/analyze",
+        data=json.dumps({"ticker": "ACME", "provider": "not-real"}),
+        content_type="application/json",
+    )
+    assert res.status_code == 400
+
+
+def test_analyze_nearlow_stock_returns_expert_take(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
+    _seed_nearlow_candidate()
+
+    captured = {}
+
+    def fake_analyze(ticker, candidate, rating_timeline, headlines, macro_score, provider, model, api_key=None):
+        captured["ticker"] = ticker
+        captured["candidate"] = candidate
+        return {"analysis": "About 200 words.", "verdict": "buy_opportunity", "disclaimer": "This is not investment advice.", "parse_error": False}
+
+    monkeypatch.setattr(app_mod.nearlow_analysis, "analyze_expert_take", fake_analyze)
+
+    res = client.post("/api/nearlow/analyze", data=json.dumps({"ticker": "acme"}), content_type="application/json")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["analysis"] == "About 200 words."
+    assert data["verdict"] == "buy_opportunity"
+    assert captured["ticker"] == "ACME"
+    assert captured["candidate"]["ticker"] == "ACME"
+
+
+def test_analyze_nearlow_stock_handles_ai_failure(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
+    _seed_nearlow_candidate()
+
+    def boom(*a, **kw):
+        raise RuntimeError("rate limited")
+
+    monkeypatch.setattr(app_mod.nearlow_analysis, "analyze_expert_take", boom)
+
+    res = client.post("/api/nearlow/analyze", data=json.dumps({"ticker": "ACME"}), content_type="application/json")
+    assert res.status_code == 502
+
+
+def test_nearlow_panel_requires_ticker_to_be_a_current_candidate(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    res = client.post("/api/nearlow/panel", data=json.dumps({"ticker": "NOPE"}), content_type="application/json")
+    assert res.status_code == 400
+
+
+def test_nearlow_panel_returns_five_agent_takes(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
+    _seed_nearlow_candidate()
+
+    fake_panel = [
+        {"persona": "technical", "label": "Technical Analyst", "take": "x", "stance": "bullish", "error": None},
+        {"persona": "fundamental", "label": "Fundamental Analyst", "take": "x", "stance": "neutral", "error": None},
+        {"persona": "news_sentiment", "label": "News & Sentiment Analyst", "take": "x", "stance": "bearish", "error": None},
+        {"persona": "ratings_timing", "label": "Analyst-Ratings Auditor", "take": "x", "stance": "neutral", "error": None},
+        {"persona": "macro_risk", "label": "Macro & Risk Manager", "take": "x", "stance": "neutral", "error": None},
+    ]
+    monkeypatch.setattr(app_mod.nearlow_analysis, "run_expert_panel", lambda *a, **kw: fake_panel)
+
+    res = client.post("/api/nearlow/panel", data=json.dumps({"ticker": "ACME"}), content_type="application/json")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["ticker"] == "ACME"
+    assert len(data["panel"]) == 5
+    assert {p["persona"] for p in data["panel"]} == {"technical", "fundamental", "news_sentiment", "ratings_timing", "macro_risk"}

@@ -27,7 +27,7 @@ from typing import Optional
 from flask import Flask, jsonify, render_template_string, request
 
 import config
-from portfolio_monitor import credentials, data, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_screener, news, pipeline, scheduler, vision
+from portfolio_monitor import credentials, data, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_analysis, nearlow_screener, news, pipeline, scheduler, vision
 from portfolio_monitor import db as db_mod
 from portfolio_monitor.models import Position
 
@@ -337,6 +337,94 @@ def run_nearlow_now():
         traceback.print_exc()
         return jsonify({"error": str(exc)}), 502
     return jsonify({"asof_date": date.today().isoformat(), "candidates": candidates})
+
+
+def _load_nearlow_candidate(ticker: str) -> Optional[dict]:
+    """One ticker's row from the most recent Near 52W Low screen -- reuses
+    the price/range/ratings data already fetched by that scan instead of
+    re-pulling it, since the AI analysis routes below only add rating-
+    timeline, headlines, and the AI call on top. None if the screen has
+    never been run, or this ticker wasn't one of its candidates."""
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        latest_date = db_mod.get_latest_nearlow_candidates_date(conn)
+        if not latest_date:
+            return None
+        candidates = db_mod.get_nearlow_candidates(conn, latest_date)
+    return next((c for c in candidates if c.get("ticker") == ticker), None)
+
+
+def _nearlow_analysis_context(ticker: str) -> dict:
+    rating_timeline = nearlow_analysis.get_rating_timeline(ticker)
+    headlines = news.fetch_recent_headlines(ticker, window_days=5)
+    macro_score = _latest_macro_score()
+    return {"rating_timeline": rating_timeline, "headlines": headlines, "macro_score": macro_score}
+
+
+@app.route("/api/nearlow/analyze", methods=["POST"])
+def analyze_nearlow_stock():
+    """On-demand only -- one ticker at a time, when a human clicks into a
+    Near 52W Low candidate. Never runs automatically across the whole
+    screen (that would mean an AI call per candidate on every "Run Now")."""
+    body = request.get_json(force=True)
+    ticker = (body.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker required"}), 400
+
+    candidate = _load_nearlow_candidate(ticker)
+    if candidate is None:
+        return jsonify({"error": f"{ticker} is not in the current Near 52W Low results. Run the screen first."}), 400
+
+    requested_provider = body.get("provider")
+    if requested_provider and requested_provider not in PROVIDERS:
+        return jsonify({"error": f"unknown provider {requested_provider!r}"}), 400
+    provider, api_key = _resolve_forex_analysis_provider(requested_provider)
+    if not api_key:
+        return jsonify({"error": "No saved API key for any provider. Add one in the Settings tab first."}), 400
+    model = body.get("model") or NEWS_DEFAULT_MODEL[provider]
+
+    ctx = _nearlow_analysis_context(ticker)
+    try:
+        result = nearlow_analysis.analyze_expert_take(
+            ticker, candidate, ctx["rating_timeline"], ctx["headlines"], ctx["macro_score"], provider, model, api_key=api_key
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"error": str(exc)}), 502
+    return jsonify(result)
+
+
+@app.route("/api/nearlow/panel", methods=["POST"])
+def nearlow_expert_panel():
+    """5-persona AI panel discussion (technical, fundamental, news,
+    analyst-ratings-timing, macro/risk) for one Near 52W Low candidate --
+    makes 5 sequential AI calls, so this only runs when a human explicitly
+    clicks "Generate 5 AI Agents", never automatically. Each persona's
+    failure is isolated to its own entry rather than failing the whole
+    request, so this always returns 200 once the ticker/provider checks
+    pass."""
+    body = request.get_json(force=True)
+    ticker = (body.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker required"}), 400
+
+    candidate = _load_nearlow_candidate(ticker)
+    if candidate is None:
+        return jsonify({"error": f"{ticker} is not in the current Near 52W Low results. Run the screen first."}), 400
+
+    requested_provider = body.get("provider")
+    if requested_provider and requested_provider not in PROVIDERS:
+        return jsonify({"error": f"unknown provider {requested_provider!r}"}), 400
+    provider, api_key = _resolve_forex_analysis_provider(requested_provider)
+    if not api_key:
+        return jsonify({"error": "No saved API key for any provider. Add one in the Settings tab first."}), 400
+    model = body.get("model") or NEWS_DEFAULT_MODEL[provider]
+
+    ctx = _nearlow_analysis_context(ticker)
+    panel = nearlow_analysis.run_expert_panel(
+        ticker, candidate, ctx["rating_timeline"], ctx["headlines"], ctx["macro_score"], provider, model, api_key=api_key
+    )
+    return jsonify({"ticker": ticker, "panel": panel})
 
 
 # --- Forex Factory economic calendar (Forex Calendar tab) -------------------
@@ -1002,7 +1090,10 @@ PAGE_TEMPLATE = """<!doctype html>
       Beaten-down stocks the analyst consensus still likes: within {{ nearlow_max_pct_from_low }}% of the
       52-week low, with at least {{ nearlow_min_ratings_count }} analyst ratings of which
       {{ nearlow_min_buy_ratio_pct }}% or more are "buy" or "strong buy". Both conditions are required --
-      this is not investment advice, just a starting point for further research.
+      this is not investment advice, just a starting point for further research. Click "Analyze" on a
+      candidate for a ~200-word expert take (with a buy-opportunity verdict), then optionally generate a
+      5-agent panel (technical / fundamental / news / analyst-ratings-timing / macro) that argues it from
+      different angles.
     </p>
     <div id="nl-status"></div>
     <div id="nl-as-of" class="muted" style="margin-bottom:8px;"></div>
@@ -1015,6 +1106,7 @@ PAGE_TEMPLATE = """<!doctype html>
         <th class="sortable" data-sort="buy_ratio_pct">Buy Ratio %<span class="arrow"></span></th>
         <th class="sortable" data-sort="target_upside_pct">Target Upside<span class="arrow"></span></th>
         <th class="sortable" data-sort="market_cap">Market Cap<span class="arrow"></span></th>
+        <th>Analysis</th>
       </tr></thead>
       <tbody id="nl-body"></tbody>
     </table>
@@ -1814,7 +1906,7 @@ function renderNearlowTable() {
   });
 
   if (nearlowRows.length === 0) {
-    body.innerHTML = '<tr><td colspan="7" class="muted">No candidates found. Click "Run Now" to screen today\\'s market.</td></tr>';
+    body.innerHTML = '<tr><td colspan="8" class="muted">No candidates found. Click "Run Now" to screen today\\'s market.</td></tr>';
     return;
   }
 
@@ -1847,6 +1939,10 @@ function renderNearlowTable() {
       <td>${buyRatioCell}</td>
       <td>${upsideCell}</td>
       <td>${fmtCap(c.market_cap)}</td>
+      <td><button class="secondary" style="font-size:0.75rem; padding:3px 8px;" id="nl-toggle-${c.ticker}" onclick="toggleNearlowDetail('${c.ticker}')">Analyze</button></td>
+    </tr>
+    <tr id="nl-detail-row-${c.ticker}" style="display:none;">
+      <td colspan="8" style="border-top:none;"><div id="nl-detail-${c.ticker}"></div></td>
     </tr>`;
   }).join("");
 }
@@ -1855,6 +1951,114 @@ document.getElementById("nl-head").addEventListener("click", (e) => {
   const th = e.target.closest("th.sortable");
   if (th) sortNearlow(th.dataset.sort);
 });
+
+// ---------- NEAR 52W LOW: per-stock expert take + 5-agent panel ----------
+
+const nearlowExpert = {};
+const nearlowPanel = {};
+
+function toggleNearlowDetail(ticker) {
+  const row = document.getElementById(`nl-detail-row-${ticker}`);
+  const btn = document.getElementById(`nl-toggle-${ticker}`);
+  const isOpen = row.style.display !== "none";
+  if (isOpen) {
+    row.style.display = "none";
+    btn.textContent = "Analyze";
+    return;
+  }
+  row.style.display = "table-row";
+  btn.textContent = "Hide";
+  if (!nearlowExpert[ticker]) {
+    loadNearlowExpert(ticker);
+  }
+}
+
+function nearlowVerdictLabel(verdict) {
+  const map = {
+    buy_opportunity: ["Buy opportunity", "#4caf7d"],
+    not_a_buy: ["Not a buy", "#d9615b"],
+    mixed: ["Mixed / unclear", "#2d6cdf"],
+  };
+  return map[verdict] || ["Unclear", "#2d6cdf"];
+}
+
+function nearlowStanceColor(stance) {
+  return { bullish: "#4caf7d", bearish: "#d9615b", neutral: "#2d6cdf" }[stance] || "#2d6cdf";
+}
+
+async function loadNearlowExpert(ticker) {
+  const container = document.getElementById(`nl-detail-${ticker}`);
+  container.innerHTML = '<div class="muted" style="padding:8px 0;"><span class="spinner"></span> Loading expert take...</div>';
+  try {
+    const res = await fetch("/api/nearlow/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker }),
+    });
+    const resData = await res.json();
+    if (!res.ok) {
+      container.innerHTML = `<div class="muted" style="padding:8px 0;">Error: ${escapeHtml(resData.error)}</div>`;
+      return;
+    }
+    nearlowExpert[ticker] = resData;
+    renderNearlowDetail(ticker);
+  } catch (err) {
+    container.innerHTML = `<div class="muted" style="padding:8px 0;">Error: ${escapeHtml(String(err))}</div>`;
+  }
+}
+
+function renderNearlowPanelCard(p) {
+  if (p.error) {
+    return `<div class="news-card" style="margin-top:6px;"><strong>${escapeHtml(p.label)}</strong><div class="muted">Error: ${escapeHtml(p.error)}</div></div>`;
+  }
+  const color = nearlowStanceColor(p.stance);
+  return `<div class="news-card" style="margin-top:6px;">
+    <strong>${escapeHtml(p.label)}</strong>
+    <span style="margin-left:6px; padding:1px 6px; border-radius:8px; background:${color}22; color:${color}; font-size:0.7rem; text-transform:uppercase;">${escapeHtml(p.stance || "neutral")}</span>
+    <div style="margin-top:4px;">${escapeHtml(p.take || "n/a")}</div>
+  </div>`;
+}
+
+function renderNearlowDetail(ticker) {
+  const container = document.getElementById(`nl-detail-${ticker}`);
+  const expert = nearlowExpert[ticker];
+  if (!expert) return;
+  const [label, color] = nearlowVerdictLabel(expert.verdict);
+  const panel = nearlowPanel[ticker];
+  const panelHtml = panel
+    ? panel.map(renderNearlowPanelCard).join("")
+    : `<button class="secondary" style="font-size:0.75rem; padding:4px 10px;" onclick="loadNearlowPanel('${ticker}')">Generate 5 AI Agents</button>`;
+
+  container.innerHTML = `
+    <div style="padding:10px 0 14px; max-width:720px;">
+      <span style="display:inline-block; padding:2px 8px; border-radius:10px; background:${color}22; color:${color}; font-size:0.75rem; font-weight:600;">${escapeHtml(label)}</span>
+      <div style="margin-top:6px;">${escapeHtml(expert.analysis || "n/a")}</div>
+      <div class="disclaimer" style="margin-top:6px;">${escapeHtml(expert.disclaimer || "This is not investment advice.")}</div>
+      <div id="nl-panel-status-${ticker}" class="muted" style="margin-top:8px;"></div>
+      <div id="nl-panel-cards-${ticker}" style="margin-top:6px;">${panelHtml}</div>
+    </div>`;
+}
+
+async function loadNearlowPanel(ticker) {
+  const statusEl = document.getElementById(`nl-panel-status-${ticker}`);
+  const cardsEl = document.getElementById(`nl-panel-cards-${ticker}`);
+  statusEl.innerHTML = '<span class="spinner"></span> Running 5 AI agents (technical, fundamental, news, ratings-timing, macro)\\u2014this makes 5 AI calls and can take a bit.';
+  cardsEl.innerHTML = "";
+  try {
+    const res = await fetch("/api/nearlow/panel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker }),
+    });
+    const resData = await res.json();
+    if (!res.ok) { statusEl.textContent = "Error: " + resData.error; return; }
+    nearlowPanel[ticker] = resData.panel;
+    statusEl.textContent = "";
+    renderNearlowDetail(ticker);
+  } catch (err) {
+    statusEl.textContent = "Error: " + err;
+  }
+}
 
 // ---------- FOREX CALENDAR TAB ----------
 let forexRows = [];

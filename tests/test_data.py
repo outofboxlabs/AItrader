@@ -55,6 +55,36 @@ def test_get_price_history_returns_empty_list_on_exception(monkeypatch):
     assert data_mod.get_price_history("AAPL") == []
 
 
+def test_get_daily_price_history_returns_date_and_close(monkeypatch):
+    idx = pd.DatetimeIndex([datetime(2026, 1, 1), datetime(2026, 1, 2)])
+    df = pd.DataFrame({"Close": [100.0, 105.0]}, index=idx)
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def history(self, period=None, interval=None):
+            assert interval == "1d"
+            return df
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+
+    result = data_mod.get_daily_price_history("AAPL")
+    assert result == [{"date": "2026-01-01", "close": 100.0}, {"date": "2026-01-02", "close": 105.0}]
+
+
+def test_get_daily_price_history_returns_empty_list_on_failure(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def history(self, period=None, interval=None):
+            raise RuntimeError("network error")
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    assert data_mod.get_daily_price_history("AAPL") == []
+
+
 def test_get_price_history_window_uses_1m_for_recent_event(monkeypatch):
     center = datetime.now(timezone.utc) - timedelta(hours=3)  # well within the last 7 days
     idx = pd.DatetimeIndex([center])

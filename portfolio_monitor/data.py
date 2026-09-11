@@ -43,6 +43,25 @@ def get_price_history(ticker: str, period: str = "60d", interval: str = "5m") ->
     return [{"time": idx.isoformat(), "close": float(row["Close"])} for idx, row in hist.iterrows()]
 
 
+def get_daily_price_history(ticker: str, period: str = "1y") -> list[dict]:
+    """Daily close history, as [{"date": "YYYY-MM-DD", "close": float}, ...],
+    sorted oldest-first (yfinance's own order). Used to place events like an
+    analyst rating change on a timeline relative to the stock's own price
+    action over the past year -- e.g. finding the date of its 52-week low,
+    or the price on the day a given rating was issued -- rather than for
+    charting, so daily granularity over a year is what's needed, not
+    intraday bars. Returns [] rather than raising on an empty/failed pull,
+    same convention as get_price_history."""
+    t = yf.Ticker(ticker)
+    try:
+        hist = t.history(period=period, interval="1d")
+    except Exception:
+        return []
+    if hist.empty:
+        return []
+    return [{"date": idx.strftime("%Y-%m-%d"), "close": float(row["Close"])} for idx, row in hist.iterrows()]
+
+
 def get_price_history_window(
     ticker: str, center_time: datetime, window_hours: float = 2.0, interval: Optional[str] = None
 ) -> tuple[list[dict], str]:
