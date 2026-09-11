@@ -87,11 +87,21 @@ def test_parse_event_time_non_clock_text_returns_none():
     assert flm._parse_event_time("", date(2026, 9, 11)) is None
 
 
-def test_normalize_impact_maps_known_levels():
+def test_normalize_impact_maps_known_icon_colors():
+    """Confirmed via a real run: the impact icon <span> carries no title
+    attribute or text at all -- the level is encoded purely in its CSS
+    class color suffix (icon--ff-impact-red/ora/yel/gra)."""
+    assert flm._normalize_impact("icon icon--ff-impact-red") == "High"
+    assert flm._normalize_impact("icon icon--ff-impact-ora") == "Medium"
+    assert flm._normalize_impact("icon icon--ff-impact-yel") == "Low"
+    assert flm._normalize_impact("icon icon--ff-impact-gra") == "Holiday"
+
+
+def test_normalize_impact_still_handles_plain_text_fallback():
+    """Kept as a fallback in case some other row type ever does carry
+    title/text instead of (or alongside) the icon class."""
     assert flm._normalize_impact("High Impact Expected") == "High"
     assert flm._normalize_impact("Medium Impact Expected") == "Medium"
-    assert flm._normalize_impact("Low Impact Expected") == "Low"
-    assert flm._normalize_impact("Non-Economic / Holiday") == "Holiday"
 
 
 def test_normalize_impact_unknown_text_passed_through():
@@ -103,7 +113,7 @@ _DAY_TABLE_TEMPLATE = """
   <tr class="calendar__row calendar_row">
     <td class="calendar__cell calendar__time time">8:30am</td>
     <td class="calendar__cell calendar__currency currency">USD</td>
-    <td class="impact"><span title="High Impact Expected"></span></td>
+    <td class="calendar__cell calendar__impact"><span class="icon icon--ff-impact-red"></span></td>
     <td class="calendar__cell calendar__event event"><span class="calendar__event-title">Core CPI m/m</span></td>
     <td class="calendar__cell calendar__actual actual"><span class="better">0.3%</span></td>
     <td class="calendar__cell calendar__forecast forecast">0.2%</td>
@@ -112,7 +122,7 @@ _DAY_TABLE_TEMPLATE = """
   <tr class="calendar__row calendar_row">
     <td class="calendar__cell calendar__time time"></td>
     <td class="calendar__cell calendar__currency currency">USD</td>
-    <td class="impact"><span title="High Impact Expected"></span></td>
+    <td class="calendar__cell calendar__impact"><span class="icon icon--ff-impact-red"></span></td>
     <td class="calendar__cell calendar__event event"><span class="calendar__event-title">Core CPI y/y</span></td>
     <td class="calendar__cell calendar__actual actual"><span class="worse">2.4%</span></td>
     <td class="calendar__cell calendar__forecast forecast">2.4%</td>
@@ -121,7 +131,7 @@ _DAY_TABLE_TEMPLATE = """
   <tr class="calendar__row calendar_row">
     <td class="calendar__cell calendar__time time">10:00am</td>
     <td class="calendar__cell calendar__currency currency">USD</td>
-    <td class="impact"><span title="Medium Impact Expected"></span></td>
+    <td class="calendar__cell calendar__impact"><span class="icon icon--ff-impact-ora"></span></td>
     <td class="calendar__cell calendar__event event"><span class="calendar__event-title">Prelim UoM Consumer Sentiment</span></td>
     <td class="calendar__cell calendar__actual actual"><!----></td>
     <td class="calendar__cell calendar__forecast forecast">51.0</td>

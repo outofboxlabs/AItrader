@@ -122,13 +122,27 @@ def _parse_event_time(time_text: str, day: date) -> Optional[str]:
     return datetime(day.year, day.month, day.day, hour, minute, tzinfo=_EASTERN).isoformat()
 
 
+_IMPACT_ICON_COLORS = {
+    "red": "High",
+    "ora": "Medium",
+    "yel": "Low",
+    "gra": "Holiday",  # one confirmed sample (a single low-volume day) -- best-fit guess, not certain
+}
+
+
 def _normalize_impact(raw: str) -> str:
-    """Live-page impact is an icon with descriptive text (e.g. a title
-    attribute like "High Impact Expected"), not the clean "High"/
-    "Medium"/"Low"/"Holiday" the JSON feed uses -- normalize to match,
-    falling back to the raw text if it doesn't contain a recognized
-    level (never silently drop it)."""
+    """Confirmed via a real run: Forex Factory's live page encodes
+    impact purely as an icon's CSS color suffix (icon--ff-impact-red/
+    ora/yel/gra) -- the icon <span> itself carries no title attribute
+    or text at all (an earlier assumption that it did was wrong and
+    made every live-scraped event's impact come back empty). Also
+    handles plain text like "High Impact Expected", in case some other
+    row type ever does carry it. Falls back to the raw input if neither
+    pattern is recognized -- never silently drop it."""
     text = (raw or "").lower()
+    for suffix, level in _IMPACT_ICON_COLORS.items():
+        if f"impact-{suffix}" in text:
+            return level
     for level in ("high", "medium", "low", "holiday"):
         if level in text:
             return level.capitalize()
@@ -179,17 +193,21 @@ def find_all_events_for_day(html: str, day: date) -> list[dict]:
             skipped_no_time += 1
             continue
 
-        # Two attempted selectors for this cell have both failed against
-        # real output ("td.calendar__impact", then "td.impact") -- rather
-        # than guess a third time, print the first row's actual impact
-        # cell HTML on every call, so the terminal shows the real markup
-        # to select against directly instead of another guess.
-        impact_cell = row.select_one("td.impact") or row.select_one("td.calendar__impact")
+        # Confirmed via a real run: "td.calendar__impact" is the right
+        # cell, but the icon <span> inside it has no title attribute or
+        # text -- the impact level is encoded purely in the span's CSS
+        # class color suffix (see _normalize_impact). Build impact_raw
+        # from the class list (plus title/text as a defensive fallback,
+        # in case a future markup change adds either).
+        impact_cell = row.select_one("td.calendar__impact")
         if not logged_impact_sample:
             print(f"[forex_live_monitor] impact cell sample for {day}: {impact_cell}")
             logged_impact_sample = True
         impact_span = impact_cell.find("span") if impact_cell else None
-        impact_raw = ((impact_span.get("title") or impact_span.get_text(strip=True)) if impact_span else "")
+        if impact_span:
+            impact_raw = " ".join(impact_span.get("class", [])) + " " + (impact_span.get("title") or "") + " " + impact_span.get_text(strip=True)
+        else:
+            impact_raw = ""
 
         forecast_cell = row.select_one("td.calendar__forecast")
         previous_cell = row.select_one("td.calendar__previous")
