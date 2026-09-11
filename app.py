@@ -491,6 +491,35 @@ def run_forex_calendar_now():
     return jsonify({"events": events, "last_fetched_at": last_fetch, "refetched": did_refetch})
 
 
+@app.route("/api/forex-calendar/analyze-impact", methods=["POST"])
+def analyze_forex_impact():
+    """On-demand only -- one event at a time, only when a human clicks
+    "Analyze" on it. Never runs automatically across a whole month's
+    events (that would require an API key for a tab that otherwise
+    doesn't need one, and could fire dozens of AI calls per "Run Now")."""
+    body = request.get_json(force=True)
+    event = body.get("event")
+    if not isinstance(event, dict):
+        return jsonify({"error": "expected an event object"}), 400
+
+    provider = body.get("provider", config.NEWS_PROVIDER)
+    if provider not in PROVIDERS:
+        return jsonify({"error": f"unknown provider {provider!r}"}), 400
+    model = body.get("model") or NEWS_DEFAULT_MODEL[provider]
+
+    api_key = credentials.resolve_api_key(provider, interactive=False)
+    if not api_key:
+        return jsonify({"error": f"No saved API key for {provider}. Add one in the Settings tab first."}), 400
+
+    positions = _load_positions_raw()
+    try:
+        result = forex_calendar.analyze_portfolio_impact(event, positions, provider, model, api_key=api_key)
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"error": str(exc)}), 502
+    return jsonify(result)
+
+
 # --- Settings ----------------------------------------------------------
 
 
@@ -795,6 +824,7 @@ PAGE_TEMPLATE = """<!doctype html>
     <div id="fx-status"></div>
     <div id="fx-next-event" class="muted" style="margin-bottom:4px; font-weight: 600;"></div>
     <div id="fx-as-of" class="muted" style="margin-bottom:8px;"></div>
+    <div id="fx-impact-result" style="display:none; margin-bottom:12px; padding:10px 12px; border:1px solid var(--border); border-radius:6px; background: var(--card); font-size:0.85rem;"></div>
     <table>
       <thead><tr id="fx-head">
         <th class="sortable" data-sort="date">Time<span class="arrow"></span></th>
@@ -805,6 +835,7 @@ PAGE_TEMPLATE = """<!doctype html>
         <th class="sortable" data-sort="forecast">Forecast<span class="arrow"></span></th>
         <th class="sortable" data-sort="actual">Actual<span class="arrow"></span></th>
         <th class="sortable" data-sort="surprise_pct">Surprise<span class="arrow"></span></th>
+        <th></th>
       </tr></thead>
       <tbody id="fx-body"></tbody>
     </table>
@@ -1348,7 +1379,7 @@ function renderForexTable() {
   );
 
   if (filtered.length === 0) {
-    body.innerHTML = '<tr><td colspan="8" class="muted">No events match this filter. Click "Run Now" to fetch this month\\'s calendar.</td></tr>';
+    body.innerHTML = '<tr><td colspan="9" class="muted">No events match this filter. Click "Run Now" to fetch this month\\'s calendar.</td></tr>';
     return;
   }
 
@@ -1379,8 +1410,45 @@ function renderForexTable() {
       <td>${e.forecast ?? "n/a"}</td>
       <td class="${actualClass}">${e.actual ?? "n/a"}</td>
       <td>${surpriseCell}</td>
+      <td><button class="secondary" style="font-size:0.75rem; padding:3px 8px;" data-event='${JSON.stringify(e).replace(/'/g, "&#39;")}' onclick="analyzeForexImpact(this)">Analyze</button></td>
     </tr>`;
   }).join("");
+}
+
+async function analyzeForexImpact(btn) {
+  const event = JSON.parse(btn.getAttribute("data-event"));
+  const resultEl = document.getElementById("fx-impact-result");
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "...";
+  resultEl.style.display = "none";
+  try {
+    const res = await fetch("/api/forex-calendar/analyze-impact", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ event }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      resultEl.textContent = "Error: " + data.error;
+      resultEl.style.display = "block";
+      return;
+    }
+    const tickersLine = data.affected_tickers && data.affected_tickers.length
+      ? `<div class="muted" style="margin-top:6px;">Tickers referenced: ${data.affected_tickers.join(", ")}</div>`
+      : "";
+    resultEl.innerHTML =
+      `<strong>${event.title} (${event.country})</strong> -- impact on your portfolio:<br>${data.impact_summary || "n/a"}` +
+      tickersLine +
+      `<div class="disclaimer" style="margin-top:6px;">${data.disclaimer || "This is not investment advice."}</div>`;
+    resultEl.style.display = "block";
+  } catch (err) {
+    resultEl.textContent = "Error: " + err;
+    resultEl.style.display = "block";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
 }
 
 document.getElementById("fx-head").addEventListener("click", (e) => {

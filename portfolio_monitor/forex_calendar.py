@@ -31,9 +31,13 @@ trade -- see app.py's Forex Calendar tab docstring for why.
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Optional
 
 import requests
+
+from . import ai_client
 
 DEFAULT_FEED_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 
@@ -105,3 +109,94 @@ def fetch_calendar_events(feed_url: str = DEFAULT_FEED_URL, timeout: float = 15.
         )
     print(f"[forex_calendar] fetched {len(events)} event(s) from {feed_url}")
     return events
+
+
+PORTFOLIO_IMPACT_SYSTEM_PROMPT = """You are a market analyst embedded in a portfolio \
+monitoring tool. You are given one scheduled or just-released economic calendar \
+event (a rate decision, CPI, NFP, GDP, etc.) and a list of the user's current \
+stock/option positions. Your job is ONLY to inform, never to advise:
+
+- In 2-4 sentences, explain the plausible mechanism by which this specific event \
+could affect the specific positions given -- reference the actual tickers/asset \
+types provided, not generic commentary that could apply to any portfolio.
+- If the event has already released (an actual value is given), factor in \
+whether it beat, missed, or matched the forecast, and by how much.
+- List which of the given tickers, if any, you consider most relevant to this \
+event.
+- If you genuinely see no plausible connection between this event and the given \
+positions, say so plainly rather than forcing a connection.
+
+You must NEVER say to buy, sell, hold, or otherwise act on any position. You are \
+laying out a plausible mechanism for a human to weigh, not telling them what to \
+do.
+
+Respond with ONLY a JSON object, no other text, matching exactly this shape:
+{"impact_summary": "...", "affected_tickers": ["...", "..."], \
+"disclaimer": "This is not investment advice."}
+"""
+
+
+def build_portfolio_impact_user_message(event: dict, positions: list[dict]) -> str:
+    lines = [
+        f"Event: {event.get('title')} ({event.get('country')})",
+        f"Scheduled: {event.get('date')}",
+        f"Impact level: {event.get('impact')}",
+        f"Previous: {event.get('previous') or 'n/a'}, Forecast: {event.get('forecast') or 'n/a'}, "
+        f"Actual: {event.get('actual') or 'not yet released'}",
+    ]
+    if event.get("surprise_pct") is not None:
+        lines.append(f"Surprise vs forecast: {event['surprise_pct']:+.1f}%")
+    lines.append("")
+    lines.append("Current positions:")
+    if positions:
+        for p in positions:
+            ticker = p.get("ticker")
+            if p.get("asset_type") == "option":
+                lines.append(
+                    f"- {ticker} {p.get('option_type')} option, strike {p.get('strike')}, expiry {p.get('expiry')}"
+                )
+            else:
+                lines.append(f"- {ticker} shares, {p.get('contracts')} shares")
+    else:
+        lines.append("(no positions saved)")
+    return "\n".join(lines)
+
+
+def _parse_portfolio_impact_json(text: str) -> dict:
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        parsed = None
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                parsed = None
+        if parsed is None:
+            return {
+                "impact_summary": text.strip()[:500] or None,
+                "affected_tickers": [],
+                "disclaimer": "This is not investment advice.",
+                "parse_error": True,
+            }
+    parsed.setdefault("disclaimer", "This is not investment advice.")
+    parsed.setdefault("affected_tickers", [])
+    parsed.setdefault("parse_error", False)
+    return parsed
+
+
+def analyze_portfolio_impact(
+    event: dict, positions: list[dict], provider: str, model: str, api_key: Optional[str] = None
+) -> dict:
+    """How one calendar event could plausibly affect the given positions,
+    via the configured AI provider. Raises on API failure -- the caller
+    decides how to degrade. On-demand only (one event at a time, only
+    when a human asks) -- never runs automatically across a whole
+    month's events, both to keep this affordable and because that's not
+    what was asked for."""
+    user_message = build_portfolio_impact_user_message(event, positions)
+    text = ai_client.call_provider(
+        provider, PORTFOLIO_IMPACT_SYSTEM_PROMPT, user_message, model, api_key=api_key, max_tokens=500
+    )
+    return _parse_portfolio_impact_json(text)

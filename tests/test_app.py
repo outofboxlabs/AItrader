@@ -506,6 +506,70 @@ def test_run_forex_calendar_now_handles_fetch_failure(client, monkeypatch):
     assert "error" in res.get_json()
 
 
+def test_analyze_forex_impact_returns_ai_result(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    (tmp_path / "positions.json").write_text(
+        '[{"asset_type": "shares", "ticker": "AAPL", "entry_price": 200.0, "contracts": 10, "entry_date": "2025-01-01"}]'
+    )
+
+    captured = {}
+
+    def fake_analyze(event, positions, provider, model, api_key=None):
+        captured["event"] = event
+        captured["positions"] = positions
+        return {"impact_summary": "Could pressure AAPL.", "affected_tickers": ["AAPL"], "disclaimer": "This is not investment advice.", "parse_error": False}
+
+    monkeypatch.setattr(app_mod.forex_calendar, "analyze_portfolio_impact", fake_analyze)
+
+    event = {"title": "CPI m/m", "country": "USD", "date": "2026-09-11T08:30:00-04:00", "impact": "High"}
+    res = client.post("/api/forex-calendar/analyze-impact", data=json.dumps({"event": event}), content_type="application/json")
+
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["impact_summary"] == "Could pressure AAPL."
+    assert captured["event"]["title"] == "CPI m/m"
+    assert captured["positions"][0]["ticker"] == "AAPL"
+
+
+def test_analyze_forex_impact_requires_event_object(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    res = client.post("/api/forex-calendar/analyze-impact", data=json.dumps({"event": "not a dict"}), content_type="application/json")
+    assert res.status_code == 400
+
+
+def test_analyze_forex_impact_requires_saved_api_key(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: None)
+    event = {"title": "CPI m/m", "country": "USD", "date": "2026-09-11T08:30:00-04:00", "impact": "High"}
+    res = client.post("/api/forex-calendar/analyze-impact", data=json.dumps({"event": event}), content_type="application/json")
+    assert res.status_code == 400
+    assert "No saved API key" in res.get_json()["error"]
+
+
+def test_analyze_forex_impact_rejects_unknown_provider(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    event = {"title": "CPI m/m", "country": "USD", "date": "2026-09-11T08:30:00-04:00", "impact": "High"}
+    res = client.post(
+        "/api/forex-calendar/analyze-impact",
+        data=json.dumps({"event": event, "provider": "not-real"}),
+        content_type="application/json",
+    )
+    assert res.status_code == 400
+
+
+def test_analyze_forex_impact_handles_ai_failure(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+
+    def boom(event, positions, provider, model, api_key=None):
+        raise RuntimeError("rate limited")
+
+    monkeypatch.setattr(app_mod.forex_calendar, "analyze_portfolio_impact", boom)
+
+    event = {"title": "CPI m/m", "country": "USD", "date": "2026-09-11T08:30:00-04:00", "impact": "High"}
+    res = client.post("/api/forex-calendar/analyze-impact", data=json.dumps({"event": event}), content_type="application/json")
+    assert res.status_code == 502
+    assert "error" in res.get_json()
+
+
 def test_enrich_with_live_actuals_skips_future_events(monkeypatch):
     """A future event can't have an actual yet -- must not even attempt
     a live fetch for it. (Unit-tested directly against
