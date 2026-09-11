@@ -120,6 +120,35 @@ def test_run_full_analysis_skip_macro_and_news(tmp_path, monkeypatch):
     assert result["valuations"][0]["ticker"] == "MSFT"
 
 
+def test_run_full_analysis_handles_missing_entry_date(tmp_path, monkeypatch):
+    """A vision-extracted position with no discoverable entry date (the
+    common case for a screenshot) must not crash the pipeline -- it's
+    cosmetic-only, surfaced as null rather than required."""
+    positions_path = tmp_path / "positions.json"
+    positions_path.write_text(
+        """
+        [{"asset_type": "shares", "ticker": "MSFT", "entry_price": 400.0,
+          "contracts": 5, "entry_date": null}]
+        """
+    )
+    monkeypatch.setattr(data_mod, "get_spot_price", lambda ticker: 410.0)
+
+    result = pipeline.run_full_analysis(
+        positions_path=str(positions_path),
+        db_path=str(tmp_path / "test.db"),
+        snapshots_dir=str(tmp_path / "snapshots"),
+        asof_date=date(2025, 5, 1),
+        skip_macro=True,
+        skip_news=True,
+    )
+
+    assert result["valuations"][0]["entry_date"] is None
+
+    import json
+
+    json.dumps(result)
+
+
 def test_run_full_analysis_warns_on_missing_quote(tmp_path, monkeypatch):
     positions_path = tmp_path / "positions.json"
     positions_path.write_text(

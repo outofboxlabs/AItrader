@@ -27,7 +27,7 @@ def _valuation_to_dict(v) -> dict:
         "expiry": p.expiry.isoformat() if p.expiry else None,
         "entry_price": p.entry_price,
         "contracts": p.contracts,
-        "entry_date": p.entry_date.isoformat(),
+        "entry_date": p.entry_date.isoformat() if p.entry_date else None,
         "target_price": p.target_price,
         "stop_price": p.stop_price,
         "mark": v.mark,

@@ -23,7 +23,11 @@ class Position:
     ticker: str
     entry_price: float  # per share (options: per-share premium)
     contracts: float  # options: number of contracts; shares: share count
-    entry_date: date
+    # Optional: a brokerage screenshot rarely shows when a position was
+    # opened (that's usually only visible in a lot-level activity view),
+    # so vision-extracted rows commonly come back with this as null --
+    # it's cosmetic (see pipeline.py), never used in any valuation math.
+    entry_date: Optional[date] = None
     target_price: Optional[float] = None  # per share
     stop_price: Optional[float] = None  # per share
     option_type: Optional[str] = None  # "call" / "put"
@@ -65,7 +69,7 @@ class Position:
             ticker=ticker,
             entry_price=float(raw["entry_price"]),
             contracts=float(raw["contracts"]),
-            entry_date=_parse_date(raw["entry_date"]),
+            entry_date=_parse_date(raw["entry_date"]) if raw.get("entry_date") else None,
             target_price=_optional_float(raw.get("target_price")),
             stop_price=_optional_float(raw.get("stop_price")),
             option_type=option_type,

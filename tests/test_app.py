@@ -42,6 +42,30 @@ def test_save_positions_rejects_invalid_row(client):
     assert res.status_code == 400
 
 
+def test_save_positions_accepts_missing_entry_date(client):
+    """Regression test: a screenshot-extracted position commonly has no
+    discoverable entry date (brokerage position lists don't show one), and
+    that must not block saving the whole batch -- it previously did,
+    because Position.from_dict required it, so a screenshot-derived save
+    always silently failed with every row rejected."""
+    payload = [{"asset_type": "shares", "ticker": "AAPL", "entry_price": 200.0, "contracts": 10, "entry_date": None}]
+    res = client.post("/api/positions", data=json.dumps(payload), content_type="application/json")
+    assert res.status_code == 200
+    assert client.get("/api/positions").get_json()[0]["ticker"] == "AAPL"
+
+
+def test_save_positions_error_identifies_bad_row(client):
+    payload = [
+        {"asset_type": "shares", "ticker": "GOOD", "entry_price": 1.0, "contracts": 1, "entry_date": "2025-01-01"},
+        {"asset_type": "not-a-real-type", "ticker": "BAD"},
+    ]
+    res = client.post("/api/positions", data=json.dumps(payload), content_type="application/json")
+    assert res.status_code == 400
+    error = res.get_json()["error"]
+    assert "row 2" in error
+    assert "BAD" in error
+
+
 def test_save_positions_backs_up_previous_file(client, tmp_path):
     positions_path = tmp_path / "positions.json"
     positions_path.write_text('[{"asset_type": "shares", "ticker": "OLD", "entry_price": 1, "contracts": 1, "entry_date": "2025-01-01"}]')

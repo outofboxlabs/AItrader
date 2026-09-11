@@ -36,6 +36,33 @@ def test_shares_auto_id_and_multiplier():
     assert p.target_price is None
 
 
+def test_entry_date_is_optional():
+    """A brokerage screenshot rarely shows when a position was opened, so
+    vision-extracted rows commonly have this as null -- it must not block
+    saving (see app.py's _save_positions_raw, which validates every row
+    through this before writing anything)."""
+    p = Position.from_dict(
+        {
+            "asset_type": "shares",
+            "ticker": "aapl",
+            "entry_price": 200.0,
+            "contracts": 10,
+            "entry_date": None,
+        }
+    )
+    assert p.entry_date is None
+
+    p2 = Position.from_dict(
+        {
+            "asset_type": "shares",
+            "ticker": "aapl",
+            "entry_price": 200.0,
+            "contracts": 10,
+        }
+    )
+    assert p2.entry_date is None
+
+
 def test_explicit_id_is_respected():
     p = Position.from_dict(
         {

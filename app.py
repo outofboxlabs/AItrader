@@ -56,9 +56,19 @@ def _load_positions_raw() -> list[dict]:
 
 
 def _save_positions_raw(positions: list[dict]) -> None:
-    # Validate every row through the real model before writing anything.
-    for row in positions:
-        Position.from_dict(row)
+    # Validate every row through the real model before writing anything --
+    # collect ALL row errors (identified by index + ticker) rather than
+    # raising on the first one, so a single bad row doesn't hide the reason
+    # for the rest, and the error is actionable instead of a bare Python
+    # exception string.
+    errors = []
+    for i, row in enumerate(positions):
+        try:
+            Position.from_dict(row)
+        except Exception as exc:
+            errors.append(f"row {i + 1} ({row.get('ticker', '?')}): {exc}")
+    if errors:
+        raise ValueError("; ".join(errors))
 
     if os.path.exists(config.POSITIONS_PATH):
         shutil.copy(config.POSITIONS_PATH, config.POSITIONS_PATH + ".bak")
@@ -81,7 +91,9 @@ def index():
 
 @app.route("/api/positions", methods=["GET"])
 def get_positions():
-    return jsonify(_load_positions_raw())
+    positions = _load_positions_raw()
+    print(f"[positions] GET -> {len(positions)} position(s) from {config.POSITIONS_PATH}")
+    return jsonify(positions)
 
 
 @app.route("/api/positions", methods=["POST"])
@@ -92,8 +104,10 @@ def save_positions():
     try:
         _save_positions_raw(positions)
     except Exception as exc:
+        print(f"[positions] POST rejected {len(positions)} row(s): {exc}")
         traceback.print_exc()
         return jsonify({"error": str(exc)}), 400
+    print(f"[positions] POST -> saved {len(positions)} position(s) to {config.POSITIONS_PATH}")
     return jsonify({"status": "ok", "count": len(positions)})
 
 
@@ -1098,7 +1112,7 @@ function renderPositionsTable() {
     body.appendChild(tr);
     if (row._source && row._source !== "manual") {
       const tag = document.createElement("tr");
-      tag.innerHTML = `<td colspan="11" class="source-tag">from screenshot -- please verify every field above</td>`;
+      tag.innerHTML = `<td colspan="11" class="source-tag">from screenshot -- please verify every field above (Entry Date is rarely visible on a brokerage screen and can be left blank)</td>`;
       body.appendChild(tag);
     }
   });
