@@ -134,6 +134,19 @@ NEARLOW_MIN_RATINGS_COUNT = 3
 NEARLOW_MAX_RESULTS = 100
 NEARLOW_MAX_WORKERS = 20
 
+# --- Forex Factory economic calendar (Forex Calendar tab) ---
+# Forex Factory has no official public API for this. It does publish a
+# public JSON/XML/CSV/ICS feed that powers their own embeddable calendar
+# widget -- unofficial and undocumented, but the standard way the retail
+# trading-bot community reads this data, since scraping the HTML calendar
+# page directly is fragile and against their ToS. Community reports put
+# this feed's rate limit at roughly 2 requests per 5 minutes per IP, so
+# FOREX_CALENDAR_MIN_REFRESH_SECONDS enforces a floor between real
+# upstream fetches -- "Run Now" inside that window just re-serves the
+# last cached pull instead of risking a block.
+FOREX_CALENDAR_FEED_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+FOREX_CALENDAR_MIN_REFRESH_SECONDS = 300
+
 # Storage
 DB_PATH = _here("portfolio.db")
 SNAPSHOTS_DIR = _here("snapshots")

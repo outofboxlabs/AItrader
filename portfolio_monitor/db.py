@@ -185,6 +185,19 @@ CREATE TABLE IF NOT EXISTS nearlow_candidates (
     market_cap REAL,
     PRIMARY KEY (asof_date, ticker)
 );
+
+CREATE TABLE IF NOT EXISTS forex_calendar_events (
+    event_date TEXT NOT NULL,
+    country TEXT NOT NULL,
+    title TEXT NOT NULL,
+    impact TEXT,
+    forecast TEXT,
+    previous TEXT,
+    actual TEXT,
+    surprise_pct REAL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (event_date, country, title)
+);
 """
 
 
@@ -578,4 +591,39 @@ def get_nearlow_candidates(conn, asof_date: str) -> list[dict]:
 
 def get_latest_nearlow_candidates_date(conn) -> Optional[str]:
     row = conn.execute("SELECT MAX(asof_date) AS d FROM nearlow_candidates").fetchone()
+    return row["d"] if row else None
+
+
+def save_forex_calendar_events(conn, events: list[dict], fetched_at: str) -> None:
+    """INSERT OR REPLACE keyed on (date, country, title) -- re-fetching the
+    same week's events updates them in place (an event's actual/surprise
+    fills in once released), rather than accumulating duplicate rows."""
+    conn.executemany(
+        """INSERT OR REPLACE INTO forex_calendar_events
+           (event_date, country, title, impact, forecast, previous, actual, surprise_pct, fetched_at)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        [
+            (
+                e["date"],
+                e.get("country") or "",
+                e.get("title") or "",
+                e.get("impact"),
+                e.get("forecast"),
+                e.get("previous"),
+                e.get("actual"),
+                e.get("surprise_pct"),
+                fetched_at,
+            )
+            for e in events
+        ],
+    )
+
+
+def get_forex_calendar_events(conn) -> list[dict]:
+    rows = conn.execute("SELECT * FROM forex_calendar_events ORDER BY event_date ASC").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_latest_forex_calendar_fetch(conn) -> Optional[str]:
+    row = conn.execute("SELECT MAX(fetched_at) AS d FROM forex_calendar_events").fetchone()
     return row["d"] if row else None

@@ -20,13 +20,13 @@ import shutil
 import threading
 import traceback
 import webbrowser
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from flask import Flask, jsonify, render_template_string, request
 
 import config
-from portfolio_monitor import credentials, exports, growth_screener, movers, nearlow_screener, news, pipeline, scheduler, vision
+from portfolio_monitor import credentials, exports, forex_calendar, growth_screener, movers, nearlow_screener, news, pipeline, scheduler, vision
 from portfolio_monitor import db as db_mod
 from portfolio_monitor.models import Position
 
@@ -338,6 +338,60 @@ def run_nearlow_now():
     return jsonify({"asof_date": date.today().isoformat(), "candidates": candidates})
 
 
+# --- Forex Factory economic calendar (Forex Calendar tab) -------------------
+#
+# Informational only -- shows the scheduled high-impact news calendar so
+# you can see what's coming and, once released, how far the actual print
+# missed the forecast. It does NOT place, size, or evaluate any trade,
+# and never will run unattended: this app will not add automatic order
+# execution without a human confirming each trade. Reacting to a release
+# within the same second it prints is also not a realistic goal for a
+# local app polling a public, rate-limited calendar feed -- that's a
+# latency race won by firms with colocated servers and direct data feeds,
+# not a personal dashboard. This tab is for awareness and planning
+# around events, not for winning that race.
+
+
+def _run_forex_calendar_refresh(force: bool = False) -> tuple[list[dict], bool]:
+    """Returns (events, did_refetch). Enforces
+    config.FOREX_CALENDAR_MIN_REFRESH_SECONDS between real upstream
+    fetches -- Forex Factory's feed is rate-limited, so a request inside
+    that window re-serves the cached copy instead of risking a block."""
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        last_fetch = db_mod.get_latest_forex_calendar_fetch(conn)
+        now = datetime.now(timezone.utc)
+        if last_fetch and not force:
+            elapsed = (now - datetime.fromisoformat(last_fetch)).total_seconds()
+            if elapsed < config.FOREX_CALENDAR_MIN_REFRESH_SECONDS:
+                return db_mod.get_forex_calendar_events(conn), False
+
+        events = forex_calendar.fetch_calendar_events(config.FOREX_CALENDAR_FEED_URL)
+        db_mod.save_forex_calendar_events(conn, events, fetched_at=now.isoformat())
+        return db_mod.get_forex_calendar_events(conn), True
+
+
+@app.route("/api/forex-calendar", methods=["GET"])
+def get_forex_calendar():
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        events = db_mod.get_forex_calendar_events(conn)
+        last_fetch = db_mod.get_latest_forex_calendar_fetch(conn)
+    return jsonify({"events": events, "last_fetched_at": last_fetch})
+
+
+@app.route("/api/forex-calendar/run", methods=["POST"])
+def run_forex_calendar_now():
+    try:
+        events, did_refetch = _run_forex_calendar_refresh()
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"error": str(exc)}), 502
+    with db_mod.connect(config.DB_PATH) as conn:
+        last_fetch = db_mod.get_latest_forex_calendar_fetch(conn)
+    return jsonify({"events": events, "last_fetched_at": last_fetch, "refetched": did_refetch})
+
+
 # --- Settings ----------------------------------------------------------
 
 
@@ -443,6 +497,9 @@ PAGE_TEMPLATE = """<!doctype html>
   .badge.bullish, .badge.positive { background: #1f3a2c; color: var(--green); }
   .badge.bearish, .badge.negative { background: #3a2323; color: var(--red); }
   .badge.neutral, .badge.no.data { background: #2a2f3a; color: var(--muted); }
+  .badge.impact-high { background: #3a2323; color: var(--red); }
+  .badge.impact-medium { background: #3a3220; color: var(--amber); }
+  .badge.impact-low, .badge.impact-holiday { background: #2a2f3a; color: var(--muted); }
   .news-card, .mover-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
   .news-card .ticker, .mover-card .ticker { font-weight: 600; margin-right: 8px; }
   a.ticker-link { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--muted); }
@@ -471,6 +528,7 @@ PAGE_TEMPLATE = """<!doctype html>
   <button class="tab-btn" data-tab="movers">Top Movers</button>
   <button class="tab-btn" data-tab="growth">Top Growth</button>
   <button class="tab-btn" data-tab="nearlow">Near 52W Low</button>
+  <button class="tab-btn" data-tab="forex">Forex Calendar</button>
   <button class="tab-btn" data-tab="positions">Positions</button>
   <button class="tab-btn" data-tab="settings">Settings</button>
   <button class="tab-btn" data-tab="more">More</button>
@@ -611,6 +669,41 @@ PAGE_TEMPLATE = """<!doctype html>
         <th class="sortable" data-sort="market_cap">Market Cap<span class="arrow"></span></th>
       </tr></thead>
       <tbody id="nl-body"></tbody>
+    </table>
+  </div>
+
+  <!-- ===================== FOREX CALENDAR TAB ===================== -->
+  <div class="tab-panel" id="tab-forex">
+    <div class="controls">
+      <select id="fx-impact-filter" onchange="renderForexTable()">
+        <option value="high" selected>High impact only</option>
+        <option value="medium+">Medium + High</option>
+        <option value="all">All impact levels</option>
+      </select>
+      <button class="action" id="fx-run-btn" onclick="runForexNow()">Run Now</button>
+    </div>
+    <p class="muted" style="max-width:640px;">
+      Forex Factory's scheduled economic calendar (rate decisions, CPI, NFP, GDP, etc.) --
+      the releases that tend to move currency markets sharply the instant they print. Pulled from
+      Forex Factory's public calendar feed, which is unofficial and rate-limited, so "Run Now" won't
+      fetch more than once every few minutes. This is informational only -- it does not place, size,
+      or evaluate any trade, and never will run unattended.
+    </p>
+    <div id="fx-status"></div>
+    <div id="fx-next-event" class="muted" style="margin-bottom:4px; font-weight: 600;"></div>
+    <div id="fx-as-of" class="muted" style="margin-bottom:8px;"></div>
+    <table>
+      <thead><tr id="fx-head">
+        <th class="sortable" data-sort="date">Time<span class="arrow"></span></th>
+        <th class="sortable" data-sort="country">Currency<span class="arrow"></span></th>
+        <th class="sortable" data-sort="title">Event<span class="arrow"></span></th>
+        <th class="sortable" data-sort="impact">Impact<span class="arrow"></span></th>
+        <th class="sortable" data-sort="previous">Previous<span class="arrow"></span></th>
+        <th class="sortable" data-sort="forecast">Forecast<span class="arrow"></span></th>
+        <th class="sortable" data-sort="actual">Actual<span class="arrow"></span></th>
+        <th class="sortable" data-sort="surprise_pct">Surprise<span class="arrow"></span></th>
+      </tr></thead>
+      <tbody id="fx-body"></tbody>
     </table>
   </div>
 
@@ -1074,6 +1167,140 @@ document.getElementById("nl-head").addEventListener("click", (e) => {
   if (th) sortNearlow(th.dataset.sort);
 });
 
+// ---------- FOREX CALENDAR TAB ----------
+let forexRows = [];
+let forexSort = { field: "date", dir: 1 };
+let forexCountdownTimer = null;
+
+async function loadForex() {
+  const res = await fetch("/api/forex-calendar");
+  const data = await res.json();
+  renderForex(data);
+}
+
+async function runForexNow() {
+  const btn = document.getElementById("fx-run-btn");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Fetching...';
+  document.getElementById("fx-status").style.display = "none";
+  try {
+    const res = await fetch("/api/forex-calendar/run", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) { showStatus("fx-status", "Error: " + data.error, false); return; }
+    renderForex(data);
+    showStatus(
+      "fx-status",
+      data.refetched
+        ? `Fetched ${data.events.length} event(s) from Forex Factory.`
+        : `Rate-limit cooldown active -- showing the last cached pull (${data.events.length} event(s)).`,
+      true
+    );
+  } catch (err) {
+    showStatus("fx-status", "Error: " + err, false);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Run Now";
+  }
+}
+
+function renderForex(data) {
+  document.getElementById("fx-as-of").textContent = data.last_fetched_at
+    ? `Last fetched ${new Date(data.last_fetched_at).toLocaleString()}`
+    : "No data fetched yet.";
+  forexRows = data.events || [];
+  renderForexTable();
+  startForexCountdown();
+}
+
+function sortForex(field) {
+  if (forexSort.field === field) {
+    forexSort.dir *= -1;
+  } else {
+    forexSort.field = field;
+    forexSort.dir = field === "date" ? 1 : -1;
+  }
+  renderForexTable();
+}
+
+function forexImpactMatches(impact, filter) {
+  const lvl = (impact || "").toLowerCase();
+  if (filter === "high") return lvl === "high";
+  if (filter === "medium+") return lvl === "high" || lvl === "medium";
+  return true;
+}
+
+function renderForexTable() {
+  const body = document.getElementById("fx-body");
+  const { field, dir } = forexSort;
+  const filter = document.getElementById("fx-impact-filter").value;
+
+  document.querySelectorAll("#fx-head th.sortable").forEach(th => {
+    const arrow = th.querySelector(".arrow");
+    arrow.textContent = th.dataset.sort === field ? (dir === 1 ? "\\u25b2" : "\\u25bc") : "";
+  });
+
+  const filtered = forexRows.filter(e => forexImpactMatches(e.impact, filter));
+
+  if (filtered.length === 0) {
+    body.innerHTML = '<tr><td colspan="8" class="muted">No events match this filter. Click "Run Now" to fetch this week\\'s calendar.</td></tr>';
+    return;
+  }
+
+  const sorted = [...filtered].sort((a, b) => {
+    let av = a[field], bv = b[field];
+    if (av === null || av === undefined) return 1;
+    if (bv === null || bv === undefined) return -1;
+    if (field === "date") { av = new Date(av).getTime(); bv = new Date(bv).getTime(); }
+    else if (typeof av === "string") { av = av.toLowerCase(); bv = bv.toLowerCase(); }
+    if (av < bv) return -1 * dir;
+    if (av > bv) return 1 * dir;
+    return 0;
+  });
+
+  body.innerHTML = sorted.map(e => {
+    const impactClass = (e.impact || "").toLowerCase();
+    const surpriseCell = e.surprise_pct !== null && e.surprise_pct !== undefined
+      ? `${e.surprise_pct >= 0 ? "+" : ""}${fmtNum(e.surprise_pct, 1)}%`
+      : "--";
+    const when = e.date ? new Date(e.date) : null;
+    return `<tr>
+      <td>${when && !isNaN(when) ? when.toLocaleString() : "n/a"}</td>
+      <td>${e.country || "n/a"}</td>
+      <td>${e.title || "n/a"}</td>
+      <td><span class="badge impact-${impactClass}">${e.impact || "n/a"}</span></td>
+      <td>${e.previous ?? "n/a"}</td>
+      <td>${e.forecast ?? "n/a"}</td>
+      <td>${e.actual ?? "n/a"}</td>
+      <td>${surpriseCell}</td>
+    </tr>`;
+  }).join("");
+}
+
+document.getElementById("fx-head").addEventListener("click", (e) => {
+  const th = e.target.closest("th.sortable");
+  if (th) sortForex(th.dataset.sort);
+});
+
+function startForexCountdown() {
+  if (forexCountdownTimer) clearInterval(forexCountdownTimer);
+  const tick = () => {
+    const el = document.getElementById("fx-next-event");
+    const now = Date.now();
+    const upcoming = forexRows
+      .filter(e => (e.impact || "").toLowerCase() === "high" && e.date && new Date(e.date).getTime() > now)
+      .sort((a, b) => new Date(a.date) - new Date(b.date));
+    if (upcoming.length === 0) { el.textContent = ""; return; }
+    const next = upcoming[0];
+    const diffMs = new Date(next.date).getTime() - now;
+    const h = Math.floor(diffMs / 3600000);
+    const m = Math.floor((diffMs % 3600000) / 60000);
+    const s = Math.floor((diffMs % 60000) / 1000);
+    el.textContent = `Next high-impact event: ${next.country || ""} ${next.title || ""} in ${h}h ${m}m ${s}s`;
+  };
+  tick();
+  forexCountdownTimer = setInterval(tick, 1000);
+}
+
 // ---------- POSITIONS TAB ----------
 let rows = [];
 
@@ -1217,6 +1444,7 @@ loadPositions();
 loadMovers();
 loadGrowth();
 loadNearlow();
+loadForex();
 loadSchedulerStatus();
 loadSettings();
 </script>

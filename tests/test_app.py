@@ -356,6 +356,85 @@ def test_run_nearlow_now_handles_screener_failure(client, monkeypatch):
     assert "error" in res.get_json()
 
 
+# --- forex calendar -------------------------------------------------------
+
+
+def test_get_forex_calendar_empty_when_no_fetch_yet(client):
+    res = client.get("/api/forex-calendar")
+    assert res.status_code == 200
+    assert res.get_json() == {"events": [], "last_fetched_at": None}
+
+
+def test_run_forex_calendar_now_fetches_and_persists(client, monkeypatch):
+    monkeypatch.setattr(
+        app_mod.forex_calendar,
+        "fetch_calendar_events",
+        lambda feed_url: [
+            {
+                "date": "2026-09-11T08:30:00-04:00",
+                "country": "USD",
+                "title": "Non-Farm Payrolls",
+                "impact": "High",
+                "forecast": "180K",
+                "previous": "150K",
+                "actual": "227K",
+                "surprise_pct": 26.1,
+            }
+        ],
+    )
+    res = client.post("/api/forex-calendar/run")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["refetched"] is True
+    assert data["events"][0]["title"] == "Non-Farm Payrolls"
+    assert data["last_fetched_at"] is not None
+
+    # Persisted -- a fresh GET reads it back from the db.
+    res2 = client.get("/api/forex-calendar")
+    data2 = res2.get_json()
+    assert data2["events"][0]["country"] == "USD"
+
+
+def test_run_forex_calendar_now_respects_cooldown(client, monkeypatch):
+    calls = {"n": 0}
+
+    def fake_fetch(feed_url):
+        calls["n"] += 1
+        return [
+            {
+                "date": "2026-09-11T08:30:00-04:00",
+                "country": "USD",
+                "title": "Non-Farm Payrolls",
+                "impact": "High",
+                "forecast": "180K",
+                "previous": "150K",
+                "actual": "227K",
+                "surprise_pct": 26.1,
+            }
+        ]
+
+    monkeypatch.setattr(app_mod.forex_calendar, "fetch_calendar_events", fake_fetch)
+
+    res1 = client.post("/api/forex-calendar/run")
+    assert res1.get_json()["refetched"] is True
+    assert calls["n"] == 1
+
+    # Immediately again -- should be within the cooldown window and re-serve cache.
+    res2 = client.post("/api/forex-calendar/run")
+    assert res2.get_json()["refetched"] is False
+    assert calls["n"] == 1  # no second upstream call
+
+
+def test_run_forex_calendar_now_handles_fetch_failure(client, monkeypatch):
+    def boom(feed_url):
+        raise RuntimeError("forex factory unreachable")
+
+    monkeypatch.setattr(app_mod.forex_calendar, "fetch_calendar_events", boom)
+    res = client.post("/api/forex-calendar/run")
+    assert res.status_code == 502
+    assert "error" in res.get_json()
+
+
 def test_run_movers_now_writes_csv_export(client, monkeypatch, tmp_path):
     monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
     monkeypatch.setattr(
