@@ -26,7 +26,7 @@ from typing import Optional
 from flask import Flask, jsonify, render_template_string, request
 
 import config
-from portfolio_monitor import credentials, exports, growth_screener, movers, news, pipeline, scheduler, vision
+from portfolio_monitor import credentials, exports, growth_screener, movers, nearlow_screener, news, pipeline, scheduler, vision
 from portfolio_monitor import db as db_mod
 from portfolio_monitor.models import Position
 
@@ -73,6 +73,9 @@ def index():
         PAGE_TEMPLATE,
         default_provider=config.NEWS_PROVIDER,
         growth_upside_threshold=config.GROWTH_TARGET_UPSIDE_THRESHOLD_PCT,
+        nearlow_max_pct_from_low=config.NEARLOW_MAX_PCT_FROM_LOW,
+        nearlow_min_buy_ratio_pct=config.NEARLOW_MIN_BUY_RATIO_PCT,
+        nearlow_min_ratings_count=config.NEARLOW_MIN_RATINGS_COUNT,
     )
 
 
@@ -275,6 +278,52 @@ def run_growth_now():
     return jsonify({"asof_date": date.today().isoformat(), "candidates": candidates})
 
 
+# --- Near-52-week-low screener (Near 52W Low tab) ----------------------
+
+
+def _run_nearlow_screen(asof_date: Optional[date] = None) -> list[dict]:
+    """No news/AI call here -- this is a pure data screen (screener +
+    52-week range + analyst ratings), so it needs no API key/provider."""
+    asof_date = asof_date or date.today()
+    db_mod.init_db(config.DB_PATH)
+    candidates = nearlow_screener.find_nearlow_candidates(
+        candidate_pool_size=config.NEARLOW_CANDIDATE_POOL_SIZE,
+        min_market_cap=config.NEARLOW_MIN_MARKET_CAP,
+        min_price=config.NEARLOW_MIN_PRICE,
+        min_volume=config.NEARLOW_MIN_VOLUME,
+        max_pct_from_low=config.NEARLOW_MAX_PCT_FROM_LOW,
+        min_buy_ratio_pct=config.NEARLOW_MIN_BUY_RATIO_PCT,
+        min_ratings_count=config.NEARLOW_MIN_RATINGS_COUNT,
+        max_results=config.NEARLOW_MAX_RESULTS,
+        max_workers=config.NEARLOW_MAX_WORKERS,
+    )
+    with db_mod.connect(config.DB_PATH) as conn:
+        db_mod.save_nearlow_candidates(conn, asof_date.isoformat(), candidates)
+    exports.export_to_csv(candidates, "near_52w_low", "near_52w_low", export_root=config.EXPORTS_DIR)
+    return candidates
+
+
+@app.route("/api/nearlow", methods=["GET"])
+def get_nearlow():
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        latest_date = db_mod.get_latest_nearlow_candidates_date(conn)
+        if not latest_date:
+            return jsonify({"asof_date": None, "candidates": []})
+        candidates = db_mod.get_nearlow_candidates(conn, latest_date)
+    return jsonify({"asof_date": latest_date, "candidates": candidates})
+
+
+@app.route("/api/nearlow/run", methods=["POST"])
+def run_nearlow_now():
+    try:
+        candidates = _run_nearlow_screen()
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"error": str(exc)}), 502
+    return jsonify({"asof_date": date.today().isoformat(), "candidates": candidates})
+
+
 # --- Settings ----------------------------------------------------------
 
 
@@ -406,6 +455,7 @@ PAGE_TEMPLATE = """<!doctype html>
   <button class="tab-btn active" data-tab="portfolio">Portfolio</button>
   <button class="tab-btn" data-tab="movers">Top Movers</button>
   <button class="tab-btn" data-tab="growth">Top Growth</button>
+  <button class="tab-btn" data-tab="nearlow">Near 52W Low</button>
   <button class="tab-btn" data-tab="positions">Positions</button>
   <button class="tab-btn" data-tab="settings">Settings</button>
   <button class="tab-btn" data-tab="more">More</button>
@@ -522,6 +572,33 @@ PAGE_TEMPLATE = """<!doctype html>
     </table>
   </div>
 
+  <!-- ===================== NEAR 52W LOW TAB ===================== -->
+  <div class="tab-panel" id="tab-nearlow">
+    <div class="controls">
+      <button class="action" id="nl-run-btn" onclick="runNearlowNow()">Run Now</button>
+    </div>
+    <p class="muted" style="max-width:640px;">
+      Beaten-down stocks the analyst consensus still likes: within {{ nearlow_max_pct_from_low }}% of the
+      52-week low, with at least {{ nearlow_min_ratings_count }} analyst ratings of which
+      {{ nearlow_min_buy_ratio_pct }}% or more are "buy" or "strong buy". Both conditions are required --
+      this is not investment advice, just a starting point for further research.
+    </p>
+    <div id="nl-status"></div>
+    <div id="nl-as-of" class="muted" style="margin-bottom:8px;"></div>
+    <table>
+      <thead><tr id="nl-head">
+        <th class="sortable" data-sort="ticker">Ticker<span class="arrow"></span></th>
+        <th class="sortable" data-sort="price">Price<span class="arrow"></span></th>
+        <th class="sortable" data-sort="pct_from_52w_low">From 52w Low<span class="arrow"></span></th>
+        <th class="sortable" data-sort="pct_from_52w_high">From 52w High<span class="arrow"></span></th>
+        <th class="sortable" data-sort="buy_ratio_pct">Buy Ratio %<span class="arrow"></span></th>
+        <th class="sortable" data-sort="target_upside_pct">Target Upside<span class="arrow"></span></th>
+        <th class="sortable" data-sort="market_cap">Market Cap<span class="arrow"></span></th>
+      </tr></thead>
+      <tbody id="nl-body"></tbody>
+    </table>
+  </div>
+
   <!-- ===================== POSITIONS TAB ===================== -->
   <div class="tab-panel" id="tab-positions">
     <h2 style="font-size:1rem;">Upload a screenshot</h2>
@@ -590,6 +667,14 @@ function showStatus(elId, message, ok) {
 function fmtMoney(n) {
   if (n === null || n === undefined) return "--";
   return "$" + Number(n).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+function fmtCap(n) {
+  if (n === null || n === undefined) return "--";
+  n = Number(n);
+  if (n >= 1e12) return "$" + (n / 1e12).toFixed(2) + "T";
+  if (n >= 1e9) return "$" + (n / 1e9).toFixed(2) + "B";
+  if (n >= 1e6) return "$" + (n / 1e6).toFixed(2) + "M";
+  return "$" + n.toLocaleString();
 }
 function fmtNum(n, digits) {
   if (n === null || n === undefined) return "--";
@@ -877,6 +962,103 @@ document.getElementById("g-head").addEventListener("click", (e) => {
   if (th) sortGrowth(th.dataset.sort);
 });
 
+// ---------- NEAR 52W LOW TAB ----------
+let nearlowRows = [];
+let nearlowSort = { field: "pct_from_52w_low", dir: 1 };
+
+async function loadNearlow() {
+  const res = await fetch("/api/nearlow");
+  const data = await res.json();
+  renderNearlow(data);
+}
+
+async function runNearlowNow() {
+  const btn = document.getElementById("nl-run-btn");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Screening...';
+  document.getElementById("nl-status").style.display = "none";
+  try {
+    const res = await fetch("/api/nearlow/run", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) { showStatus("nl-status", "Error: " + data.error, false); return; }
+    renderNearlow(data);
+    showStatus("nl-status", `Found ${data.candidates.length} candidate(s) near their 52-week low with strong ratings.`, true);
+  } catch (err) {
+    showStatus("nl-status", "Error: " + err, false);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Run Now";
+  }
+}
+
+function renderNearlow(data) {
+  document.getElementById("nl-as-of").textContent = data.asof_date ? `As of ${data.asof_date}` : "No scan has run yet.";
+  nearlowRows = data.candidates || [];
+  renderNearlowTable();
+}
+
+function sortNearlow(field) {
+  if (nearlowSort.field === field) {
+    nearlowSort.dir *= -1;
+  } else {
+    nearlowSort.field = field;
+    nearlowSort.dir = field === "ticker" ? 1 : -1;
+  }
+  renderNearlowTable();
+}
+
+function renderNearlowTable() {
+  const body = document.getElementById("nl-body");
+  const { field, dir } = nearlowSort;
+
+  document.querySelectorAll("#nl-head th.sortable").forEach(th => {
+    const arrow = th.querySelector(".arrow");
+    arrow.textContent = th.dataset.sort === field ? (dir === 1 ? "\\u25b2" : "\\u25bc") : "";
+  });
+
+  if (nearlowRows.length === 0) {
+    body.innerHTML = '<tr><td colspan="7" class="muted">No candidates found. Click "Run Now" to screen today\\'s market.</td></tr>';
+    return;
+  }
+
+  const sorted = [...nearlowRows].sort((a, b) => {
+    let av = a[field], bv = b[field];
+    if (av === null || av === undefined) return 1;
+    if (bv === null || bv === undefined) return -1;
+    if (typeof av === "string") { av = av.toLowerCase(); bv = bv.toLowerCase(); }
+    if (av < bv) return -1 * dir;
+    if (av > bv) return 1 * dir;
+    return 0;
+  });
+
+  body.innerHTML = sorted.map(c => {
+    const ratings = c.analyst_ratings || {};
+    const ratingsStr = Object.keys(ratings).length
+      ? Object.entries(ratings).map(([k, v]) => `${k}: ${v}`).join(", ")
+      : "n/a";
+    const buyRatioCell = c.buy_ratio_pct !== null && c.buy_ratio_pct !== undefined
+      ? `${fmtNum(c.buy_ratio_pct, 0)}% <span class="muted">(${ratingsStr})</span>`
+      : `n/a <span class="muted">(${ratingsStr})</span>`;
+    const upsideCell = c.target_upside_pct !== null && c.target_upside_pct !== undefined
+      ? `${c.target_upside_pct >= 0 ? "+" : ""}${fmtNum(c.target_upside_pct, 1)}%`
+      : "n/a";
+    return `<tr>
+      <td><a class="ticker-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(c.ticker)}" target="_blank" rel="noopener">${c.ticker}</a>${c.name ? ` <span class="muted">(${c.name})</span>` : ""}</td>
+      <td>${fmtMoney(c.price)}</td>
+      <td class="neg">+${fmtNum(c.pct_from_52w_low, 1)}%</td>
+      <td>${c.pct_from_52w_high !== null && c.pct_from_52w_high !== undefined ? fmtNum(c.pct_from_52w_high, 1) + "%" : "n/a"}</td>
+      <td>${buyRatioCell}</td>
+      <td>${upsideCell}</td>
+      <td>${fmtCap(c.market_cap)}</td>
+    </tr>`;
+  }).join("");
+}
+
+document.getElementById("nl-head").addEventListener("click", (e) => {
+  const th = e.target.closest("th.sortable");
+  if (th) sortNearlow(th.dataset.sort);
+});
+
 // ---------- POSITIONS TAB ----------
 let rows = [];
 
@@ -1019,6 +1201,7 @@ async function saveKey(provider) {
 loadPositions();
 loadMovers();
 loadGrowth();
+loadNearlow();
 loadSchedulerStatus();
 loadSettings();
 </script>

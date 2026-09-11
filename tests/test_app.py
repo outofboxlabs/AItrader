@@ -274,6 +274,64 @@ def test_run_growth_now_handles_screener_failure(client, monkeypatch):
     assert "error" in res.get_json()
 
 
+# --- near-52-week-low screener -------------------------------------------
+
+
+def test_get_nearlow_empty_when_no_scan_yet(client):
+    res = client.get("/api/nearlow")
+    assert res.status_code == 200
+    assert res.get_json() == {"asof_date": None, "candidates": []}
+
+
+def test_run_nearlow_now_returns_and_persists_results(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        app_mod.nearlow_screener,
+        "find_nearlow_candidates",
+        lambda **kw: [
+            {
+                "ticker": "BEATEN",
+                "name": "Beaten Co",
+                "price": 10.0,
+                "year_low": 9.5,
+                "year_high": 20.0,
+                "pct_from_52w_low": 5.3,
+                "pct_from_52w_high": -50.0,
+                "target_mean": 15.0,
+                "target_upside_pct": 50.0,
+                "analyst_ratings": {"strongBuy": 6, "buy": 3},
+                "buy_ratio_pct": 90.0,
+                "market_cap": 5e9,
+            }
+        ],
+    )
+    res = client.post("/api/nearlow/run")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["candidates"][0]["ticker"] == "BEATEN"
+    assert data["asof_date"] == date.today().isoformat()
+
+    # Persisted -- a fresh GET reads it back from the db.
+    res2 = client.get("/api/nearlow")
+    data2 = res2.get_json()
+    assert data2["candidates"][0]["ticker"] == "BEATEN"
+    assert data2["candidates"][0]["analyst_ratings"]["strongBuy"] == 6
+
+    # And a CSV landed in the configured exports dir under near_52w_low/.
+    nearlow_export_dir = tmp_path / "exports" / "near_52w_low"
+    assert nearlow_export_dir.exists()
+    assert len(list(nearlow_export_dir.glob("*.csv"))) == 1
+
+
+def test_run_nearlow_now_handles_screener_failure(client, monkeypatch):
+    def boom(**kw):
+        raise RuntimeError("yahoo screener down")
+
+    monkeypatch.setattr(app_mod.nearlow_screener, "find_nearlow_candidates", boom)
+    res = client.post("/api/nearlow/run")
+    assert res.status_code == 502
+    assert "error" in res.get_json()
+
+
 def test_run_movers_now_writes_csv_export(client, monkeypatch, tmp_path):
     monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
     monkeypatch.setattr(

@@ -102,6 +102,21 @@ GROWTH_TARGET_UPSIDE_THRESHOLD_PCT = 40.0
 GROWTH_MAX_RESULTS = 50
 GROWTH_MAX_WORKERS = 20  # per-candidate lookups run in parallel on this many threads
 
+# --- Near-52-week-low screener (Near 52W Low tab) ---
+# Beaten-down stocks the analyst consensus still rates favorably: within
+# NEARLOW_MAX_PCT_FROM_LOW% of the 52-week low, with at least
+# NEARLOW_MIN_RATINGS_COUNT analyst ratings of which >= NEARLOW_MIN_BUY_RATIO_PCT%
+# are "buy" or "strong buy". Both conditions are required.
+NEARLOW_CANDIDATE_POOL_SIZE = 150
+NEARLOW_MIN_MARKET_CAP = 300_000_000
+NEARLOW_MIN_PRICE = 5.0
+NEARLOW_MIN_VOLUME = 100_000
+NEARLOW_MAX_PCT_FROM_LOW = 15.0
+NEARLOW_MIN_BUY_RATIO_PCT = 60.0
+NEARLOW_MIN_RATINGS_COUNT = 3
+NEARLOW_MAX_RESULTS = 100
+NEARLOW_MAX_WORKERS = 20
+
 # Storage
 DB_PATH = "portfolio.db"
 SNAPSHOTS_DIR = "snapshots"

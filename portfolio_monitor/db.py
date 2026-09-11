@@ -168,6 +168,23 @@ CREATE TABLE IF NOT EXISTS growth_candidates (
     market_cap REAL,
     PRIMARY KEY (asof_date, ticker)
 );
+
+CREATE TABLE IF NOT EXISTS nearlow_candidates (
+    asof_date TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    name TEXT,
+    price REAL,
+    year_low REAL,
+    year_high REAL,
+    pct_from_52w_low REAL,
+    pct_from_52w_high REAL,
+    target_mean REAL,
+    target_upside_pct REAL,
+    analyst_ratings_json TEXT,
+    buy_ratio_pct REAL,
+    market_cap REAL,
+    PRIMARY KEY (asof_date, ticker)
+);
 """
 
 
@@ -516,4 +533,49 @@ def get_growth_candidates(conn, asof_date: str) -> list[dict]:
 
 def get_latest_growth_candidates_date(conn) -> Optional[str]:
     row = conn.execute("SELECT MAX(asof_date) AS d FROM growth_candidates").fetchone()
+    return row["d"] if row else None
+
+
+def save_nearlow_candidates(conn, asof_date: str, candidates: list[dict]) -> None:
+    conn.executemany(
+        """INSERT OR REPLACE INTO nearlow_candidates
+           (asof_date, ticker, name, price, year_low, year_high, pct_from_52w_low,
+            pct_from_52w_high, target_mean, target_upside_pct, analyst_ratings_json,
+            buy_ratio_pct, market_cap)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        [
+            (
+                asof_date,
+                c["ticker"],
+                c.get("name"),
+                c.get("price"),
+                c.get("year_low"),
+                c.get("year_high"),
+                c.get("pct_from_52w_low"),
+                c.get("pct_from_52w_high"),
+                c.get("target_mean"),
+                c.get("target_upside_pct"),
+                json.dumps(c.get("analyst_ratings") or {}),
+                c.get("buy_ratio_pct"),
+                c.get("market_cap"),
+            )
+            for c in candidates
+        ],
+    )
+
+
+def get_nearlow_candidates(conn, asof_date: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM nearlow_candidates WHERE asof_date=? ORDER BY pct_from_52w_low ASC", (asof_date,)
+    ).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["analyst_ratings"] = json.loads(d.pop("analyst_ratings_json")) if d.get("analyst_ratings_json") else {}
+        result.append(d)
+    return result
+
+
+def get_latest_nearlow_candidates_date(conn) -> Optional[str]:
+    row = conn.execute("SELECT MAX(asof_date) AS d FROM nearlow_candidates").fetchone()
     return row["d"] if row else None
