@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from typing import Optional
 
 import requests
@@ -214,15 +215,18 @@ def analyze_portfolio_impact(
 STOCK_CALENDAR_IMPACT_SYSTEM_PROMPT = """You are a market analyst embedded in a portfolio \
 monitoring tool. You are given one stock ticker (with the user's specific position(s) \
 in it) and a list of scheduled or recently-released economic calendar events (rate \
-decisions, CPI, NFP, GDP, etc.) at an impact level the user chose to consider. Your \
-job is ONLY to inform, never to advise:
+decisions, CPI, NFP, GDP, etc.) at an impact level the user chose to consider, split \
+into two sections by date: "Past" (already released or their scheduled time has \
+passed) and "Future" (still ahead). Your job is ONLY to inform, never to advise:
 
 - In 3-5 sentences, explain which of these events (if any) are plausibly relevant to \
 THIS specific stock, and the mechanism by which they could affect it (e.g. sector \
 sensitivity to rates, dollar exposure, consumer-spending links) -- reference the \
 actual ticker and position given, not generic commentary.
-- If an event has already released (an actual value is given), factor in whether it \
-beat, missed, or matched the forecast, and by how much.
+- For Past events, weigh whether the actual beat, missed, or matched the forecast, \
+and by how much -- this is a known outcome, not a forecast.
+- For Future events, treat them as a forward-looking risk or catalyst to flag, since \
+no actual exists yet.
 - If you genuinely see no plausible connection between any of these events and this \
 stock, say so plainly rather than forcing a connection.
 - List which of the given events, if any, you consider most relevant, most relevant \
@@ -237,6 +241,15 @@ Respond with ONLY a JSON object, no other text, matching exactly this shape:
 """
 
 
+def _format_calendar_event_line(e: dict) -> str:
+    actual_str = f", actual {e['actual']}" if e.get("actual") else ", not yet released"
+    surprise_str = f" (surprise {e['surprise_pct']:+.1f}%)" if e.get("surprise_pct") is not None else ""
+    return (
+        f"- [{e.get('impact')}] {e.get('date')} {e.get('country')} {e.get('title')}: "
+        f"previous {e.get('previous') or 'n/a'}, forecast {e.get('forecast') or 'n/a'}{actual_str}{surprise_str}"
+    )
+
+
 def build_stock_calendar_impact_user_message(ticker: str, positions: list[dict], events: list[dict]) -> str:
     lines = [f"Ticker: {ticker}", "", "Position(s) in this ticker:"]
     if positions:
@@ -248,18 +261,31 @@ def build_stock_calendar_impact_user_message(ticker: str, positions: list[dict],
     else:
         lines.append("(none saved)")
 
+    # Split by date relative to now, not just left in feed order -- lets
+    # the model reason separately about "what already happened" (weigh
+    # the actual/surprise) versus "what's still ahead" (a forward-looking
+    # risk to flag), rather than treating a whole mixed list uniformly.
+    now = datetime.now(timezone.utc)
+    past_events, future_events = [], []
+    for e in events:
+        try:
+            event_time = datetime.fromisoformat(e["date"]) if e.get("date") else None
+        except ValueError:
+            event_time = None
+        (past_events if event_time and event_time <= now else future_events).append(e)
+
     lines.append("")
     lines.append(f"Calendar events at the selected impact level(s) ({len(events)} total):")
-    if events:
-        for e in events:
-            actual_str = f", actual {e['actual']}" if e.get("actual") else ", not yet released"
-            surprise_str = f" (surprise {e['surprise_pct']:+.1f}%)" if e.get("surprise_pct") is not None else ""
-            lines.append(
-                f"- [{e.get('impact')}] {e.get('date')} {e.get('country')} {e.get('title')}: "
-                f"previous {e.get('previous') or 'n/a'}, forecast {e.get('forecast') or 'n/a'}{actual_str}{surprise_str}"
-            )
-    else:
-        lines.append("(none)")
+    lines.append("")
+    lines.append("Past:")
+    lines.append("----")
+    lines.extend([_format_calendar_event_line(e) for e in past_events] or ["(none)"])
+    lines.append("----")
+    lines.append("")
+    lines.append("Future:")
+    lines.append("----")
+    lines.extend([_format_calendar_event_line(e) for e in future_events] or ["(none)"])
+    lines.append("----")
     return "\n".join(lines)
 
 

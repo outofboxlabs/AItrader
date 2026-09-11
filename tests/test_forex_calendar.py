@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from portfolio_monitor import forex_calendar as fx
 
 
@@ -202,10 +204,11 @@ def test_analyze_portfolio_impact_propagates_api_failure(monkeypatch):
 
 def test_build_stock_calendar_impact_user_message_includes_ticker_and_events():
     positions = [{"asset_type": "shares", "ticker": "AAPL", "contracts": 10}]
+    future_date = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
     events = [
         {
-            "title": "CPI m/m", "country": "USD", "date": "2026-09-11T08:30:00-04:00", "impact": "High",
-            "previous": "0.1%", "forecast": "0.4%", "actual": "0.4%", "surprise_pct": 0.0,
+            "title": "CPI m/m", "country": "USD", "date": future_date, "impact": "High",
+            "previous": "0.1%", "forecast": "0.4%", "actual": None, "surprise_pct": None,
         }
     ]
     message = fx.build_stock_calendar_impact_user_message("AAPL", positions, events)
@@ -219,6 +222,26 @@ def test_build_stock_calendar_impact_user_message_handles_no_events():
     message = fx.build_stock_calendar_impact_user_message("AAPL", [], [])
     assert "(none)" in message
     assert "(none saved)" in message
+    assert "Past:" in message
+    assert "Future:" in message
+
+
+def test_build_stock_calendar_impact_user_message_splits_past_and_future():
+    past_date = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    future_date = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    events = [
+        {"title": "Already Released", "country": "USD", "date": past_date, "impact": "High", "actual": "0.4%", "forecast": "0.3%"},
+        {"title": "Still Ahead", "country": "USD", "date": future_date, "impact": "High", "actual": None, "forecast": "0.3%"},
+    ]
+    message = fx.build_stock_calendar_impact_user_message("AAPL", [], events)
+
+    past_section = message.split("Past:")[1].split("Future:")[0]
+    future_section = message.split("Future:")[1]
+
+    assert "Already Released" in past_section
+    assert "Still Ahead" not in past_section
+    assert "Still Ahead" in future_section
+    assert "Already Released" not in future_section
 
 
 def test_analyze_stock_calendar_impact_calls_ai_client(monkeypatch):
