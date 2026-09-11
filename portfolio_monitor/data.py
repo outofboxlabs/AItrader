@@ -25,6 +25,23 @@ class Quote:
         return self.last
 
 
+def get_price_history(ticker: str, period: str = "60d", interval: str = "5m") -> list[dict]:
+    """Intraday price history for a chart, as [{"time": ISO string with
+    timezone, "close": float}, ...]. 5m bars cap out at 60 days back on
+    Yahoo's free data (1m bars only go back 7 days -- too tight to cover
+    "this month"), which is why that's the default rather than something
+    finer. Returns [] rather than raising on an empty/failed pull --
+    callers decide how to degrade (e.g. "no chart data for this ticker")."""
+    t = yf.Ticker(ticker)
+    try:
+        hist = t.history(period=period, interval=interval)
+    except Exception:
+        return []
+    if hist.empty:
+        return []
+    return [{"time": idx.isoformat(), "close": float(row["Close"])} for idx, row in hist.iterrows()]
+
+
 def get_spot_price(ticker: str) -> float:
     t = yf.Ticker(ticker)
     try:

@@ -672,6 +672,93 @@ def test_analyze_stock_impact_handles_ai_failure(client, monkeypatch):
     assert res.status_code == 502
 
 
+# --- portfolio price chart --------------------------------------------
+
+
+def test_match_events_to_price_history_finds_closest_bar_within_tolerance():
+    history = [
+        {"time": "2026-09-11T08:25:00-04:00", "close": 100.0},
+        {"time": "2026-09-11T08:30:00-04:00", "close": 101.0},
+        {"time": "2026-09-11T08:35:00-04:00", "close": 99.5},
+    ]
+    events = [{"date": "2026-09-11T08:31:00-04:00", "title": "CPI m/m", "country": "USD"}]
+    markers = app_mod._match_events_to_price_history(history, events)
+    assert len(markers) == 1
+    assert markers[0]["bar_index"] == 1
+    assert markers[0]["title"] == "CPI m/m"
+
+
+def test_match_events_to_price_history_skips_event_too_far_from_any_bar():
+    history = [{"time": "2026-09-11T08:30:00-04:00", "close": 100.0}]
+    events = [{"date": "2026-09-15T08:30:00-04:00", "title": "Far Event", "country": "USD"}]
+    assert app_mod._match_events_to_price_history(history, events) == []
+
+
+def test_match_events_to_price_history_handles_empty_history():
+    events = [{"date": "2026-09-11T08:30:00-04:00", "title": "x", "country": "USD"}]
+    assert app_mod._match_events_to_price_history([], events) == []
+
+
+def test_get_portfolio_price_chart_marks_close_past_high_impact_event(client, monkeypatch):
+    now = datetime.now(timezone.utc)
+    bar_time = (now - timedelta(hours=1)).isoformat()
+    monkeypatch.setattr(app_mod.data, "get_price_history", lambda ticker, **kw: [{"time": bar_time, "close": 101.0}])
+
+    event_date = (now - timedelta(hours=1, minutes=5)).isoformat()  # within the 2h match tolerance
+    _seed_cached_forex_events(
+        [{"date": event_date, "country": "USD", "title": "CPI m/m", "impact": "High", "forecast": "0.4%", "previous": "0.1%"}]
+    )
+
+    res = client.get("/api/portfolio/price-chart?ticker=aapl")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["ticker"] == "AAPL"
+    assert len(data["history"]) == 1
+    assert len(data["markers"]) == 1
+    assert data["markers"][0]["title"] == "CPI m/m"
+
+
+def test_get_portfolio_price_chart_excludes_future_events(client, monkeypatch):
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(app_mod.data, "get_price_history", lambda ticker, **kw: [{"time": now.isoformat(), "close": 101.0}])
+
+    future_event = (now + timedelta(days=1)).isoformat()
+    _seed_cached_forex_events(
+        [{"date": future_event, "country": "USD", "title": "Future CPI", "impact": "High", "forecast": "0.4%", "previous": "0.1%"}]
+    )
+
+    res = client.get("/api/portfolio/price-chart?ticker=aapl")
+    assert res.get_json()["markers"] == []
+
+
+def test_get_portfolio_price_chart_excludes_non_high_impact(client, monkeypatch):
+    now = datetime.now(timezone.utc)
+    bar_time = (now - timedelta(minutes=30)).isoformat()
+    monkeypatch.setattr(app_mod.data, "get_price_history", lambda ticker, **kw: [{"time": bar_time, "close": 101.0}])
+
+    event_date = (now - timedelta(minutes=25)).isoformat()
+    _seed_cached_forex_events(
+        [{"date": event_date, "country": "USD", "title": "Low Impact Thing", "impact": "Low", "forecast": "", "previous": ""}]
+    )
+
+    res = client.get("/api/portfolio/price-chart?ticker=AAPL")
+    assert res.get_json()["markers"] == []
+
+
+def test_get_portfolio_price_chart_requires_ticker(client):
+    res = client.get("/api/portfolio/price-chart")
+    assert res.status_code == 400
+
+
+def test_get_portfolio_price_chart_handles_data_failure(client, monkeypatch):
+    def boom(ticker, **kw):
+        raise RuntimeError("yfinance down")
+
+    monkeypatch.setattr(app_mod.data, "get_price_history", boom)
+    res = client.get("/api/portfolio/price-chart?ticker=AAPL")
+    assert res.status_code == 502
+
+
 def test_analyze_forex_impact_rejects_unknown_provider(client, monkeypatch):
     monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
     event = {"title": "CPI m/m", "country": "USD", "date": "2026-09-11T08:30:00-04:00", "impact": "High"}

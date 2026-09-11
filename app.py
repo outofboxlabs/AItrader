@@ -27,7 +27,7 @@ from typing import Optional
 from flask import Flask, jsonify, render_template_string, request
 
 import config
-from portfolio_monitor import credentials, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_screener, news, pipeline, scheduler, vision
+from portfolio_monitor import credentials, data, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_screener, news, pipeline, scheduler, vision
 from portfolio_monitor import db as db_mod
 from portfolio_monitor.models import Position
 
@@ -579,6 +579,72 @@ def analyze_stock_calendar_impact():
     return jsonify(result)
 
 
+_CHART_EVENT_MATCH_TOLERANCE_SECONDS = 2 * 3600  # 2 hours -- see _match_events_to_price_history
+
+
+def _match_events_to_price_history(history: list[dict], events: list[dict]) -> list[dict]:
+    """For each past High-impact event, find the closest 5-minute price
+    bar by time and attach a marker there -- this is what lets the chart
+    draw a red bar at (approximately) the moment the event hit, not just
+    the day. Skips an event entirely if the closest bar is more than
+    _CHART_EVENT_MATCH_TOLERANCE_SECONDS away (e.g. the event fell on a
+    weekend/holiday with no trading, or outside the fetched window) --
+    better to omit a marker than place it hours away from the truth."""
+    if not history:
+        return []
+    bar_times = [datetime.fromisoformat(h["time"]) for h in history]
+    markers = []
+    for e in events:
+        if not e.get("date"):
+            continue
+        try:
+            event_time = datetime.fromisoformat(e["date"])
+        except ValueError:
+            continue
+        closest_idx = min(range(len(bar_times)), key=lambda i: abs((bar_times[i] - event_time).total_seconds()))
+        if abs((bar_times[closest_idx] - event_time).total_seconds()) > _CHART_EVENT_MATCH_TOLERANCE_SECONDS:
+            continue
+        markers.append({"bar_index": closest_idx, "bar_time": history[closest_idx]["time"], "title": e.get("title"), "country": e.get("country")})
+    return markers
+
+
+@app.route("/api/portfolio/price-chart", methods=["GET"])
+def get_portfolio_price_chart():
+    """Intraday price history for one ticker, with markers on any PAST
+    High-impact calendar event whose time lands close to a bar -- so the
+    chart can draw a red bar at (approximately) the moment it hit. Only
+    past events have a marker (a future one has no price reaction yet
+    to show). Uses whatever calendar data is already cached from the
+    Forex Calendar tab's "Run Now" -- doesn't trigger a fetch of its
+    own."""
+    ticker = (request.args.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker required"}), 400
+
+    try:
+        history = data.get_price_history(ticker)
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"error": str(exc)}), 502
+
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        all_events = db_mod.get_forex_calendar_events(conn)
+    now = datetime.now(timezone.utc)
+    past_high_impact = []
+    for e in all_events:
+        if (e.get("impact") or "").lower() != "high" or not e.get("date"):
+            continue
+        try:
+            if datetime.fromisoformat(e["date"]) <= now:
+                past_high_impact.append(e)
+        except ValueError:
+            continue
+
+    markers = _match_events_to_price_history(history, past_high_impact)
+    return jsonify({"ticker": ticker, "history": history, "markers": markers})
+
+
 # --- Settings ----------------------------------------------------------
 
 
@@ -708,6 +774,7 @@ PAGE_TEMPLATE = """<!doctype html>
   .source-tag { font-size: 0.7rem; color: var(--muted); }
   .col-actions { width: 36px; }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
@@ -1108,9 +1175,99 @@ function renderCalendarImpactCards(valuations) {
       <label style="margin-left:8px;"><input type="checkbox" class="cal-impact-level" data-ticker="${ticker}" value="Medium"> Medium</label>
       <label style="margin-left:8px;"><input type="checkbox" class="cal-impact-level" data-ticker="${ticker}" value="Low"> Low</label>
       <button class="secondary" style="margin-left:8px; font-size:0.75rem; padding:3px 8px;" onclick="analyzeStockCalendarImpact('${ticker}', this)">Analyze</button>
+      <button class="secondary" style="margin-left:4px; font-size:0.75rem; padding:3px 8px;" onclick="toggleStockChart('${ticker}', this)">Show Chart</button>
       <div class="cal-impact-result muted" id="cal-impact-result-${ticker}" style="display:none; margin-top:8px;"></div>
+      <div id="chart-wrap-${ticker}" style="display:none; margin-top:10px; max-width:700px;">
+        <canvas id="chart-canvas-${ticker}" height="220"></canvas>
+        <div class="muted" id="chart-status-${ticker}" style="margin-top:4px; font-size:0.75rem;"></div>
+      </div>
     </div>
   `).join("");
+}
+
+const stockCharts = {};
+
+async function toggleStockChart(ticker, btn) {
+  const wrap = document.getElementById(`chart-wrap-${ticker}`);
+  if (wrap.style.display === "block") {
+    wrap.style.display = "none";
+    btn.textContent = "Show Chart";
+    return;
+  }
+  wrap.style.display = "block";
+  btn.textContent = "Hide Chart";
+  if (stockCharts[ticker]) return;  // already loaded once
+
+  const statusEl = document.getElementById(`chart-status-${ticker}`);
+  statusEl.textContent = "Loading...";
+  try {
+    const res = await fetch(`/api/portfolio/price-chart?ticker=${encodeURIComponent(ticker)}`);
+    const data = await res.json();
+    if (!res.ok) {
+      statusEl.textContent = "Error: " + data.error;
+      return;
+    }
+    if (!data.history || data.history.length === 0) {
+      statusEl.textContent = "No price history available for this ticker.";
+      return;
+    }
+    const labels = data.history.map(h => new Date(h.time).toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }));
+    const closes = data.history.map(h => h.close);
+    const maxClose = Math.max(...closes);
+    const markerIndexes = new Set((data.markers || []).map(m => m.bar_index));
+    const markerByIndex = {};
+    (data.markers || []).forEach(m => { markerByIndex[m.bar_index] = m; });
+    const markerBars = data.history.map((h, i) => markerIndexes.has(i) ? maxClose : null);
+
+    const ctx = document.getElementById(`chart-canvas-${ticker}`).getContext("2d");
+    stockCharts[ticker] = new Chart(ctx, {
+      data: {
+        labels,
+        datasets: [
+          {
+            type: "bar",
+            label: "High-impact event",
+            data: markerBars,
+            backgroundColor: "rgba(217, 97, 91, 0.35)",
+            barPercentage: 1.0,
+            categoryPercentage: 1.0,
+            order: 2,
+          },
+          {
+            type: "line",
+            label: ticker + " price",
+            data: closes,
+            borderColor: "#2d6cdf",
+            backgroundColor: "transparent",
+            pointRadius: 0,
+            borderWidth: 1.5,
+            tension: 0.1,
+            order: 1,
+          },
+        ],
+      },
+      options: {
+        animation: false,
+        scales: {
+          x: { ticks: { maxTicksLimit: 10, autoSkip: true } },
+          y: { position: "right" },
+        },
+        plugins: {
+          tooltip: {
+            callbacks: {
+              afterBody: (items) => {
+                const m = markerByIndex[items[0].dataIndex];
+                return m ? [`High impact: ${m.country} ${m.title}`] : [];
+              },
+            },
+          },
+        },
+      },
+    });
+    statusEl.textContent = `${data.history.length} bars (5-minute), last 60 days -- red bars mark a past High-impact event within ~2h of that bar.`;
+  } catch (err) {
+    statusEl.textContent = "Error: " + err;
+  }
 }
 
 async function analyzeStockCalendarImpact(ticker, btn) {
