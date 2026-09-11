@@ -7,14 +7,23 @@ for this. This pulls their public JSON feed that powers their own
 embeddable calendar widget -- unofficial and undocumented, but the
 standard way the retail trading-bot community reads this data, since
 scraping the HTML calendar page directly is fragile and against their
-ToS. The field shape below (title, country, date, impact, forecast,
-previous, actual) is now CONFIRMED against a real pull of the feed:
-"date" is a plain ISO 8601 string with a UTC offset already baked in
-(e.g. "2026-09-06T21:30:00-04:00"), not a separate timestamp field --
-an earlier guess that it needed a Unix-timestamp fallback was chasing a
-field that doesn't actually exist in this feed. (The real bug that made
-every row show "n/a" turned out to be downstream in db.py, not here --
-see get_forex_calendar_events.)
+ToS. The field shape is now CONFIRMED against a real pull of the full
+week: "date" is a plain ISO 8601 string with a UTC offset already baked
+in (e.g. "2026-09-06T21:30:00-04:00"). (An earlier guess that "date"
+needed a Unix-timestamp fallback was chasing a field that doesn't
+actually exist in this feed -- the real "n/a" bug turned out to be
+downstream in db.py; see get_forex_calendar_events.)
+
+IMPORTANT confirmed limitation: this feed carries "title", "country",
+"date", "impact", "forecast", and "previous" ONLY -- there is no
+"actual" field anywhere in it, confirmed by checking every event across
+a full week including several hours/days past their release time. It is
+a static forecast-only snapshot generated once for the week, not a live
+feed -- unlike Forex Factory's own website, which does show actuals as
+they release. _surprise_pct() and the "actual"/"surprise_pct" output
+fields are kept for if a future response ever does carry one (or a
+different feed is swapped in), but expect them to always be None/"n/a"
+against this feed as it currently behaves.
 
 This module only reads the calendar. It does not place or evaluate any
 trade -- see app.py's Forex Calendar tab docstring for why.

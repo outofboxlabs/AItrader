@@ -688,6 +688,10 @@ PAGE_TEMPLATE = """<!doctype html>
       Forex Factory's public calendar feed, which is unofficial and rate-limited, so "Run Now" won't
       fetch more than once every few minutes. This is informational only -- it does not place, size,
       or evaluate any trade, and never will run unattended.
+      <strong>Note:</strong> this feed is a forecast-only snapshot for the week -- it never fills in
+      the <strong>Actual</strong>/<strong>Surprise</strong> columns even after an event has released
+      (confirmed: none of this week's ~80 events carried one, past or future). For what actually
+      printed, check <a href="https://www.forexfactory.com/calendar" target="_blank" rel="noopener">forexfactory.com/calendar</a> directly.
     </p>
     <div id="fx-status"></div>
     <div id="fx-next-event" class="muted" style="margin-bottom:4px; font-weight: 600;"></div>
