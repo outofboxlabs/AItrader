@@ -1,4 +1,4 @@
-# AAPL Intraday Pullback/Reversal Backtester
+# Momentum Trader — AAPL Intraday Pullback/Reversal Backtester
 
 A rigorous backtesting framework for an intraday AAPL mean-reversion / reversal
 strategy on 1-minute bars. **This project only backtests — it does not place
@@ -20,7 +20,7 @@ fooling yourself once real data is in.
 ## Project structure
 
 ```
-aapl_intraday_backtester/
+momentum_trader/
 ├── README.md
 ├── requirements.txt
 ├── .env.example
@@ -49,7 +49,7 @@ aapl_intraday_backtester/
 │   ├── run_backtest.py            # single baseline backtest
 │   ├── run_parameter_sweep.py     # train/validation/test grid search
 │   └── run_walk_forward.py        # rolling walk-forward test
-├── tests/                          # pytest suite (36 tests)
+├── tests/                          # pytest suite (39 tests)
 └── results/                        # trades.csv, equity_curve.csv, parameter_results.csv,
                                      # best_configs.csv, report.html, charts/
 ```
@@ -57,7 +57,7 @@ aapl_intraday_backtester/
 ## Setup
 
 ```bash
-cd aapl_intraday_backtester
+cd momentum_trader
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```

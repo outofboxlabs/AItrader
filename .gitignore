@@ -9,7 +9,7 @@ positions.json
 positions.json.bak
 exports/
 
-# aapl_intraday_backtester
-aapl_intraday_backtester/.venv/
-aapl_intraday_backtester/.env
-aapl_intraday_backtester/data/cache/*.parquet
+# momentum_trader
+momentum_trader/.venv/
+momentum_trader/.env
+momentum_trader/data/cache/*.parquet
