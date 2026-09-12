@@ -1,0 +1,92 @@
+# AAPL Intraday Pullback/Reversal Backtester — configuration
+# All strategy constants live here. Scripts load this file via src/config.py.
+
+symbol: AAPL
+
+data:
+  source: local              # "alpaca" or "local"
+  local_path: data/cache/AAPL_sample.parquet
+  cache_dir: data/cache
+  start_date: "2025-01-01"
+  end_date: "2025-08-31"
+  feed: iex                  # Alpaca data feed: iex (free tier) or sip
+
+session:
+  timezone: America/New_York
+  open: "09:30"
+  close: "16:00"
+  stop_new_entries: "15:00"
+  force_close: "15:55"
+
+strategy:
+  pullback_pct: 0.005        # 0.50% pullback from rolling intraday high required
+  take_profit_pct: 0.01      # +1.00% target
+  atr_period: 14
+  atr_multiplier: 1.5
+  max_hold_minutes: 120
+
+filters:
+  macro_news: true
+  earnings: true
+  earnings_exclude_days_before: 0
+  earnings_exclude_days_after: 0
+  vwap: false
+  ema: false
+  rsi: false
+  rsi_oversold_threshold: 40
+  relative_volume: false
+  relative_volume_threshold: 1.2
+  min_volume: false
+  min_volume_threshold: 500
+  market_trend: false
+
+profit_protection:
+  enabled: false
+  breakeven_trigger_pct: 0.005   # once unrealized profit >= +0.50%, move stop to ~breakeven
+  breakeven_buffer_pct: 0.0005   # breakeven stop = entry * (1 + this)  (small cushion above entry)
+  lock_trigger_pct: 0.0075       # once unrealized profit >= +0.75%
+  lock_pct: 0.003                # lock in ~+0.30%
+
+execution:
+  entry_method: next_bar_open    # "next_bar_open" or "current_bar_close"
+  intrabar_priority: conservative  # "conservative" | "optimistic" | "skip"
+  slippage_bps_per_side: 1
+  commission_per_share: 0.0
+  commission_per_order: 0.0
+
+risk:
+  starting_equity: 100000
+  sizing_method: risk            # "risk" or "fixed_dollar"
+  risk_per_trade_pct: 0.0025
+  fixed_dollar_amount: 10000
+  max_position_pct: 0.20
+  allow_fractional_shares: false
+  max_trades_per_day: 5
+  max_daily_loss_pct: 0.015
+  max_consecutive_losses: 3
+
+calendars:
+  excluded_dates_path: data/excluded_dates.csv
+  earnings_dates_path: data/earnings_dates.csv
+
+benchmark:
+  symbols: [AAPL, SPY]
+
+optimizer:
+  train_start: "2025-01-01"
+  train_end: "2025-04-30"
+  validation_start: "2025-05-01"
+  validation_end: "2025-06-30"
+  test_start: "2025-07-01"
+  test_end: "2025-08-31"
+  min_trades_for_ranking: 15
+  grid:
+    take_profit_pct: [0.0025, 0.004, 0.005, 0.0075, 0.01, 0.0125, 0.015]
+    atr_multiplier: [1.0, 1.5, 2.0, 2.5]
+    max_hold_minutes: [30, 60, 90, 120]
+    pullback_pct: [0.0025, 0.005, 0.0075, 0.01]
+
+walk_forward:
+  train_months: 3
+  test_months: 1
+  step_months: 1

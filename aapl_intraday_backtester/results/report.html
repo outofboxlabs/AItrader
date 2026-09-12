@@ -1,0 +1,63 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>AAPL Intraday Pullback/Reversal Strategy — Backtest Report</title>
+<style>
+body { font-family: -apple-system, Arial, sans-serif; margin: 2rem; color: #1a1a1a; background:#fafafa; }
+h1 { font-size: 1.4rem; }
+h2 { margin-top: 2rem; border-bottom: 2px solid #ddd; padding-bottom: 0.3rem; }
+table { border-collapse: collapse; margin: 0.5rem 0 1.5rem 0; }
+td, th { border: 1px solid #ccc; padding: 4px 10px; text-align: left; font-size: 0.9rem; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.5rem 2rem; }
+.chart { margin: 1rem 0; background: white; padding: 0.5rem; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.15); }
+.chart img { max-width: 100%; }
+.note { background: #fff3cd; border: 1px solid #ffe08a; padding: 0.75rem 1rem; border-radius: 6px; }
+</style></head>
+<body>
+<h1>AAPL Intraday Pullback/Reversal Strategy — Backtest Report</h1>
+<p>Baseline configuration: pullback=0.50%, take_profit=1.00%, atr_multiplier=1.5, max_hold=120min, intrabar=conservative, entry=next_bar_open. Overnight exposure: 0% (strategy is fully intraday).</p>
+
+<h2>Summary</h2>
+<div class="grid">
+<table>
+<tr><th>Metric</th><th>Value</th></tr>
+<tr><td>Total trades</td><td>380</td></tr>
+<tr><td>Win rate</td><td>20.00%</td></tr>
+<tr><td>Profit factor</td><td>0.933</td></tr>
+<tr><td>Expectancy / trade</td><td>-0.01%</td></tr>
+<tr><td>Gross P&amp;L</td><td>$993.66</td></tr>
+<tr><td>Net P&amp;L</td><td>$-511.09</td></tr>
+</table>
+<table>
+<tr><th>Metric</th><th>Value</th></tr>
+<tr><td>Total return</td><td>-0.51%</td></tr>
+<tr><td>Annualized return</td><td>-0.74%</td></tr>
+<tr><td>Max drawdown</td><td>-1.04%</td></tr>
+<tr><td>Sharpe ratio</td><td>-0.512</td></tr>
+<tr><td>Sortino ratio</td><td>-1.643</td></tr>
+<tr><td>Calmar ratio</td><td>-0.716</td></tr>
+</table>
+<table>
+<tr><th>Metric</th><th>Value</th></tr>
+<tr><td>Avg winner</td><td>0.47%</td></tr>
+<tr><td>Avg loser</td><td>-0.13%</td></tr>
+<tr><td>Largest winner</td><td>0.99%</td></tr>
+<tr><td>Largest loser</td><td>-0.24%</td></tr>
+<tr><td>Avg holding (min)</td><td>38.161</td></tr>
+<tr><td>Median holding (min)</td><td>11.000</td></tr>
+<tr><td>Max holding (min)</td><td>120.000</td></tr>
+<tr><td>Max consecutive wins</td><td>3</td></tr>
+<tr><td>Max consecutive losses</td><td>17</td></tr>
+<tr><td>Avg MFE</td><td>0.478</td></tr>
+<tr><td>Avg MAE</td><td>0.273</td></tr>
+</table>
+</div>
+
+<h2>Exit Reason Breakdown</h2>
+<table><tr><th>Reason</th><th>% of trades</th></tr><tr><td>atr_stop</td><td>79.2%</td></tr><tr><td>time_stop</td><td>16.6%</td></tr><tr><td>take_profit</td><td>2.4%</td></tr><tr><td>end_of_day</td><td>1.8%</td></tr></table>
+
+<h2>Benchmarks (overnight exposure: 0% — strategy is fully intraday)</h2>
+<table><tr><th>Benchmark</th><th>Total Return</th></tr><tr><td>AAPL buy & hold</td><td>9.88%</td></tr></table>
+
+<h2>Charts</h2>
+<div class="chart"><h3>Equity Curve</h3><img src="charts/equity_curve.png" /></div><div class="chart"><h3>Drawdown</h3><img src="charts/drawdown.png" /></div><div class="chart"><h3>Monthly Returns</h3><img src="charts/monthly_returns.png" /></div><div class="chart"><h3>Trade Return Distribution</h3><img src="charts/trade_return_distribution.png" /></div><div class="chart"><h3>Win Loss</h3><img src="charts/win_loss.png" /></div><div class="chart"><h3>Holding Times</h3><img src="charts/holding_times.png" /></div><div class="chart"><h3>Pnl By Hour</h3><img src="charts/pnl_by_hour.png" /></div><div class="chart"><h3>Pnl By Weekday</h3><img src="charts/pnl_by_weekday.png" /></div><div class="chart"><h3>Exit Reasons</h3><img src="charts/exit_reasons.png" /></div>
+
+</body></html>

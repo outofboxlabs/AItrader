@@ -8,3 +8,8 @@ snapshots/*.json
 positions.json
 positions.json.bak
 exports/
+
+# aapl_intraday_backtester
+aapl_intraday_backtester/.venv/
+aapl_intraday_backtester/.env
+aapl_intraday_backtester/data/cache/*.parquet
