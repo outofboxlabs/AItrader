@@ -70,15 +70,44 @@ cp .env.example .env
 ```
 
 If you don't have Alpaca credentials, leave `config.yaml`'s `data.source` set
-to `local` (the default) and use the synthetic sample dataset instead.
+to `local` (the default) and use the synthetic sample dataset instead — or
+use the Yahoo Finance source below, which needs no credentials at all.
+
+### Real data option: Yahoo Finance (no credentials needed)
+
+`config.yahoo.yaml` is a ready-to-use config with `data.source: yahoo`. It
+pulls AAPL 1-minute bars via the `yfinance` package — no API key required.
+The one hard constraint is Yahoo's own: **1-minute intraday history is only
+available for roughly the trailing 30 calendar days**, no matter what date
+range you ask for (`src/data_loader.download_yahoo_bars` clips automatically
+and logs a warning when it does). That's enough data for a single baseline
+backtest but not for the train/validation/test sweep or walk-forward testing
+— use Alpaca or a longer local dataset for those.
+
+```bash
+python scripts/download_data.py --config config.yahoo.yaml
+python scripts/run_backtest.py --config config.yahoo.yaml
+```
+
+**This was tested from the sandboxed session that built this project, and
+the download failed**: the session's network egress policy returned an
+explicit `403` on `query2.finance.yahoo.com` / `fc.yahoo.com` (confirmed via
+the proxy status endpoint — not a code bug, a deliberate egress restriction
+for that environment). The Yahoo backend, its caching, its date-range
+clipping, and its "don't cache a failed/empty fetch" behavior are covered by
+`tests/test_data_loader.py` using a mocked fetch function, so the code path
+itself is verified even though a live pull couldn't be exercised there. Run
+the two commands above from a machine with normal internet access (a laptop,
+a CI runner, etc.) to actually pull real AAPL data and see the real-data
+result.
 
 ## Commands
 
 ```bash
-# 1. Get data — EITHER:
-python scripts/generate_sample_data.py --start 2025-01-01 --end 2025-08-31   # synthetic, no credentials
-# OR, with Alpaca credentials and data.source: alpaca in config.yaml:
-python scripts/download_data.py --start 2025-01-01 --end 2025-08-31
+# 1. Get data — pick ONE:
+python scripts/generate_sample_data.py --start 2025-01-01 --end 2025-08-31   # synthetic, no credentials, any range
+python scripts/download_data.py --config config.yahoo.yaml                    # real data, no credentials, trailing ~30 days only
+python scripts/download_data.py --start 2025-01-01 --end 2025-08-31           # real data via Alpaca, needs credentials, any range
 
 # 2. Run the unit tests
 pytest -q

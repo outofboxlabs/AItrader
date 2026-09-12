@@ -1,0 +1,89 @@
+# Real-data configuration: Yahoo Finance, trailing ~30 days of 1-minute bars.
+#
+# Yahoo Finance (via the `yfinance` package, no API key needed) only serves
+# 1-minute intraday history for roughly the last 30 calendar days, no matter
+# what start_date is configured below — src/data_loader.download_yahoo_bars
+# clips the range dynamically at download time, so this file stays usable
+# indefinitely without editing dates. That short window is fine for a single
+# baseline backtest, but it is NOT enough data for the train/validation/test
+# parameter sweep or walk-forward testing (those need many months) — use
+# config.yaml with Alpaca or a longer local dataset for those.
+#
+# data/excluded_dates.csv and data/earnings_dates.csv only contain sample
+# 2025 rows, so they have nothing to exclude in the current window; both
+# filters are left off below rather than silently no-op-ing. Populate real
+# 2026 dates and flip them on if you want that filter active for this range.
+
+symbol: AAPL
+
+data:
+  source: yahoo
+  cache_dir: data/cache
+  start_date: "2026-01-01"   # clipped at runtime to (today - 30 days)
+  end_date: "2026-12-31"     # clipped at runtime to today
+
+session:
+  timezone: America/New_York
+  open: "09:30"
+  close: "16:00"
+  stop_new_entries: "15:00"
+  force_close: "15:55"
+
+strategy:
+  pullback_pct: 0.005
+  take_profit_pct: 0.01
+  atr_period: 14
+  atr_multiplier: 1.5
+  max_hold_minutes: 120
+
+filters:
+  macro_news: false   # no verified 2026 macro calendar bundled — see note above
+  earnings: false     # no verified 2026 AAPL earnings dates bundled — see note above
+  earnings_exclude_days_before: 0
+  earnings_exclude_days_after: 0
+  vwap: false
+  ema: false
+  rsi: false
+  rsi_oversold_threshold: 40
+  relative_volume: false
+  relative_volume_threshold: 1.2
+  min_volume: false
+  min_volume_threshold: 500
+  market_trend: false
+
+profit_protection:
+  enabled: false
+  breakeven_trigger_pct: 0.005
+  breakeven_buffer_pct: 0.0005
+  lock_trigger_pct: 0.0075
+  lock_pct: 0.003
+
+execution:
+  entry_method: next_bar_open
+  intrabar_priority: conservative
+  slippage_bps_per_side: 1
+  commission_per_share: 0.0
+  commission_per_order: 0.0
+
+risk:
+  starting_equity: 100000
+  sizing_method: risk
+  risk_per_trade_pct: 0.0025
+  fixed_dollar_amount: 10000
+  max_position_pct: 0.20
+  allow_fractional_shares: false
+  max_trades_per_day: 5
+  max_daily_loss_pct: 0.015
+  max_consecutive_losses: 3
+
+calendars:
+  excluded_dates_path: data/excluded_dates.csv
+  earnings_dates_path: data/earnings_dates.csv
+
+benchmark:
+  symbols: [AAPL, SPY]
+
+# optimizer / walk_forward sections intentionally omitted from this file:
+# ~30 days of 1-minute data cannot be responsibly split into train/validation/
+# test windows or rolled through walk-forward without hitting tiny, unreliable
+# sample sizes (see spec principle: never present small-sample configs as best).

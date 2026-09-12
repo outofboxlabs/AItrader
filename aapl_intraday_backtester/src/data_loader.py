@@ -1,10 +1,16 @@
 """Historical 1-minute bar loading.
 
-Two backends are supported, selected via config.yaml `data.source`:
+Three backends are supported, selected via config.yaml `data.source`:
 
 * "alpaca" — pulls bars from the Alpaca Market Data v2 REST API, handling
   pagination and caching each calendar month to a local parquet file so
   re-running a backtest never re-downloads data it already has.
+* "yahoo"  — pulls bars from Yahoo Finance via the `yfinance` package.
+  Yahoo only serves 1-minute intraday history for the trailing ~30 calendar
+  days and caps a single request to ~7 days, so this backend clips the
+  configured date range to that window and fetches it in 7-day chunks,
+  caching each chunk to parquet the same way the Alpaca backend caches
+  months.
 * "local"  — reads a CSV/parquet dataset with columns
   [timestamp, open, high, low, close, volume]. This lets the whole project
   run without any API credentials (e.g. against a synthetic sample dataset
@@ -18,6 +24,7 @@ Either way, the returned DataFrame is:
 """
 from __future__ import annotations
 
+import datetime as dt
 import time
 from pathlib import Path
 from typing import Optional
@@ -32,6 +39,8 @@ logger = get_logger(__name__)
 
 ALPACA_BARS_URL = "https://data.alpaca.markets/v2/stocks/{symbol}/bars"
 REQUIRED_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
+YAHOO_1M_LOOKBACK_DAYS = 30
+YAHOO_MAX_CHUNK_DAYS = 7
 
 
 class DataLoadError(RuntimeError):
@@ -163,6 +172,129 @@ def download_alpaca_bars(cfg: BacktestConfig, force_refresh: bool = False) -> pd
     return full
 
 
+def _date_chunks(start: dt.date, end: dt.date, max_days: int) -> list[tuple[dt.date, dt.date]]:
+    """Split [start, end] into consecutive chunks of at most `max_days` days."""
+    chunks = []
+    cur = start
+    while cur <= end:
+        chunk_end = min(cur + dt.timedelta(days=max_days - 1), end)
+        chunks.append((cur, chunk_end))
+        cur = chunk_end + dt.timedelta(days=1)
+    return chunks
+
+
+def _fetch_yahoo_chunk(symbol: str, start: dt.date, end: dt.date, max_retries: int = 3) -> pd.DataFrame:
+    """Fetch one <=7-day chunk of 1-minute bars from Yahoo Finance via yfinance."""
+    try:
+        import yfinance as yf
+    except ImportError as exc:
+        raise DataLoadError("yfinance is not installed. Run: pip install yfinance") from exc
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(
+                start=start.isoformat(),
+                end=(end + dt.timedelta(days=1)).isoformat(),  # yfinance's `end` is exclusive
+                interval="1m",
+                prepost=False,
+                auto_adjust=True,
+            )
+            break
+        except Exception as exc:  # yfinance raises a mix of requests/JSON errors
+            last_exc = exc
+            if attempt == max_retries:
+                raise DataLoadError(f"Yahoo Finance request failed after {max_retries} attempts: {exc}") from exc
+            time.sleep(2 ** attempt)
+    else:  # pragma: no cover - defensive, loop always breaks or raises
+        raise DataLoadError(f"Yahoo Finance request failed: {last_exc}")
+
+    if hist.empty:
+        return pd.DataFrame(columns=REQUIRED_COLUMNS)
+
+    hist = hist.reset_index()
+    ts_col = "Datetime" if "Datetime" in hist.columns else "Date"
+    hist = hist.rename(columns={
+        ts_col: "timestamp", "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume",
+    })
+    hist["timestamp"] = pd.to_datetime(hist["timestamp"], utc=True)
+    return hist[REQUIRED_COLUMNS]
+
+
+def download_yahoo_bars(cfg: BacktestConfig, force_refresh: bool = False) -> pd.DataFrame:
+    """Download (or read from cache) 1-minute bars from Yahoo Finance.
+
+    Yahoo only serves 1-minute data for roughly the last 30 calendar days,
+    regardless of the requested start date — this is a Yahoo API limitation,
+    not a project setting. The configured date range is clipped to that
+    window and a warning is logged if any of the requested range had to be
+    dropped. Each <=7-day chunk is cached to its own parquet file under
+    `data.cache_dir` so re-running doesn't re-fetch chunks already on disk.
+    """
+    symbol = cfg.symbol
+    cache_dir = Path(cfg.data.cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    requested_start = pd.Timestamp(cfg.data.start_date).date()
+    requested_end = pd.Timestamp(cfg.data.end_date).date()
+    earliest_available = dt.date.today() - dt.timedelta(days=YAHOO_1M_LOOKBACK_DAYS)
+
+    start = max(requested_start, earliest_available)
+    end = min(requested_end, dt.date.today())
+    if start > requested_start or end < requested_end:
+        logger.warning(
+            "Yahoo Finance only serves 1-minute data for the trailing %d days. "
+            "Requested %s..%s clipped to %s..%s.",
+            YAHOO_1M_LOOKBACK_DAYS, requested_start, requested_end, start, end,
+        )
+    if start > end:
+        raise DataLoadError(
+            f"Requested range {requested_start}..{requested_end} is entirely outside Yahoo's "
+            f"{YAHOO_1M_LOOKBACK_DAYS}-day 1-minute lookback window (earliest available: {earliest_available})."
+        )
+
+    chunks = []
+    for chunk_start, chunk_end in _date_chunks(start, end, YAHOO_MAX_CHUNK_DAYS):
+        cache_path = cache_dir / f"{symbol}_yahoo_{chunk_start}_{chunk_end}.parquet"
+        if cache_path.exists() and not force_refresh:
+            logger.info("Cache hit for %s", cache_path.name)
+            chunks.append(pd.read_parquet(cache_path))
+            continue
+
+        logger.info("Downloading %s 1-min bars from Yahoo Finance for %s..%s", symbol, chunk_start, chunk_end)
+        chunk_df = _fetch_yahoo_chunk(symbol, chunk_start, chunk_end)
+        if chunk_df.empty:
+            # yfinance swallows connection/HTTP failures internally and just returns an
+            # empty frame rather than raising, so we can't tell "network/API failure"
+            # apart from "no bars for this range" here. Treat empty as unconfirmed and
+            # do NOT cache it — caching a false empty would permanently hide real data
+            # behind a stale cache hit on every future run, even after connectivity is
+            # restored. Worst case we just re-attempt this chunk next time.
+            logger.warning(
+                "No bars returned for %s..%s (could be a genuine gap, e.g. a holiday, or a "
+                "failed request — see any error above). Not caching; will retry next run.",
+                chunk_start, chunk_end,
+            )
+            continue
+        chunk_df.to_parquet(cache_path, index=False)
+        logger.info("Cached %d bars -> %s", len(chunk_df), cache_path)
+        chunks.append(chunk_df)
+        time.sleep(0.5)  # be polite to Yahoo's unofficial endpoint
+
+    if not chunks:
+        raise DataLoadError(
+            "Yahoo Finance returned no bars for any requested chunk. This usually means the "
+            "network/API request itself failed (check the warnings/errors logged above) rather "
+            "than there being no data — a fully delisted, hours-only-void range is very unlikely "
+            "for AAPL. Re-run once connectivity to Yahoo Finance (query2.finance.yahoo.com) is available."
+        )
+
+    full = pd.concat(chunks, ignore_index=True)
+    full = full.drop_duplicates(subset="timestamp").sort_values("timestamp").reset_index(drop=True)
+    return full
+
+
 def load_local_dataset(path: str | Path) -> pd.DataFrame:
     """Load a CSV or parquet dataset with [timestamp, open, high, low, close, volume]."""
     path = Path(path)
@@ -192,6 +324,8 @@ def load_bars(cfg: BacktestConfig, force_refresh: bool = False) -> pd.DataFrame:
     """
     if cfg.data.source == "alpaca":
         raw = download_alpaca_bars(cfg, force_refresh=force_refresh)
+    elif cfg.data.source == "yahoo":
+        raw = download_yahoo_bars(cfg, force_refresh=force_refresh)
     elif cfg.data.source == "local":
         raw = load_local_dataset(cfg.data.local_path)
     else:
