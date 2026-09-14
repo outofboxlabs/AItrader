@@ -155,10 +155,12 @@ FOREX_CALENDAR_MIN_REFRESH_SECONDS = 300
 # be more identifiable to SEC.
 EDGAR_USER_AGENT = os.environ.get("EDGAR_USER_AGENT", "AItrader personal portfolio tool (no-reply@example.com)")
 
-# StockGeist (social-media sentiment aggregator) -- see portfolio_monitor/
-# social_sentiment.py. Endpoint/param names are best-effort from public
-# docs/source, not live-verified against a real account.
-STOCKGEIST_BASE_URL = "https://api.stockgeist.ai/"
+# Reddit requires a descriptive User-Agent on every API request (see
+# https://github.com/reddit-archive/reddit/wiki/API) -- a generic/default
+# one is likely to be rate-limited harder than a real, unique one.
+# Override via the REDDIT_USER_AGENT env var if you want to be more
+# identifiable to Reddit.
+REDDIT_USER_AGENT = os.environ.get("REDDIT_USER_AGENT", "AItrader personal portfolio tool v1.0")
 
 # Storage
 DB_PATH = _here("portfolio.db")

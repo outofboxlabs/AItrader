@@ -27,7 +27,7 @@ from typing import Optional
 from flask import Flask, jsonify, render_template_string, request
 
 import config
-from portfolio_monitor import credentials, data, edgar, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_analysis, nearlow_screener, news, pipeline, scheduler, social_sentiment, technical_indicators, vision
+from portfolio_monitor import credentials, data, edgar, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_analysis, nearlow_screener, news, pipeline, reddit_sentiment, scheduler, technical_indicators, vision
 from portfolio_monitor import db as db_mod
 from portfolio_monitor.models import Position
 
@@ -367,7 +367,7 @@ def _build_agent_context(
     and panel functions read from. `selected_personas` (the panel-only
     case; leave as None for the single expert take) lets this skip
     network calls a persona that wasn't picked doesn't need -- no SEC
-    EDGAR call unless "filings" is selected, no StockGeist call unless
+    EDGAR call unless "filings" is selected, no Reddit call unless
     "social_sentiment" is selected. daily_history is fetched once and
     reused for both the rating timeline and the technical indicators
     rather than pulled twice."""
@@ -391,9 +391,14 @@ def _build_agent_context(
         context["filings"] = edgar.get_recent_filings(ticker)
     if "social_sentiment" in selected:
         context["social_sentiment_window"] = social_sentiment_window
-        stockgeist_key = credentials.resolve_api_key("stockgeist", interactive=False)
-        raw = social_sentiment.get_message_metrics(ticker, social_sentiment_window, stockgeist_key) if stockgeist_key else None
-        context["social_sentiment"] = social_sentiment.summarize_message_metrics(raw)
+        reddit_client_id = credentials.resolve_api_key("reddit_client_id", interactive=False)
+        reddit_client_secret = credentials.resolve_api_key("reddit_client_secret", interactive=False)
+        if reddit_client_id and reddit_client_secret:
+            context["social_sentiment"] = reddit_sentiment.search_recent_posts(
+                ticker, social_sentiment_window, reddit_client_id, reddit_client_secret
+            )
+        else:
+            context["social_sentiment"] = None
 
     return context
 
@@ -946,7 +951,7 @@ def has_key():
     return jsonify({"has_key": bool(key)})
 
 
-SAVABLE_CREDENTIAL_KEYS = PROVIDERS + ["stockgeist"]
+SAVABLE_CREDENTIAL_KEYS = PROVIDERS + ["reddit_client_id", "reddit_client_secret"]
 
 
 @app.route("/api/settings/api-key", methods=["POST"])
@@ -1330,7 +1335,7 @@ PAGE_TEMPLATE = """<!doctype html>
     <div class="settings-grid" id="settings-keys"></div>
 
     <h2 style="font-size:1rem; margin-top: 1.5rem;">Other data source keys</h2>
-    <p class="muted">Optional -- only needed for agents that use them (e.g. the Social Sentiment agent needs a free StockGeist key). Same local storage as above.</p>
+    <p class="muted">Optional -- only needed for agents that use them (e.g. the Social Sentiment agent needs a free Reddit "script" app -- register one at reddit.com/prefs/apps to get a Client ID and Secret). Same local storage as above.</p>
     <div class="settings-grid" id="settings-extra-keys"></div>
 
     <h2 style="font-size:1rem; margin-top: 1.5rem;">Daily Top Movers scheduler</h2>
@@ -2657,7 +2662,10 @@ async function parseScreenshots() {
 
 // ---------- SETTINGS TAB ----------
 const PROVIDER_LABELS = { anthropic: "Anthropic (Claude)", openai: "OpenAI (GPT)", gemini: "Google (Gemini)" };
-const EXTRA_KEY_LABELS = { stockgeist: "StockGeist (social sentiment agent)" };
+const EXTRA_KEY_LABELS = {
+  reddit_client_id: "Reddit Client ID (social sentiment agent)",
+  reddit_client_secret: "Reddit Client Secret (social sentiment agent)",
+};
 
 async function loadKeyGrid(labels, containerId) {
   const container = document.getElementById(containerId);

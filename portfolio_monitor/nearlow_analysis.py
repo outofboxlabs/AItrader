@@ -394,25 +394,33 @@ def _filings_lines(ticker: str, context: dict) -> list[str]:
     return lines
 
 
+_WINDOW_PHRASE = {
+    "hour": "in the past hour",
+    "today": "today",
+    "week": "in the past week",
+    "month": "in the past month",
+    "year": "in the past year",
+}
+
+
 def _social_sentiment_lines(ticker: str, context: dict) -> list[str]:
     candidate = context["candidate"]
     window = context.get("social_sentiment_window") or "today"
-    summary = context.get("social_sentiment")
+    window_phrase = _WINDOW_PHRASE.get(window, f"in the past {window}")
+    posts = context.get("social_sentiment")
     lines = [
         f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})",
-        f"Social-media message-volume/sentiment summary for the past {window} (via a third-party aggregator):",
+        f"Recent Reddit posts mentioning this ticker {window_phrase} "
+        f"(from r/wallstreetbets, r/stocks, r/investing, r/StockMarket, r/options):",
     ]
-    if summary:
-        lines.append(f"- Based on {summary.get('data_points')} data point(s) in this window.")
-        for key, stats in summary.items():
-            if key == "data_points" or not isinstance(stats, dict):
-                continue
+    if posts:
+        for p in posts:
             lines.append(
-                f"- {key}: avg {stats['avg']:.2f}, min {stats['min']:.2f}, max {stats['max']:.2f}, "
-                f"first {stats['first']:.2f}, last {stats['last']:.2f}"
+                f"- [{p.get('created_at')}] r/{p.get('subreddit')} "
+                f"({p.get('score')} upvotes, {p.get('num_comments')} comments): \"{p.get('title')}\""
             )
     else:
-        lines.append("(no social sentiment data available -- no API key saved, or nothing found for this window)")
+        lines.append("(no posts found -- no Reddit API credentials saved, or nothing posted in this window)")
     return lines
 
 
@@ -542,16 +550,17 @@ Respond with ONLY a JSON object, no other text: \
     "social_sentiment": (
         "Social Sentiment Analyst",
         """You are a social-media sentiment analyst. You're asked to \
-independently assess one stock given only aggregated social-media \
-message-volume and sentiment statistics for a specific recent time window \
-(from a third-party aggregator -- you do not see individual posts). Give a \
-short (60-100 word) read on what the volume/sentiment numbers suggest \
-about retail chatter right now -- rising or falling interest, and whether \
-the sentiment-like fields lean positive or negative. If no data was given \
-(no API key configured, or nothing in this window), say so plainly rather \
-than guessing. Retail social sentiment is noisy and often contrarian -- \
-do not treat volume or positivity alone as a signal of where the stock is \
-headed. Never say to buy, sell, or hold.
+independently assess one stock given only a list of recent Reddit posts \
+mentioning it (title, subreddit, upvotes, comment count, and when posted) \
+from a specific recent time window -- you do not see the comments \
+themselves, only the post-level data. Give a short (60-100 word) read on \
+what these posts suggest about retail sentiment and interest right now -- \
+rising or falling attention, and whether the tone of the titles/framing \
+leans bullish, bearish, or mixed. If no posts were given (no Reddit API \
+credentials configured, or nothing posted in this window), say so plainly \
+rather than guessing. Retail social sentiment is noisy and often \
+contrarian -- do not treat volume or tone alone as a signal of where the \
+stock is headed. Never say to buy, sell, or hold.
 
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",

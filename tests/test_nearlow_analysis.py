@@ -336,7 +336,9 @@ def test_run_expert_panel_gives_each_persona_only_its_own_tailored_data(monkeypa
         technical_indicators={"sma_20": 41.0, "price_vs_sma_20_pct": 2.4, "rsi_14": 55.0},
         financials={"fiscal_year_end": "2026-01-31", "revenue": 1000.0, "net_income": 100.0},
         filings=[{"form": "10-K", "filed": "2026-02-01", "report_date": "2025-12-31", "url": "https://sec.gov/x"}],
-        social_sentiment={"data_points": 3, "total_count": {"avg": 10.0, "min": 5.0, "max": 15.0, "first": 5.0, "last": 15.0}},
+        social_sentiment=[
+            {"title": "ACME to the moon", "subreddit": "wallstreetbets", "score": 120, "num_comments": 45, "created_at": "2026-09-14T12:00:00+00:00"}
+        ],
         social_sentiment_window="week",
     )
 
@@ -377,9 +379,10 @@ def test_run_expert_panel_gives_each_persona_only_its_own_tailored_data(monkeypa
     assert "https://sec.gov/x" in captured["filings"]
     assert "Acme misses on guidance" not in captured["filings"]
 
-    # Social sentiment: only the sentiment summary + window.
+    # Social sentiment: only the Reddit posts + window.
     assert "past week" in captured["social_sentiment"]
-    assert "total_count" in captured["social_sentiment"]
+    assert "ACME to the moon" in captured["social_sentiment"]
+    assert "wallstreetbets" in captured["social_sentiment"]
     assert "Market cap" not in captured["social_sentiment"]
     assert "Acme misses on guidance" not in captured["social_sentiment"]
 
@@ -391,8 +394,19 @@ def test_filings_lines_reports_when_none_found():
 
 def test_social_sentiment_lines_reports_when_no_data():
     lines = nla._social_sentiment_lines("ACME", _context(social_sentiment=None, social_sentiment_window="hour"))
-    assert any("no social sentiment data available" in line for line in lines)
+    assert any("no posts found" in line for line in lines)
     assert any("past hour" in line for line in lines)
+
+
+def test_social_sentiment_lines_lists_real_posts():
+    posts = [{"title": "ACME earnings beat", "subreddit": "stocks", "score": 50, "num_comments": 12, "created_at": "2026-09-14T08:00:00+00:00"}]
+    lines = nla._social_sentiment_lines("ACME", _context(social_sentiment=posts, social_sentiment_window="today"))
+    joined = "\n".join(lines)
+    assert "ACME earnings beat" in joined
+    assert "r/stocks" in joined
+    assert "50 upvotes" in joined
+    assert "12 comments" in joined
+    assert any("mentioning this ticker today" in line for line in lines)
 
 
 def test_technical_lines_reports_when_indicators_unavailable():

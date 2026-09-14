@@ -1166,7 +1166,7 @@ def test_nearlow_panel_returns_five_agent_takes(client, monkeypatch):
 def test_nearlow_panel_only_fetches_data_for_selected_personas(client, monkeypatch):
     """filings/social_sentiment/financials calls should only happen when
     the corresponding persona was actually picked -- no wasted SEC EDGAR
-    or StockGeist calls for agents the human didn't check."""
+    or Reddit calls for agents the human didn't check."""
     monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
     monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker, **kw: {"week_52_low": None, "actions": []})
     monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: [])
@@ -1176,7 +1176,7 @@ def test_nearlow_panel_only_fetches_data_for_selected_personas(client, monkeypat
     calls = {"financials": 0, "filings": 0, "sentiment": 0}
     monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: calls.__setitem__("financials", calls["financials"] + 1) or None)
     monkeypatch.setattr(app_mod.edgar, "get_recent_filings", lambda ticker: calls.__setitem__("filings", calls["filings"] + 1) or [])
-    monkeypatch.setattr(app_mod.social_sentiment, "get_message_metrics", lambda *a, **kw: calls.__setitem__("sentiment", calls["sentiment"] + 1) or None)
+    monkeypatch.setattr(app_mod.reddit_sentiment, "search_recent_posts", lambda *a, **kw: calls.__setitem__("sentiment", calls["sentiment"] + 1) or None)
 
     captured = {}
     monkeypatch.setattr(
@@ -1198,22 +1198,26 @@ def test_nearlow_panel_only_fetches_data_for_selected_personas(client, monkeypat
 
 
 def test_nearlow_panel_fetches_social_sentiment_with_requested_window(client, monkeypatch):
-    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
     monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker, **kw: {"week_52_low": None, "actions": []})
     monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: [])
     monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
-    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-stockgeist" if provider == "stockgeist" else "sk-ai")
+
+    def fake_resolve_api_key(provider, interactive=False):
+        return {"reddit_client_id": "id-123", "reddit_client_secret": "secret-456"}.get(provider, "sk-ai")
+
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", fake_resolve_api_key)
     _seed_nearlow_candidate()
 
     captured = {}
 
-    def fake_get_message_metrics(ticker, window, api_key, **kw):
+    def fake_search_recent_posts(ticker, window, client_id, client_secret, **kw):
         captured["ticker"] = ticker
         captured["window"] = window
-        captured["api_key"] = api_key
-        return {"time_series": [{"total_count": 5}]}
+        captured["client_id"] = client_id
+        captured["client_secret"] = client_secret
+        return [{"title": "ACME to the moon", "subreddit": "stocks", "score": 10, "num_comments": 2, "created_at": None}]
 
-    monkeypatch.setattr(app_mod.social_sentiment, "get_message_metrics", fake_get_message_metrics)
+    monkeypatch.setattr(app_mod.reddit_sentiment, "search_recent_posts", fake_search_recent_posts)
     monkeypatch.setattr(app_mod.nearlow_analysis, "run_expert_panel", lambda *a, **kw: [])
 
     res = client.post(
@@ -1224,7 +1228,8 @@ def test_nearlow_panel_fetches_social_sentiment_with_requested_window(client, mo
     assert res.status_code == 200
     assert captured["ticker"] == "ACME"
     assert captured["window"] == "month"
-    assert captured["api_key"] == "sk-stockgeist"
+    assert captured["client_id"] == "id-123"
+    assert captured["client_secret"] == "secret-456"
 
 
 # --- Stock Analysis tab (free-text ticker/company lookup) ---------------
