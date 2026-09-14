@@ -1093,15 +1093,16 @@ def test_analyze_nearlow_stock_rejects_unknown_provider(client, monkeypatch):
 
 def test_analyze_nearlow_stock_returns_expert_take(client, monkeypatch):
     monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
-    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker, **kw: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: [])
     monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
     _seed_nearlow_candidate()
 
     captured = {}
 
-    def fake_analyze(ticker, candidate, rating_timeline, headlines, macro_score, provider, model, api_key=None):
+    def fake_analyze(ticker, context, provider, model, api_key=None):
         captured["ticker"] = ticker
-        captured["candidate"] = candidate
+        captured["context"] = context
         return {"analysis": "About 200 words.", "verdict": "buy_opportunity", "disclaimer": "This is not investment advice.", "parse_error": False}
 
     monkeypatch.setattr(app_mod.nearlow_analysis, "analyze_expert_take", fake_analyze)
@@ -1112,12 +1113,13 @@ def test_analyze_nearlow_stock_returns_expert_take(client, monkeypatch):
     assert data["analysis"] == "About 200 words."
     assert data["verdict"] == "buy_opportunity"
     assert captured["ticker"] == "ACME"
-    assert captured["candidate"]["ticker"] == "ACME"
+    assert captured["context"]["candidate"]["ticker"] == "ACME"
 
 
 def test_analyze_nearlow_stock_handles_ai_failure(client, monkeypatch):
     monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
-    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker, **kw: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: [])
     monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
     _seed_nearlow_candidate()
 
@@ -1138,8 +1140,10 @@ def test_nearlow_panel_requires_ticker_to_be_a_current_candidate(client, monkeyp
 
 def test_nearlow_panel_returns_five_agent_takes(client, monkeypatch):
     monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
-    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker, **kw: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: [])
     monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
+    monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
     _seed_nearlow_candidate()
 
     fake_panel = [
@@ -1157,6 +1161,70 @@ def test_nearlow_panel_returns_five_agent_takes(client, monkeypatch):
     assert data["ticker"] == "ACME"
     assert len(data["panel"]) == 5
     assert {p["persona"] for p in data["panel"]} == {"technical", "fundamental", "news_sentiment", "ratings_timing", "macro_risk"}
+
+
+def test_nearlow_panel_only_fetches_data_for_selected_personas(client, monkeypatch):
+    """filings/social_sentiment/financials calls should only happen when
+    the corresponding persona was actually picked -- no wasted SEC EDGAR
+    or StockGeist calls for agents the human didn't check."""
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker, **kw: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: [])
+    monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
+    _seed_nearlow_candidate()
+
+    calls = {"financials": 0, "filings": 0, "sentiment": 0}
+    monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: calls.__setitem__("financials", calls["financials"] + 1) or None)
+    monkeypatch.setattr(app_mod.edgar, "get_recent_filings", lambda ticker: calls.__setitem__("filings", calls["filings"] + 1) or [])
+    monkeypatch.setattr(app_mod.social_sentiment, "get_message_metrics", lambda *a, **kw: calls.__setitem__("sentiment", calls["sentiment"] + 1) or None)
+
+    captured = {}
+    monkeypatch.setattr(
+        app_mod.nearlow_analysis,
+        "run_expert_panel",
+        lambda ticker, context, personas, provider, model, api_key=None: captured.update(context=context, personas=personas) or [],
+    )
+
+    res = client.post(
+        "/api/nearlow/panel",
+        data=json.dumps({"ticker": "ACME", "personas": ["technical", "news"]}),
+        content_type="application/json",
+    )
+    assert res.status_code == 200
+    assert calls == {"financials": 0, "filings": 0, "sentiment": 0}  # none of these personas were selected
+    assert captured["personas"] == ["technical", "news"]
+    assert "financials" not in captured["context"]
+    assert "filings" not in captured["context"]
+
+
+def test_nearlow_panel_fetches_social_sentiment_with_requested_window(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker, **kw: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: [])
+    monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-stockgeist" if provider == "stockgeist" else "sk-ai")
+    _seed_nearlow_candidate()
+
+    captured = {}
+
+    def fake_get_message_metrics(ticker, window, api_key, **kw):
+        captured["ticker"] = ticker
+        captured["window"] = window
+        captured["api_key"] = api_key
+        return {"time_series": [{"total_count": 5}]}
+
+    monkeypatch.setattr(app_mod.social_sentiment, "get_message_metrics", fake_get_message_metrics)
+    monkeypatch.setattr(app_mod.nearlow_analysis, "run_expert_panel", lambda *a, **kw: [])
+
+    res = client.post(
+        "/api/nearlow/panel",
+        data=json.dumps({"ticker": "ACME", "personas": ["social_sentiment"], "social_sentiment_window": "month"}),
+        content_type="application/json",
+    )
+    assert res.status_code == 200
+    assert captured["ticker"] == "ACME"
+    assert captured["window"] == "month"
+    assert captured["api_key"] == "sk-stockgeist"
 
 
 # --- Stock Analysis tab (free-text ticker/company lookup) ---------------
@@ -1221,14 +1289,15 @@ def test_analyze_stock_analysis_ticker_requires_ticker_and_candidate(client, mon
 
 def test_analyze_stock_analysis_ticker_returns_expert_take(client, monkeypatch):
     monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
-    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker, **kw: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: [])
     monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
 
     captured = {}
 
-    def fake_analyze(ticker, candidate, rating_timeline, headlines, macro_score, provider, model, api_key=None):
+    def fake_analyze(ticker, context, provider, model, api_key=None):
         captured["ticker"] = ticker
-        captured["candidate"] = candidate
+        captured["context"] = context
         return {"analysis": "About 200 words.", "verdict": "buy_opportunity", "disclaimer": "This is not investment advice.", "parse_error": False}
 
     monkeypatch.setattr(app_mod.nearlow_analysis, "analyze_expert_take", fake_analyze)
@@ -1242,12 +1311,13 @@ def test_analyze_stock_analysis_ticker_returns_expert_take(client, monkeypatch):
     body = res.get_json()
     assert body["analysis"] == "About 200 words."
     assert captured["ticker"] == "ORCL"
-    assert captured["candidate"]["ticker"] == "ORCL"
+    assert captured["context"]["candidate"]["ticker"] == "ORCL"
 
 
 def test_analyze_stock_analysis_ticker_handles_ai_failure(client, monkeypatch):
     monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
-    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker, **kw: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: [])
     monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
 
     def boom(*a, **kw):
@@ -1271,8 +1341,10 @@ def test_stock_analysis_panel_requires_ticker_and_candidate(client, monkeypatch)
 
 def test_stock_analysis_panel_returns_five_agent_takes(client, monkeypatch):
     monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
-    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker, **kw: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: [])
     monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
+    monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
 
     fake_panel = [
         {"persona": "technical", "label": "Technical Analyst", "take": "x", "stance": "bullish", "error": None},

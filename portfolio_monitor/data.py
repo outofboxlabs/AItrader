@@ -288,6 +288,63 @@ def get_stock_snapshot(ticker: str) -> Optional[dict]:
     return json.loads(json.dumps(snapshot, default=str))
 
 
+def get_financial_highlights(ticker: str) -> Optional[dict]:
+    """Latest-vs-prior-year revenue, net income, and gross margin from
+    yfinance's own annual income statement -- real reported figures, not
+    an AI guess. Returns None if the statement isn't available at all
+    (some tickers -- very new listings, some non-US filers -- don't have
+    one via yfinance) or has no usable columns.
+
+    Reads the DataFrame directly (not via as_dict=True) and converts each
+    fiscal-year column to a plain string itself -- to_dict() on a frame
+    with a DatetimeIndex/columns can leave pandas Timestamp objects as
+    dict keys, which json.dumps refuses to serialize even with a
+    default= fallback (default only rescues values, never keys)."""
+    t = yf.Ticker(ticker)
+    try:
+        income = t.get_income_stmt(freq="yearly")
+    except Exception:
+        return None
+    if income is None or income.empty or len(income.columns) == 0:
+        return None
+
+    columns = sorted(income.columns, reverse=True)  # most recent fiscal year end first
+    latest_col = columns[0]
+    prior_col = columns[1] if len(columns) > 1 else None
+
+    def _value(label, col):
+        if col is None or label not in income.index:
+            return None
+        v = income.loc[label, col]
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return None
+        return v if v == v else None  # filter NaN
+
+    latest_revenue = _value("Total Revenue", latest_col)
+    prior_revenue = _value("Total Revenue", prior_col)
+    latest_net_income = _value("Net Income", latest_col)
+    latest_gross_profit = _value("Gross Profit", latest_col)
+
+    highlights = {
+        "fiscal_year_end": latest_col.strftime("%Y-%m-%d"),
+        "revenue": latest_revenue,
+        "revenue_yoy_pct": (
+            (latest_revenue - prior_revenue) / prior_revenue * 100.0
+            if latest_revenue is not None and prior_revenue
+            else None
+        ),
+        "net_income": latest_net_income,
+        "gross_margin_pct": (
+            latest_gross_profit / latest_revenue * 100.0
+            if latest_gross_profit is not None and latest_revenue
+            else None
+        ),
+    }
+    return json.loads(json.dumps(highlights, default=str))
+
+
 def find_quote(chain: dict, expiry: str, option_type: str, strike: float) -> Optional[Quote]:
     """Look up a specific contract's quote inside a pulled chain dict."""
     expiry_data = chain.get("expiries", {}).get(expiry)

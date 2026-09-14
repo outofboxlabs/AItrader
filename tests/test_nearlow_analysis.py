@@ -23,6 +23,17 @@ def _candidate(**overrides):
     return base
 
 
+def _context(**overrides):
+    ctx = {
+        "candidate": _candidate(),
+        "rating_timeline": {"week_52_low": None, "actions": []},
+        "headlines": [],
+        "macro_score": None,
+    }
+    ctx.update(overrides)
+    return ctx
+
+
 # --- get_rating_timeline -----------------------------------------------
 
 
@@ -74,6 +85,21 @@ def test_get_rating_timeline_finds_52w_low_and_annotates_actions(monkeypatch):
     assert result["actions"][1]["pct_above_low_at_rating"] == pytest.approx(150.0)  # was performing well at the time
 
 
+def test_get_rating_timeline_reuses_passed_in_daily_history(monkeypatch):
+    """When the caller already fetched daily history (e.g. for the
+    technical persona), get_rating_timeline should use it directly
+    instead of pulling it a second time."""
+    calls = []
+    monkeypatch.setattr(nla.data_mod, "get_daily_price_history", lambda ticker, **kw: calls.append(ticker) or [])
+    monkeypatch.setattr(nla.yf, "Ticker", lambda ticker: type("T", (), {"get_upgrades_downgrades": lambda self, as_dict=False: None})())
+
+    daily = [{"date": "2026-01-01", "close": 40.0}]
+    result = nla.get_rating_timeline("ACME", daily_history=daily)
+
+    assert calls == []  # never called get_daily_price_history itself
+    assert result["week_52_low"] == {"date": "2026-01-01", "close": 40.0}
+
+
 def test_get_rating_timeline_handles_no_price_history(monkeypatch):
     monkeypatch.setattr(nla.data_mod, "get_daily_price_history", lambda ticker, **kw: [])
 
@@ -116,25 +142,27 @@ def test_get_rating_timeline_caps_to_10_most_recent_actions(monkeypatch):
 
 
 def test_build_context_user_message_includes_key_facts():
-    candidate = _candidate()
-    rating_timeline = {
-        "week_52_low": {"date": "2026-02-01", "close": 40.0},
-        "actions": [
-            {
-                "date": "2026-02-15",
-                "firm": "Small Shop",
-                "to_grade": "Sell",
-                "from_grade": "Buy",
-                "action": "down",
-                "before_52w_low": False,
-                "price_at_rating": 40.0,
-                "pct_move_since_rating": 50.0,
-                "pct_above_low_at_rating": 0.0,
-            }
-        ],
-    }
-    headlines = [{"title": "Acme misses on guidance", "published_at": None}]
-    message = nla.build_context_user_message("ACME", candidate, rating_timeline, headlines, 65.0)
+    context = _context(
+        rating_timeline={
+            "week_52_low": {"date": "2026-02-01", "close": 40.0},
+            "actions": [
+                {
+                    "date": "2026-02-15",
+                    "firm": "Small Shop",
+                    "to_grade": "Sell",
+                    "from_grade": "Buy",
+                    "action": "down",
+                    "before_52w_low": False,
+                    "price_at_rating": 40.0,
+                    "pct_move_since_rating": 50.0,
+                    "pct_above_low_at_rating": 0.0,
+                }
+            ],
+        },
+        headlines=[{"title": "Acme misses on guidance", "published_at": None}],
+        macro_score=65.0,
+    )
+    message = nla.build_context_user_message("ACME", context)
 
     assert "ACME" in message
     assert "40.0" in message  # 52-week low close appears
@@ -143,6 +171,13 @@ def test_build_context_user_message_includes_key_facts():
     assert "0% above what would become its 52-week low when issued" in message
     assert "Acme misses on guidance" in message
     assert "65.0/100" in message
+
+
+def test_build_context_user_message_handles_missing_data():
+    message = nla.build_context_user_message("ACME", _context())
+    assert "unknown (price history unavailable)" in message
+    assert "(none found)" in message
+    assert "not available" in message
 
 
 def test_format_rating_action_line_states_pct_above_low_plainly():
@@ -170,15 +205,6 @@ def test_format_rating_action_line_omits_pct_above_low_when_missing():
     assert "above what would become its 52-week low" not in line
 
 
-def test_build_context_user_message_handles_missing_data():
-    candidate = _candidate()
-    rating_timeline = {"week_52_low": None, "actions": []}
-    message = nla.build_context_user_message("ACME", candidate, rating_timeline, [], None)
-    assert "unknown (price history unavailable)" in message
-    assert "(none found)" in message
-    assert "not available" in message
-
-
 # --- analyze_expert_take --------------------------------------------------
 
 
@@ -192,9 +218,7 @@ def test_analyze_expert_take_calls_ai_client(monkeypatch):
 
     monkeypatch.setattr(nla.ai_client, "call_provider", fake_call_provider)
 
-    result = nla.analyze_expert_take(
-        "ACME", _candidate(), {"week_52_low": None, "actions": []}, [], None, "anthropic", "claude-haiku-4-5", api_key="sk-test"
-    )
+    result = nla.analyze_expert_take("ACME", _context(), "anthropic", "claude-haiku-4-5", api_key="sk-test")
 
     assert captured["provider"] == "anthropic"
     assert "ACME" in captured["user_message"]
@@ -206,9 +230,7 @@ def test_analyze_expert_take_calls_ai_client(monkeypatch):
 
 def test_analyze_expert_take_degrades_on_unparseable_response(monkeypatch):
     monkeypatch.setattr(nla.ai_client, "call_provider", lambda *a, **kw: "not valid json")
-    result = nla.analyze_expert_take(
-        "ACME", _candidate(), {"week_52_low": None, "actions": []}, [], None, "anthropic", "claude-haiku-4-5", api_key="sk-test"
-    )
+    result = nla.analyze_expert_take("ACME", _context(), "anthropic", "claude-haiku-4-5", api_key="sk-test")
     assert result["parse_error"] is True
     assert result["verdict"] == "mixed"
     assert result["analysis"] == "not valid json"
@@ -220,15 +242,15 @@ def test_analyze_expert_take_propagates_api_failure(monkeypatch):
 
     monkeypatch.setattr(nla.ai_client, "call_provider", boom)
     with pytest.raises(RuntimeError):
-        nla.analyze_expert_take(
-            "ACME", _candidate(), {"week_52_low": None, "actions": []}, [], None, "anthropic", "claude-haiku-4-5", api_key="sk-test"
-        )
+        nla.analyze_expert_take("ACME", _context(), "anthropic", "claude-haiku-4-5", api_key="sk-test")
 
 
 # --- run_expert_panel -----------------------------------------------------
 
+ALL_PERSONAS = ["technical", "fundamental", "news", "ratings_timing", "macro_risk", "filings", "social_sentiment"]
 
-def test_run_expert_panel_calls_all_five_personas(monkeypatch):
+
+def test_run_expert_panel_calls_only_selected_personas(monkeypatch):
     calls = []
 
     def fake_call_provider(provider, system_prompt, user_message, model, api_key=None, max_tokens=800):
@@ -237,17 +259,28 @@ def test_run_expert_panel_calls_all_five_personas(monkeypatch):
 
     monkeypatch.setattr(nla.ai_client, "call_provider", fake_call_provider)
 
-    panel = nla.run_expert_panel(
-        "ACME", _candidate(), {"week_52_low": None, "actions": []}, [], None, "anthropic", "claude-haiku-4-5", api_key="sk-test"
-    )
+    panel = nla.run_expert_panel("ACME", _context(), ["technical", "news"], "anthropic", "claude-haiku-4-5", api_key="sk-test")
 
-    assert len(panel) == 5
-    assert len(calls) == 5
-    assert {p["persona"] for p in panel} == {"technical", "fundamental", "news_sentiment", "ratings_timing", "macro_risk"}
+    assert len(panel) == 2
+    assert len(calls) == 2
+    assert {p["persona"] for p in panel} == {"technical", "news"}
     for p in panel:
         assert p["take"] == "Some take."
         assert p["stance"] == "bullish"
         assert p["error"] is None
+
+
+def test_run_expert_panel_supports_all_seven_personas(monkeypatch):
+    monkeypatch.setattr(nla.ai_client, "call_provider", lambda *a, **kw: '{"take": "x", "stance": "neutral"}')
+    panel = nla.run_expert_panel("ACME", _context(), ALL_PERSONAS, "anthropic", "claude-haiku-4-5", api_key="sk-test")
+    assert {p["persona"] for p in panel} == set(ALL_PERSONAS)
+
+
+def test_run_expert_panel_skips_unknown_persona_keys(monkeypatch):
+    monkeypatch.setattr(nla.ai_client, "call_provider", lambda *a, **kw: '{"take": "x", "stance": "neutral"}')
+    panel = nla.run_expert_panel("ACME", _context(), ["technical", "not-a-real-persona"], "anthropic", "claude-haiku-4-5", api_key="sk-test")
+    assert len(panel) == 1
+    assert panel[0]["persona"] == "technical"
 
 
 def test_run_expert_panel_isolates_one_persona_failure(monkeypatch):
@@ -258,11 +291,9 @@ def test_run_expert_panel_isolates_one_persona_failure(monkeypatch):
 
     monkeypatch.setattr(nla.ai_client, "call_provider", flaky_call_provider)
 
-    panel = nla.run_expert_panel(
-        "ACME", _candidate(), {"week_52_low": None, "actions": []}, [], None, "anthropic", "claude-haiku-4-5", api_key="sk-test"
-    )
+    panel = nla.run_expert_panel("ACME", _context(), ALL_PERSONAS, "anthropic", "claude-haiku-4-5", api_key="sk-test")
 
-    assert len(panel) == 5  # the other 4 still came back
+    assert len(panel) == len(ALL_PERSONAS)  # the others still came back
     failed = next(p for p in panel if p["persona"] == "ratings_timing")
     assert failed["error"] == "rate limited"
     assert failed["take"] is None
@@ -271,9 +302,9 @@ def test_run_expert_panel_isolates_one_persona_failure(monkeypatch):
 
 
 def test_run_expert_panel_gives_each_persona_only_its_own_tailored_data(monkeypatch):
-    """Each of the 5 is a genuinely separate inquiry -- it should only see
+    """Each persona is a genuinely separate inquiry -- it should only see
     the slice of data relevant to its own question, not the full shared
-    context repeated five times with a different persona label."""
+    context repeated for every persona with a different label."""
     captured = {}
 
     def fake_call_provider(provider, system_prompt, user_message, model, api_key=None, max_tokens=800):
@@ -284,48 +315,91 @@ def test_run_expert_panel_gives_each_persona_only_its_own_tailored_data(monkeypa
 
     monkeypatch.setattr(nla.ai_client, "call_provider", fake_call_provider)
 
-    rating_timeline = {
-        "week_52_low": {"date": "2026-02-01", "close": 40.0},
-        "actions": [
-            {
-                "date": "2026-02-15",
-                "firm": "Small Shop",
-                "to_grade": "Sell",
-                "from_grade": "Buy",
-                "action": "down",
-                "before_52w_low": False,
-                "price_at_rating": 40.0,
-                "pct_move_since_rating": 50.0,
-            }
-        ],
-    }
-    headlines = [{"title": "Acme misses on guidance", "published_at": None}]
+    context = _context(
+        rating_timeline={
+            "week_52_low": {"date": "2026-02-01", "close": 40.0},
+            "actions": [
+                {
+                    "date": "2026-02-15",
+                    "firm": "Small Shop",
+                    "to_grade": "Sell",
+                    "from_grade": "Buy",
+                    "action": "down",
+                    "before_52w_low": False,
+                    "price_at_rating": 40.0,
+                    "pct_move_since_rating": 50.0,
+                }
+            ],
+        },
+        headlines=[{"title": "Acme misses on guidance", "published_at": None}],
+        macro_score=65.0,
+        technical_indicators={"sma_20": 41.0, "price_vs_sma_20_pct": 2.4, "rsi_14": 55.0},
+        financials={"fiscal_year_end": "2026-01-31", "revenue": 1000.0, "net_income": 100.0},
+        filings=[{"form": "10-K", "filed": "2026-02-01", "report_date": "2025-12-31", "url": "https://sec.gov/x"}],
+        social_sentiment={"data_points": 3, "total_count": {"avg": 10.0, "min": 5.0, "max": 15.0, "first": 5.0, "last": 15.0}},
+        social_sentiment_window="week",
+    )
 
-    nla.run_expert_panel("ACME", _candidate(), rating_timeline, headlines, 65.0, "anthropic", "claude-haiku-4-5", api_key="sk-test")
+    nla.run_expert_panel("ACME", context, ALL_PERSONAS, "anthropic", "claude-haiku-4-5", api_key="sk-test")
 
-    # Technical only gets price/range -- no headlines, no ratings, no macro.
+    # Technical: price/range + real indicators -- no headlines, no market cap, no macro.
+    assert "52-week range" in captured["technical"]
+    assert "SMA(20)" in captured["technical"]
+    assert "RSI(14)" in captured["technical"]
     assert "Acme misses on guidance" not in captured["technical"]
     assert "Market cap" not in captured["technical"]
     assert "macro gate score" not in captured["technical"]
-    assert "52-week range" in captured["technical"]
 
-    # News/sentiment only gets headlines -- no price range, no ratings.
-    assert "Acme misses on guidance" in captured["news_sentiment"]
-    assert "52-week range" not in captured["news_sentiment"]
-    assert "Market cap" not in captured["news_sentiment"]
+    # News: only headlines.
+    assert "Acme misses on guidance" in captured["news"]
+    assert "52-week range" not in captured["news"]
+    assert "Market cap" not in captured["news"]
 
-    # Ratings-timing only gets the rating timeline -- no headlines, no market cap.
+    # Ratings-timing: only the rating timeline.
     assert "Small Shop" in captured["ratings_timing"]
     assert "Acme misses on guidance" not in captured["ratings_timing"]
     assert "Market cap" not in captured["ratings_timing"]
 
-    # Fundamental only gets market cap/target/ratings -- no headlines, no price range.
+    # Fundamental: market cap/target/ratings + real financials -- no headlines, no price range.
     assert "Market cap" in captured["fundamental"]
+    assert "Revenue: 1,000" in captured["fundamental"]
     assert "Acme misses on guidance" not in captured["fundamental"]
     assert "52-week range" not in captured["fundamental"]
 
-    # Macro only gets the macro score + distance from low -- nothing else.
+    # Macro: only the macro score + distance from low.
     assert "65.0/100" in captured["macro_risk"]
     assert "Acme misses on guidance" not in captured["macro_risk"]
     assert "Market cap" not in captured["macro_risk"]
     assert "Small Shop" not in captured["macro_risk"]
+
+    # Filings: only the filings list.
+    assert "10-K" in captured["filings"]
+    assert "https://sec.gov/x" in captured["filings"]
+    assert "Acme misses on guidance" not in captured["filings"]
+
+    # Social sentiment: only the sentiment summary + window.
+    assert "past week" in captured["social_sentiment"]
+    assert "total_count" in captured["social_sentiment"]
+    assert "Market cap" not in captured["social_sentiment"]
+    assert "Acme misses on guidance" not in captured["social_sentiment"]
+
+
+def test_filings_lines_reports_when_none_found():
+    lines = nla._filings_lines("ACME", _context(filings=[]))
+    assert any("none found" in line for line in lines)
+
+
+def test_social_sentiment_lines_reports_when_no_data():
+    lines = nla._social_sentiment_lines("ACME", _context(social_sentiment=None, social_sentiment_window="hour"))
+    assert any("no social sentiment data available" in line for line in lines)
+    assert any("past hour" in line for line in lines)
+
+
+def test_technical_lines_reports_when_indicators_unavailable():
+    lines = nla._price_range_lines("ACME", _context(technical_indicators={}))
+    assert any("not enough price history available" in line for line in lines)
+
+
+def test_fundamental_lines_reports_when_financials_unavailable():
+    lines = nla._fundamental_lines("ACME", _context(financials=None))
+    assert any("not available for this ticker" in line for line in lines)

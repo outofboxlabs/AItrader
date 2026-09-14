@@ -147,6 +147,19 @@ NEARLOW_MAX_WORKERS = 20
 FOREX_CALENDAR_FEED_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 FOREX_CALENDAR_MIN_REFRESH_SECONDS = 300
 
+# SEC EDGAR requires a descriptive User-Agent identifying the requester
+# (https://www.sec.gov/os/webmaster-faq#developers) -- requests without
+# one are more likely to be rate-limited or blocked. This is a personal,
+# non-commercial tool, so there's no company name to give; override with
+# your own contact info via the EDGAR_USER_AGENT env var if you want to
+# be more identifiable to SEC.
+EDGAR_USER_AGENT = os.environ.get("EDGAR_USER_AGENT", "AItrader personal portfolio tool (no-reply@example.com)")
+
+# StockGeist (social-media sentiment aggregator) -- see portfolio_monitor/
+# social_sentiment.py. Endpoint/param names are best-effort from public
+# docs/source, not live-verified against a real account.
+STOCKGEIST_BASE_URL = "https://api.stockgeist.ai/"
+
 # Storage
 DB_PATH = _here("portfolio.db")
 SNAPSHOTS_DIR = _here("snapshots")

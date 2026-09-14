@@ -324,3 +324,73 @@ def test_get_stock_snapshot_degrades_gracefully_when_ratings_and_targets_fail(mo
     assert snap["target_mean"] is None
     assert snap["target_upside_pct"] is None
     assert snap["price"] == 150.0
+
+
+# --- get_financial_highlights ---------------------------------------------
+
+
+def test_get_financial_highlights_computes_yoy_and_margin(monkeypatch):
+    income = pd.DataFrame(
+        {
+            pd.Timestamp("2026-01-31"): {"Total Revenue": 1_100.0, "Net Income": 200.0, "Gross Profit": 550.0},
+            pd.Timestamp("2025-01-31"): {"Total Revenue": 1_000.0, "Net Income": 150.0, "Gross Profit": 500.0},
+        }
+    )
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def get_income_stmt(self, freq="yearly"):
+            return income
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+
+    highlights = data_mod.get_financial_highlights("ACME")
+    assert highlights["fiscal_year_end"] == "2026-01-31"
+    assert highlights["revenue"] == 1_100.0
+    assert highlights["revenue_yoy_pct"] == pytest.approx(10.0)
+    assert highlights["net_income"] == 200.0
+    assert highlights["gross_margin_pct"] == pytest.approx(50.0)
+
+
+def test_get_financial_highlights_handles_single_year_no_yoy(monkeypatch):
+    income = pd.DataFrame({pd.Timestamp("2026-01-31"): {"Total Revenue": 1_000.0, "Net Income": 100.0}})
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def get_income_stmt(self, freq="yearly"):
+            return income
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+
+    highlights = data_mod.get_financial_highlights("ACME")
+    assert highlights["revenue"] == 1_000.0
+    assert highlights["revenue_yoy_pct"] is None
+    assert highlights["gross_margin_pct"] is None  # no Gross Profit row at all
+
+
+def test_get_financial_highlights_returns_none_when_statement_unavailable(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def get_income_stmt(self, freq="yearly"):
+            raise RuntimeError("no data")
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    assert data_mod.get_financial_highlights("ACME") is None
+
+
+def test_get_financial_highlights_returns_none_when_empty(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def get_income_stmt(self, freq="yearly"):
+            return pd.DataFrame()
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    assert data_mod.get_financial_highlights("ACME") is None

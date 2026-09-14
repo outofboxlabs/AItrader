@@ -27,7 +27,7 @@ from typing import Optional
 from flask import Flask, jsonify, render_template_string, request
 
 import config
-from portfolio_monitor import credentials, data, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_analysis, nearlow_screener, news, pipeline, scheduler, vision
+from portfolio_monitor import credentials, data, edgar, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_analysis, nearlow_screener, news, pipeline, scheduler, social_sentiment, technical_indicators, vision
 from portfolio_monitor import db as db_mod
 from portfolio_monitor.models import Position
 
@@ -354,11 +354,48 @@ def _load_nearlow_candidate(ticker: str) -> Optional[dict]:
     return next((c for c in candidates if c.get("ticker") == ticker), None)
 
 
-def _nearlow_analysis_context(ticker: str) -> dict:
-    rating_timeline = nearlow_analysis.get_rating_timeline(ticker)
+DEFAULT_PANEL_PERSONAS = ["technical", "fundamental", "news", "ratings_timing", "macro_risk"]
+
+
+def _build_agent_context(
+    ticker: str,
+    candidate: dict,
+    selected_personas: Optional[list[str]] = None,
+    social_sentiment_window: str = "today",
+) -> dict:
+    """Assembles the shared context dict nearlow_analysis's expert-take
+    and panel functions read from. `selected_personas` (the panel-only
+    case; leave as None for the single expert take) lets this skip
+    network calls a persona that wasn't picked doesn't need -- no SEC
+    EDGAR call unless "filings" is selected, no StockGeist call unless
+    "social_sentiment" is selected. daily_history is fetched once and
+    reused for both the rating timeline and the technical indicators
+    rather than pulled twice."""
+    selected = set(selected_personas or [])
+    daily_history = data.get_daily_price_history(ticker)
+    rating_timeline = nearlow_analysis.get_rating_timeline(ticker, daily_history=daily_history)
     headlines = news.fetch_recent_headlines(ticker, window_days=5)
     macro_score = _latest_macro_score()
-    return {"rating_timeline": rating_timeline, "headlines": headlines, "macro_score": macro_score}
+
+    context = {
+        "candidate": candidate,
+        "rating_timeline": rating_timeline,
+        "headlines": headlines,
+        "macro_score": macro_score,
+        "technical_indicators": technical_indicators.compute_technical_snapshot(daily_history),
+    }
+
+    if "fundamental" in selected:
+        context["financials"] = data.get_financial_highlights(ticker)
+    if "filings" in selected:
+        context["filings"] = edgar.get_recent_filings(ticker)
+    if "social_sentiment" in selected:
+        context["social_sentiment_window"] = social_sentiment_window
+        stockgeist_key = credentials.resolve_api_key("stockgeist", interactive=False)
+        raw = social_sentiment.get_message_metrics(ticker, social_sentiment_window, stockgeist_key) if stockgeist_key else None
+        context["social_sentiment"] = social_sentiment.summarize_message_metrics(raw)
+
+    return context
 
 
 @app.route("/api/nearlow/analyze", methods=["POST"])
@@ -383,11 +420,9 @@ def analyze_nearlow_stock():
         return jsonify({"error": "No saved API key for any provider. Add one in the Settings tab first."}), 400
     model = body.get("model") or NEWS_DEFAULT_MODEL[provider]
 
-    ctx = _nearlow_analysis_context(ticker)
+    ctx = _build_agent_context(ticker, candidate)
     try:
-        result = nearlow_analysis.analyze_expert_take(
-            ticker, candidate, ctx["rating_timeline"], ctx["headlines"], ctx["macro_score"], provider, model, api_key=api_key
-        )
+        result = nearlow_analysis.analyze_expert_take(ticker, ctx, provider, model, api_key=api_key)
     except Exception as exc:
         traceback.print_exc()
         return jsonify({"error": str(exc)}), 502
@@ -396,13 +431,13 @@ def analyze_nearlow_stock():
 
 @app.route("/api/nearlow/panel", methods=["POST"])
 def nearlow_expert_panel():
-    """5-persona AI panel discussion (technical, fundamental, news,
-    analyst-ratings-timing, macro/risk) for one Near 52W Low candidate --
-    makes 5 sequential AI calls, so this only runs when a human explicitly
-    clicks "Generate 5 AI Agents", never automatically. Each persona's
-    failure is isolated to its own entry rather than failing the whole
-    request, so this always returns 200 once the ticker/provider checks
-    pass."""
+    """Selectable-agent panel (technical, fundamental, news,
+    analyst-ratings-timing, macro/risk, SEC filings, social sentiment)
+    for one Near 52W Low candidate -- makes one AI call per persona the
+    human checked, so this only runs when a human explicitly clicks
+    "Run selected agents", never automatically. Each persona's failure is
+    isolated to its own entry rather than failing the whole request, so
+    this always returns 200 once the ticker/provider checks pass."""
     body = request.get_json(force=True)
     ticker = (body.get("ticker") or "").strip().upper()
     if not ticker:
@@ -412,6 +447,9 @@ def nearlow_expert_panel():
     if candidate is None:
         return jsonify({"error": f"{ticker} is not in the current Near 52W Low results. Run the screen first."}), 400
 
+    selected_personas = body.get("personas") or DEFAULT_PANEL_PERSONAS
+    social_sentiment_window = body.get("social_sentiment_window") or "today"
+
     requested_provider = body.get("provider")
     if requested_provider and requested_provider not in PROVIDERS:
         return jsonify({"error": f"unknown provider {requested_provider!r}"}), 400
@@ -420,10 +458,8 @@ def nearlow_expert_panel():
         return jsonify({"error": "No saved API key for any provider. Add one in the Settings tab first."}), 400
     model = body.get("model") or NEWS_DEFAULT_MODEL[provider]
 
-    ctx = _nearlow_analysis_context(ticker)
-    panel = nearlow_analysis.run_expert_panel(
-        ticker, candidate, ctx["rating_timeline"], ctx["headlines"], ctx["macro_score"], provider, model, api_key=api_key
-    )
+    ctx = _build_agent_context(ticker, candidate, selected_personas, social_sentiment_window)
+    panel = nearlow_analysis.run_expert_panel(ticker, ctx, selected_personas, provider, model, api_key=api_key)
     return jsonify({"ticker": ticker, "panel": panel})
 
 
@@ -476,11 +512,9 @@ def analyze_stock_analysis_ticker():
         return jsonify({"error": "No saved API key for any provider. Add one in the Settings tab first."}), 400
     model = body.get("model") or NEWS_DEFAULT_MODEL[provider]
 
-    ctx = _nearlow_analysis_context(ticker)
+    ctx = _build_agent_context(ticker, candidate)
     try:
-        result = nearlow_analysis.analyze_expert_take(
-            ticker, candidate, ctx["rating_timeline"], ctx["headlines"], ctx["macro_score"], provider, model, api_key=api_key
-        )
+        result = nearlow_analysis.analyze_expert_take(ticker, ctx, provider, model, api_key=api_key)
     except Exception as exc:
         traceback.print_exc()
         return jsonify({"error": str(exc)}), 502
@@ -489,13 +523,16 @@ def analyze_stock_analysis_ticker():
 
 @app.route("/api/stock-analysis/panel", methods=["POST"])
 def stock_analysis_panel():
-    """Same 5-persona panel as the Near 52W Low tab, for any ticker
-    resolved via /api/stock-analysis/resolve."""
+    """Same selectable-agent panel as the Near 52W Low tab, for any
+    ticker resolved via /api/stock-analysis/resolve."""
     body = request.get_json(force=True)
     ticker = (body.get("ticker") or "").strip().upper()
     candidate = body.get("candidate")
     if not ticker or not isinstance(candidate, dict):
         return jsonify({"error": "ticker and candidate required"}), 400
+
+    selected_personas = body.get("personas") or DEFAULT_PANEL_PERSONAS
+    social_sentiment_window = body.get("social_sentiment_window") or "today"
 
     requested_provider = body.get("provider")
     if requested_provider and requested_provider not in PROVIDERS:
@@ -505,10 +542,8 @@ def stock_analysis_panel():
         return jsonify({"error": "No saved API key for any provider. Add one in the Settings tab first."}), 400
     model = body.get("model") or NEWS_DEFAULT_MODEL[provider]
 
-    ctx = _nearlow_analysis_context(ticker)
-    panel = nearlow_analysis.run_expert_panel(
-        ticker, candidate, ctx["rating_timeline"], ctx["headlines"], ctx["macro_score"], provider, model, api_key=api_key
-    )
+    ctx = _build_agent_context(ticker, candidate, selected_personas, social_sentiment_window)
+    panel = nearlow_analysis.run_expert_panel(ticker, ctx, selected_personas, provider, model, api_key=api_key)
     return jsonify({"ticker": ticker, "panel": panel})
 
 
@@ -911,12 +946,15 @@ def has_key():
     return jsonify({"has_key": bool(key)})
 
 
+SAVABLE_CREDENTIAL_KEYS = PROVIDERS + ["stockgeist"]
+
+
 @app.route("/api/settings/api-key", methods=["POST"])
 def save_api_key():
     body = request.get_json(force=True)
     provider = body.get("provider")
     api_key = body.get("api_key")
-    if provider not in PROVIDERS:
+    if provider not in SAVABLE_CREDENTIAL_KEYS:
         return jsonify({"error": "unknown provider"}), 400
     if not api_key:
         return jsonify({"error": "api_key required"}), 400
@@ -1289,6 +1327,10 @@ PAGE_TEMPLATE = """<!doctype html>
     <h2 style="font-size:1rem;">AI provider API keys</h2>
     <p class="muted">Saved locally to .credentials.json on this machine -- never committed to git, never sent anywhere but the provider you choose.</p>
     <div class="settings-grid" id="settings-keys"></div>
+
+    <h2 style="font-size:1rem; margin-top: 1.5rem;">Other data source keys</h2>
+    <p class="muted">Optional -- only needed for agents that use them (e.g. the Social Sentiment agent needs a free StockGeist key). Same local storage as above.</p>
+    <div class="settings-grid" id="settings-extra-keys"></div>
 
     <h2 style="font-size:1rem; margin-top: 1.5rem;">Daily Top Movers scheduler</h2>
     <p class="muted" id="settings-scheduler-info">loading...</p>
@@ -2054,7 +2096,60 @@ document.getElementById("nl-head").addEventListener("click", (e) => {
   if (th) sortNearlow(th.dataset.sort);
 });
 
-// ---------- NEAR 52W LOW: per-stock expert take + 5-agent panel ----------
+// ---------- Selectable-agent panel picker (shared: Near 52W Low + Stock Analysis) ----------
+
+const AGENT_LABELS = {
+  technical: "Technical (indicators)",
+  fundamental: "Fundamental (financials)",
+  news: "News",
+  ratings_timing: "Analyst-Ratings Timing",
+  macro_risk: "Macro & Risk",
+  filings: "SEC Filings",
+  social_sentiment: "Social Sentiment",
+};
+const DEFAULT_SELECTED_AGENTS = ["technical", "fundamental", "news", "ratings_timing", "macro_risk"];
+
+function agentPickerHtml(scopeId, runOnClick) {
+  const checkboxes = Object.entries(AGENT_LABELS).map(([key, label]) => `
+    <label style="margin-right:12px; white-space:nowrap; font-size:0.8rem;">
+      <input type="checkbox" class="agent-checkbox" data-scope="${scopeId}" value="${key}" ${DEFAULT_SELECTED_AGENTS.includes(key) ? "checked" : ""}
+        onchange="toggleSentimentWindowVisibility('${scopeId}')"> ${escapeHtml(label)}
+    </label>`).join("");
+  return `
+    <div>
+      <div class="muted" style="font-size:0.75rem; margin-bottom:4px;">Pick which agents to run:</div>
+      <div>${checkboxes}</div>
+      <div id="${scopeId}-sentiment-window-row" style="margin-top:6px; display:none;">
+        <label class="muted" style="font-size:0.75rem;">Social sentiment window:
+          <select id="${scopeId}-sentiment-window">
+            <option value="hour">Past hour</option>
+            <option value="today" selected>Today</option>
+            <option value="week">Past week</option>
+            <option value="month">Past month</option>
+            <option value="year">Past year</option>
+          </select>
+        </label>
+      </div>
+      <button class="secondary" style="font-size:0.75rem; padding:4px 10px; margin-top:8px;" onclick="${runOnClick}">Run selected agents</button>
+    </div>`;
+}
+
+function collectSelectedPersonas(scopeId) {
+  return [...document.querySelectorAll(`.agent-checkbox[data-scope="${scopeId}"]:checked`)].map(cb => cb.value);
+}
+
+function collectSentimentWindow(scopeId) {
+  const el = document.getElementById(`${scopeId}-sentiment-window`);
+  return el ? el.value : "today";
+}
+
+function toggleSentimentWindowVisibility(scopeId) {
+  const checkbox = document.querySelector(`.agent-checkbox[data-scope="${scopeId}"][value="social_sentiment"]`);
+  const row = document.getElementById(`${scopeId}-sentiment-window-row`);
+  if (row) row.style.display = (checkbox && checkbox.checked) ? "block" : "none";
+}
+
+// ---------- NEAR 52W LOW: per-stock expert take + selectable-agent panel ----------
 
 const nearlowExpert = {};
 const nearlowPanel = {};
@@ -2129,7 +2224,7 @@ function renderNearlowDetail(ticker) {
   const panel = nearlowPanel[ticker];
   const panelHtml = panel
     ? panel.map(renderNearlowPanelCard).join("")
-    : `<button class="secondary" style="font-size:0.75rem; padding:4px 10px;" onclick="loadNearlowPanel('${ticker}')">Generate 5 AI Agents</button>`;
+    : agentPickerHtml(`nl-${ticker}`, `loadNearlowPanel('${ticker}')`);
 
   container.innerHTML = `
     <div style="padding:10px 0 14px; max-width:720px;">
@@ -2142,15 +2237,19 @@ function renderNearlowDetail(ticker) {
 }
 
 async function loadNearlowPanel(ticker) {
+  const scopeId = `nl-${ticker}`;
+  const personas = collectSelectedPersonas(scopeId);
+  const socialSentimentWindow = collectSentimentWindow(scopeId);
   const statusEl = document.getElementById(`nl-panel-status-${ticker}`);
   const cardsEl = document.getElementById(`nl-panel-cards-${ticker}`);
-  statusEl.innerHTML = '<span class="spinner"></span> Running 5 AI agents (technical, fundamental, news, ratings-timing, macro)\\u2014this makes 5 AI calls and can take a bit.';
+  if (personas.length === 0) { statusEl.textContent = "Pick at least one agent to run."; return; }
+  statusEl.innerHTML = `<span class="spinner"></span> Running ${personas.length} agent(s)\\u2014this makes ${personas.length} AI call(s) and can take a bit.`;
   cardsEl.innerHTML = "";
   try {
     const res = await fetch("/api/nearlow/panel", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ticker }),
+      body: JSON.stringify({ ticker, personas, social_sentiment_window: socialSentimentWindow }),
     });
     const resData = await res.json();
     if (!res.ok) { statusEl.textContent = "Error: " + resData.error; return; }
@@ -2218,7 +2317,7 @@ function renderStockAnalysisResult() {
   if (saExpert) {
     panelHtml = saPanel
       ? saPanel.map(renderNearlowPanelCard).join("")
-      : '<button class="secondary" style="font-size:0.75rem; padding:4px 10px;" onclick="runStockAnalysisPanel()">Generate 5 AI Agents</button>';
+      : agentPickerHtml("sa", "runStockAnalysisPanel()");
   }
 
   resultEl.innerHTML = `
@@ -2254,15 +2353,18 @@ async function analyzeStockAnalysisTicker() {
 }
 
 async function runStockAnalysisPanel() {
+  const personas = collectSelectedPersonas("sa");
+  const socialSentimentWindow = collectSentimentWindow("sa");
   const statusEl = document.getElementById("sa-panel-status");
   const cardsEl = document.getElementById("sa-panel-cards");
-  statusEl.innerHTML = '<span class="spinner"></span> Running 5 AI agents (technical, fundamental, news, ratings-timing, macro)\\u2014this makes 5 AI calls and can take a bit.';
+  if (personas.length === 0) { statusEl.textContent = "Pick at least one agent to run."; return; }
+  statusEl.innerHTML = `<span class="spinner"></span> Running ${personas.length} agent(s)\\u2014this makes ${personas.length} AI call(s) and can take a bit.`;
   cardsEl.innerHTML = "";
   try {
     const res = await fetch("/api/stock-analysis/panel", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ticker: saCurrent.ticker, candidate: saCurrent.candidate }),
+      body: JSON.stringify({ ticker: saCurrent.ticker, candidate: saCurrent.candidate, personas, social_sentiment_window: socialSentimentWindow }),
     });
     const resData = await res.json();
     if (!res.ok) { statusEl.textContent = "Error: " + resData.error; return; }
@@ -2554,12 +2656,13 @@ async function parseScreenshots() {
 
 // ---------- SETTINGS TAB ----------
 const PROVIDER_LABELS = { anthropic: "Anthropic (Claude)", openai: "OpenAI (GPT)", gemini: "Google (Gemini)" };
+const EXTRA_KEY_LABELS = { stockgeist: "StockGeist (social sentiment agent)" };
 
-async function loadSettings() {
-  const container = document.getElementById("settings-keys");
-  container.innerHTML = Object.keys(PROVIDER_LABELS).map(p => `
+async function loadKeyGrid(labels, containerId) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = Object.keys(labels).map(p => `
     <div class="card">
-      <div class="label">${PROVIDER_LABELS[p]}</div>
+      <div class="label">${labels[p]}</div>
       <div id="key-status-${p}" class="muted" style="margin: 6px 0;">checking...</div>
       <div class="key-row">
         <input type="password" id="key-input-${p}" placeholder="Paste API key">
@@ -2568,11 +2671,16 @@ async function loadSettings() {
     </div>
   `).join("");
 
-  for (const p of Object.keys(PROVIDER_LABELS)) {
+  for (const p of Object.keys(labels)) {
     const res = await fetch("/api/settings/has-key?provider=" + p);
     const data = await res.json();
     document.getElementById(`key-status-${p}`).textContent = data.has_key ? "Key saved" : "No key saved";
   }
+}
+
+async function loadSettings() {
+  await loadKeyGrid(PROVIDER_LABELS, "settings-keys");
+  await loadKeyGrid(EXTRA_KEY_LABELS, "settings-extra-keys");
 }
 
 async function saveKey(provider) {

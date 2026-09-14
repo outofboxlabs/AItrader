@@ -1,17 +1,20 @@
 """On-demand AI stock analysis: a single ~200-word expert take with a
-buy-opportunity verdict, and 5 independent single-focus analyst inquiries
-(technical / fundamental / news / analyst-ratings-timing / macro-risk)
-about the same stock. Used both by the Near 52W Low screen (one of its
-candidates) and by the free-text Stock Analysis tab (any ticker a human
-types in) -- the prompts here don't assume the stock is currently near its
-low, only that its 52-week range is known.
+buy-opportunity verdict, and a roster of independent single-focus analyst
+inquiries a human can pick from -- technical (real computed indicators),
+fundamental (real financial-statement highlights), news, SEC filings,
+analyst-ratings-timing, macro/risk, and social-media sentiment. Used both
+by the Near 52W Low screen (one of its candidates) and by the free-text
+Stock Analysis tab (any ticker a human types in) -- the prompts here
+don't assume the stock is currently near its low, only that its 52-week
+range is known.
 
-The 5 are genuinely separate calls, each given only the narrow slice of
-data its own question needs -- not one prompt told "you are 5 agents on a
-panel" with the full context repeated five times. Both are informational
-only -- never a buy/sell/hold instruction -- and only run when a human
-clicks a button for one specific ticker; nothing here runs automatically
-across a whole screen.
+Each selected persona is a genuinely separate call, given only the narrow
+slice of data its own question needs -- not one prompt told "you are N
+agents on a panel" with the full context repeated for every persona.
+Everything here is informational only -- never a buy/sell/hold
+instruction -- and only runs when a human clicks a button for one
+specific ticker and picks which agents to run; nothing here runs
+automatically across a whole screen.
 """
 
 from __future__ import annotations
@@ -35,17 +38,20 @@ def _closest_daily_close_on_or_before(daily_history: list[dict], target_date: st
     return candidates[-1] if candidates else None
 
 
-def get_rating_timeline(ticker: str) -> dict:
+def get_rating_timeline(ticker: str, daily_history: Optional[list[dict]] = None) -> dict:
     """Recent analyst rating changes (from yfinance's upgrade/downgrade
     history) annotated with the stock's own price at the time of each one,
     plus the date of its own 52-week low from a year of daily bars -- so a
     "ratings timing" read can say whether a given rating predates the
     slide to the low (and so may be stale) or postdates it (i.e. the
-    analyst kept/gave that rating knowing the current price). Never
-    raises -- a failed pull just means an empty timeline, which callers
-    (and the AI prompt) should treat as "can't be assessed" rather than
-    an error."""
-    daily_history = sorted(data_mod.get_daily_price_history(ticker), key=lambda d: d["date"])
+    analyst kept/gave that rating knowing the current price). Pass
+    `daily_history` if the caller already fetched it (e.g. for the
+    technical persona) to avoid pulling it twice. Never raises -- a
+    failed pull just means an empty timeline, which callers (and the AI
+    prompt) should treat as "can't be assessed" rather than an error."""
+    if daily_history is None:
+        daily_history = data_mod.get_daily_price_history(ticker)
+    daily_history = sorted(daily_history, key=lambda d: d["date"])
 
     week_52_low = None
     if daily_history:
@@ -128,12 +134,17 @@ def _format_rating_action_line(a: dict) -> str:
     )
 
 
-def build_context_user_message(
-    ticker: str, candidate: dict, rating_timeline: dict, headlines: list[dict], macro_score: Optional[float]
-) -> str:
-    """Shared context block for every persona (the single expert take and
-    all 5 panel agents) -- same underlying facts, different lens applied
-    by each system prompt."""
+def build_context_user_message(ticker: str, context: dict) -> str:
+    """Full shared context for the single ~200-word expert take -- unlike
+    the single-focus personas below, this one synthesizes everything at
+    once, so it gets the full picture (not the newer filings/financials/
+    social-sentiment additions, to keep this specific prompt's scope and
+    length stable)."""
+    candidate = context["candidate"]
+    rating_timeline = context.get("rating_timeline") or {}
+    headlines = context.get("headlines") or []
+    macro_score = context.get("macro_score")
+
     lines = [
         f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})",
         f"Current price: {candidate.get('price')}",
@@ -240,48 +251,65 @@ def _parse_expert_json(text: str) -> dict:
 
 def analyze_expert_take(
     ticker: str,
-    candidate: dict,
-    rating_timeline: dict,
-    headlines: list[dict],
-    macro_score: Optional[float],
+    context: dict,
     provider: str,
     model: str,
     api_key: Optional[str] = None,
 ) -> dict:
     """Raises on API failure -- the caller decides how to degrade."""
-    user_message = build_context_user_message(ticker, candidate, rating_timeline, headlines, macro_score)
+    user_message = build_context_user_message(ticker, context)
     text = ai_client.call_provider(provider, EXPERT_SYSTEM_PROMPT, user_message, model, api_key=api_key, max_tokens=700)
     return _parse_expert_json(text)
 
 
-# --- 5 independent single-focus analyst inquiries ---------------------------
+# --- Selectable independent single-focus analyst inquiries ------------------
 #
-# These are 5 separate, independent calls -- each persona gets its OWN
-# narrow slice of the data (see PANEL_CONTEXT_BUILDERS below) and answers
-# its own question with no idea the other 4 exist. Earlier system prompts
-# framed this as "you are one of 5 panelists discussing this stock", which
-# read as one role-play prompt wearing different hats rather than 5
-# genuinely separate inquiries -- these are written as standalone analyst
-# briefs instead, with no reference to a panel or other agents.
+# Each is a separate, independent call -- every persona gets its OWN
+# narrow slice of `context` (see PANEL_CONTEXT_BUILDERS) and answers its
+# own question with no idea any other persona exists. A human picks which
+# of these actually run (see run_expert_panel's `selected_personas`);
+# nothing here assumes all of them are selected together.
 
 
-def _price_range_lines(ticker: str, candidate: dict, rating_timeline: dict) -> list[str]:
+def _price_range_lines(ticker: str, context: dict) -> list[str]:
+    candidate = context["candidate"]
     lines = [
         f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})",
         f"Current price: {candidate.get('price')}",
         f"52-week range: low {candidate.get('year_low')}, high {candidate.get('year_high')}",
         f"% above 52-week low: {candidate.get('pct_from_52w_low')}",
     ]
-    week_52_low = rating_timeline.get("week_52_low")
+    week_52_low = (context.get("rating_timeline") or {}).get("week_52_low")
     if week_52_low:
         lines.append(f"Date of the stock's own 52-week low: {week_52_low['date']} (close {week_52_low['close']})")
     else:
         lines.append("Date of the 52-week low: unknown (price history unavailable)")
+
+    indicators = context.get("technical_indicators") or {}
+    lines.append("")
+    if indicators:
+        lines.append("Computed technical indicators (real, from daily closes):")
+        for period in (20, 50, 200):
+            sma = indicators.get(f"sma_{period}")
+            if sma is not None:
+                pct = indicators.get(f"price_vs_sma_{period}_pct")
+                pct_note = f" (price is {pct:+.1f}% vs this average)" if pct is not None else ""
+                lines.append(f"- SMA({period}): {sma:.2f}{pct_note}")
+        if "rsi_14" in indicators:
+            lines.append(f"- RSI(14): {indicators['rsi_14']:.1f} (>70 typically overbought, <30 oversold)")
+        if "macd" in indicators:
+            lines.append(
+                f"- MACD: {indicators['macd']:.3f}, signal {indicators['macd_signal']:.3f}, "
+                f"histogram {indicators['macd_histogram']:+.3f}"
+            )
+    else:
+        lines.append("Computed technical indicators: not enough price history available.")
     return lines
 
 
-def _fundamental_lines(ticker: str, candidate: dict) -> list[str]:
-    return [
+def _fundamental_lines(ticker: str, context: dict) -> list[str]:
+    candidate = context["candidate"]
+    lines = [
         f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})",
         f"Market cap: {candidate.get('market_cap')}",
         f"Analyst mean price target: {candidate.get('target_mean')} "
@@ -289,9 +317,26 @@ def _fundamental_lines(ticker: str, candidate: dict) -> list[str]:
         f"Current analyst ratings breakdown: {candidate.get('analyst_ratings')} "
         f"({candidate.get('buy_ratio_pct')}% buy/strong-buy)",
     ]
+    financials = context.get("financials")
+    lines.append("")
+    if financials:
+        lines.append(f"Latest annual financials (fiscal year end {financials.get('fiscal_year_end')}):")
+        if financials.get("revenue") is not None:
+            yoy = financials.get("revenue_yoy_pct")
+            yoy_note = f", {yoy:+.1f}% YoY" if yoy is not None else ""
+            lines.append(f"- Revenue: {financials['revenue']:,.0f}{yoy_note}")
+        if financials.get("net_income") is not None:
+            lines.append(f"- Net income: {financials['net_income']:,.0f}")
+        if financials.get("gross_margin_pct") is not None:
+            lines.append(f"- Gross margin: {financials['gross_margin_pct']:.1f}%")
+    else:
+        lines.append("Financial statements: not available for this ticker.")
+    return lines
 
 
-def _headline_lines(ticker: str, candidate: dict, headlines: list[dict]) -> list[str]:
+def _headline_lines(ticker: str, context: dict) -> list[str]:
+    candidate = context["candidate"]
+    headlines = context.get("headlines") or []
     lines = [f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})", "", "Recent headlines:"]
     if headlines:
         for h in headlines:
@@ -302,7 +347,9 @@ def _headline_lines(ticker: str, candidate: dict, headlines: list[dict]) -> list
     return lines
 
 
-def _rating_timeline_lines(ticker: str, candidate: dict, rating_timeline: dict) -> list[str]:
+def _rating_timeline_lines(ticker: str, context: dict) -> list[str]:
+    candidate = context["candidate"]
+    rating_timeline = context.get("rating_timeline") or {}
     lines = [f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})", ""]
     week_52_low = rating_timeline.get("week_52_low")
     if week_52_low:
@@ -319,7 +366,9 @@ def _rating_timeline_lines(ticker: str, candidate: dict, rating_timeline: dict) 
     return lines
 
 
-def _macro_lines(ticker: str, candidate: dict, macro_score: Optional[float]) -> list[str]:
+def _macro_lines(ticker: str, context: dict) -> list[str]:
+    candidate = context["candidate"]
+    macro_score = context.get("macro_score")
     lines = [
         f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})",
         f"% above its 52-week low: {candidate.get('pct_from_52w_low')}",
@@ -331,22 +380,50 @@ def _macro_lines(ticker: str, candidate: dict, macro_score: Optional[float]) -> 
     return lines
 
 
+def _filings_lines(ticker: str, context: dict) -> list[str]:
+    candidate = context["candidate"]
+    filings = context.get("filings") or []
+    lines = [f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})", "", "Recent SEC filings (most recent first):"]
+    if filings:
+        for f in filings:
+            lines.append(
+                f"- [{f.get('filed')}] {f.get('form')} (report date {f.get('report_date') or 'n/a'}): {f.get('url')}"
+            )
+    else:
+        lines.append("(none found -- ticker may not resolve on SEC EDGAR, e.g. a non-US filer, or SEC's API was unreachable)")
+    return lines
+
+
+def _social_sentiment_lines(ticker: str, context: dict) -> list[str]:
+    candidate = context["candidate"]
+    window = context.get("social_sentiment_window") or "today"
+    summary = context.get("social_sentiment")
+    lines = [
+        f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})",
+        f"Social-media message-volume/sentiment summary for the past {window} (via a third-party aggregator):",
+    ]
+    if summary:
+        lines.append(f"- Based on {summary.get('data_points')} data point(s) in this window.")
+        for key, stats in summary.items():
+            if key == "data_points" or not isinstance(stats, dict):
+                continue
+            lines.append(
+                f"- {key}: avg {stats['avg']:.2f}, min {stats['min']:.2f}, max {stats['max']:.2f}, "
+                f"first {stats['first']:.2f}, last {stats['last']:.2f}"
+            )
+    else:
+        lines.append("(no social sentiment data available -- no API key saved, or nothing found for this window)")
+    return lines
+
+
 PANEL_CONTEXT_BUILDERS = {
-    "technical": lambda ticker, candidate, rating_timeline, headlines, macro_score: _price_range_lines(
-        ticker, candidate, rating_timeline
-    ),
-    "fundamental": lambda ticker, candidate, rating_timeline, headlines, macro_score: _fundamental_lines(
-        ticker, candidate
-    ),
-    "news_sentiment": lambda ticker, candidate, rating_timeline, headlines, macro_score: _headline_lines(
-        ticker, candidate, headlines
-    ),
-    "ratings_timing": lambda ticker, candidate, rating_timeline, headlines, macro_score: _rating_timeline_lines(
-        ticker, candidate, rating_timeline
-    ),
-    "macro_risk": lambda ticker, candidate, rating_timeline, headlines, macro_score: _macro_lines(
-        ticker, candidate, macro_score
-    ),
+    "technical": _price_range_lines,
+    "fundamental": _fundamental_lines,
+    "news": _headline_lines,
+    "ratings_timing": _rating_timeline_lines,
+    "macro_risk": _macro_lines,
+    "filings": _filings_lines,
+    "social_sentiment": _social_sentiment_lines,
 }
 
 
@@ -354,14 +431,14 @@ PANEL_SYSTEM_PROMPTS = {
     "technical": (
         "Technical Analyst",
         """You are a technical analyst. You're asked to independently assess one \
-stock given only its current price, 52-week high/low, and the date of its \
-own 52-week low. Give a short (60-100 word) technical read: where the \
-current price sits in its 52-week range, what that positioning suggests \
-about momentum (e.g. basing near a low, extended near a high, or \
-range-bound), and what price level would change your mind either way. You \
-have no chart or indicator data beyond what's given -- be honest about \
-that limit rather than inventing patterns you can't see. Never say to buy, \
-sell, or hold.
+stock given its current price, 52-week high/low, the date of its own \
+52-week low, and (when there's enough price history) real computed \
+indicators: SMA(20/50/200), RSI(14), and MACD. Give a short (60-100 word) \
+technical read using those actual numbers where given -- where the price \
+sits relative to its moving averages, whether RSI suggests overbought/ \
+oversold, what MACD suggests about momentum -- and what would change your \
+mind either way. If indicators weren't available, say so rather than \
+inventing them. Never say to buy, sell, or hold.
 
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",
@@ -369,24 +446,25 @@ Respond with ONLY a JSON object, no other text: \
     "fundamental": (
         "Fundamental Analyst",
         """You are a fundamental analyst. You're asked to independently assess \
-one stock given only its market cap, analyst mean price target, and the \
-buy-ratio among current ratings. Give a short \
-(60-100 word) fundamental read on whether the current price plausibly \
-undervalues the business given what analysts are pricing in via their \
-target, and what would need to be true about the business for the stock to \
-re-rate higher. Be explicit when you lack real fundamental data (earnings, \
-margins, balance sheet) to go on -- don't invent figures. Never say to buy, \
+one stock given its market cap, analyst mean price target, the buy-ratio \
+among current ratings, and (when available) real reported annual revenue, \
+net income, revenue YoY growth, and gross margin from its own financial \
+statements. Give a short (60-100 word) fundamental read on whether the \
+current price plausibly undervalues the business given what analysts are \
+pricing in via their target AND what the actual financials show, and what \
+would need to be true for the stock to re-rate higher. Be explicit when \
+financials weren't available -- don't invent figures. Never say to buy, \
 sell, or hold.
 
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",
     ),
-    "news_sentiment": (
-        "News & Sentiment Analyst",
-        """You are a news/sentiment analyst. You're asked to independently assess \
-one stock given only its recent headlines. Give a short (60-100 word) read \
-on what the news flow suggests is driving the price action, and whether \
-sentiment looks like it's improving, stabilizing, or deteriorating. If no \
+    "news": (
+        "News Analyst",
+        """You are a news analyst. You're asked to independently assess one \
+stock given only its recent headlines. Give a short (60-100 word) read on \
+what the news flow suggests is driving the price action, and whether the \
+tone looks like it's improving, stabilizing, or deteriorating. If no \
 headlines were given, say so plainly rather than guessing. Never say to \
 buy, sell, or hold.
 
@@ -445,6 +523,39 @@ sell, or hold.
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",
     ),
+    "filings": (
+        "SEC Filings Analyst",
+        """You are a filings analyst. You're asked to independently assess one \
+stock given only a list of its most recent SEC filings (form type, filing \
+date, and a link) from EDGAR. Give a short (60-100 word) read on what the \
+recent filing activity suggests -- e.g. a fresh 10-K/10-Q means updated \
+financials just became public, an 8-K often flags a material event worth \
+checking, a cluster of filings in a short window can signal something in \
+motion. You do NOT have the actual filing CONTENTS, only the list of what \
+was filed and when -- be explicit about that limit, and suggest what a \
+human should go read rather than inventing what's inside any filing. \
+Never say to buy, sell, or hold.
+
+Respond with ONLY a JSON object, no other text: \
+{"take": "...", "stance": "bullish|bearish|neutral"}""",
+    ),
+    "social_sentiment": (
+        "Social Sentiment Analyst",
+        """You are a social-media sentiment analyst. You're asked to \
+independently assess one stock given only aggregated social-media \
+message-volume and sentiment statistics for a specific recent time window \
+(from a third-party aggregator -- you do not see individual posts). Give a \
+short (60-100 word) read on what the volume/sentiment numbers suggest \
+about retail chatter right now -- rising or falling interest, and whether \
+the sentiment-like fields lean positive or negative. If no data was given \
+(no API key configured, or nothing in this window), say so plainly rather \
+than guessing. Retail social sentiment is noisy and often contrarian -- \
+do not treat volume or positivity alone as a signal of where the stock is \
+headed. Never say to buy, sell, or hold.
+
+Respond with ONLY a JSON object, no other text: \
+{"take": "...", "stance": "bullish|bearish|neutral"}""",
+    ),
 }
 
 
@@ -467,25 +578,28 @@ def _parse_panel_agent_json(text: str) -> dict:
 
 def run_expert_panel(
     ticker: str,
-    candidate: dict,
-    rating_timeline: dict,
-    headlines: list[dict],
-    macro_score: Optional[float],
+    context: dict,
+    selected_personas: list[str],
     provider: str,
     model: str,
     api_key: Optional[str] = None,
 ) -> list[dict]:
-    """Run 5 independent single-focus analyst inquiries, one at a time --
-    each gets ONLY the data relevant to its own question (see
-    PANEL_CONTEXT_BUILDERS), not the full shared context, so this is 5
-    genuinely separate calls rather than one prompt wearing 5 hats. Each
-    persona's own failure (rate limit, transient network error) is
+    """Run each persona in `selected_personas` (in the order given), one
+    at a time -- every persona gets ONLY the data relevant to its own
+    question (see PANEL_CONTEXT_BUILDERS), not the full shared context,
+    so each is a genuinely separate call. Unknown persona keys are
+    silently skipped (lets the frontend send whatever it has checked
+    without the backend needing to validate against a hardcoded list).
+    Each persona's own failure (rate limit, transient network error) is
     isolated to its own entry rather than aborting the rest -- a partial
-    result with 4 good takes and one clearly-marked error is more useful
-    than losing all 5 over one bad call."""
+    result with N-1 good takes and one clearly-marked error is more
+    useful than losing all of them over one bad call."""
     results = []
-    for key, (label, system_prompt) in PANEL_SYSTEM_PROMPTS.items():
-        user_message = "\n".join(PANEL_CONTEXT_BUILDERS[key](ticker, candidate, rating_timeline, headlines, macro_score))
+    for key in selected_personas:
+        if key not in PANEL_SYSTEM_PROMPTS:
+            continue
+        label, system_prompt = PANEL_SYSTEM_PROMPTS[key]
+        user_message = "\n".join(PANEL_CONTEXT_BUILDERS[key](ticker, context))
         try:
             text = ai_client.call_provider(
                 provider, system_prompt, user_message, model, api_key=api_key, max_tokens=400
