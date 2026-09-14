@@ -409,6 +409,20 @@ def test_social_sentiment_lines_lists_real_posts():
     assert any("mentioning this ticker today" in line for line in lines)
 
 
+def test_social_sentiment_lines_reports_totals_and_truncates_long_lists():
+    messages = [
+        {"body": f"msg {i}", "username": f"trader{i}", "sentiment": "Bullish" if i % 2 == 0 else "Bearish", "likes": i, "created_at": "2026-09-14T08:00:00+00:00"}
+        for i in range(80)
+    ]
+    lines = nla._social_sentiment_lines("ACME", _context(social_sentiment=messages, social_sentiment_window="year"))
+    joined = "\n".join(lines)
+    assert "Totals across all 80 messages: 40 Bullish, 40 Bearish, 0 untagged." in joined
+    assert "msg 0" in joined
+    assert "msg 59" in joined
+    assert "msg 60" not in joined  # beyond the per-prompt cap
+    assert "20 more messages omitted" in joined
+
+
 def test_technical_lines_reports_when_indicators_unavailable():
     lines = nla._price_range_lines("ACME", _context(technical_indicators={}))
     assert any("not enough price history available" in line for line in lines)

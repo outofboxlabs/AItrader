@@ -402,6 +402,11 @@ _WINDOW_PHRASE = {
     "year": "in the past year",
 }
 
+# StockTwits pagination can return well over 100 raw messages for a busy
+# ticker -- cap how many get spelled out in the prompt (the totals line
+# below still reflects every message, so the bull/bear split is never lossy).
+_MAX_SOCIAL_MESSAGES_IN_PROMPT = 60
+
 
 def _social_sentiment_lines(ticker: str, context: dict) -> list[str]:
     candidate = context["candidate"]
@@ -414,9 +419,16 @@ def _social_sentiment_lines(ticker: str, context: dict) -> list[str]:
         f"(each tagged Bullish/Bearish by the trader who posted it, or untagged):",
     ]
     if messages:
-        for m in messages:
+        bullish = sum(1 for m in messages if m.get("sentiment") == "Bullish")
+        bearish = sum(1 for m in messages if m.get("sentiment") == "Bearish")
+        untagged = len(messages) - bullish - bearish
+        lines.append(f"Totals across all {len(messages)} messages: {bullish} Bullish, {bearish} Bearish, {untagged} untagged.")
+        shown = messages[:_MAX_SOCIAL_MESSAGES_IN_PROMPT]
+        for m in shown:
             tag = m.get("sentiment") or "untagged"
             lines.append(f"- [{m.get('created_at')}] @{m.get('username')} ({tag}, {m.get('likes')} likes): \"{m.get('body')}\"")
+        if len(messages) > len(shown):
+            lines.append(f"...({len(messages) - len(shown)} more messages omitted here for brevity; the totals above already include them)")
     else:
         lines.append("(no messages found for this window)")
     return lines
@@ -548,19 +560,21 @@ Respond with ONLY a JSON object, no other text: \
     "social_sentiment": (
         "Social Sentiment Analyst",
         """You are a social-media sentiment analyst. You're asked to \
-independently assess one stock given only a list of recent StockTwits \
-messages mentioning it, from a specific recent time window. Each message \
-gives you who posted it, when, how many likes it got, its text, and --\
-importantly -- a Bullish/Bearish tag the POSTER THEMSELVES chose when \
-writing it (or untagged, if they didn't pick one). Give a short (60-100 \
-word) read on what these messages suggest about retail sentiment and \
-interest right now: weigh the self-tagged Bullish/Bearish split directly \
-(don't just infer tone from wording when an explicit tag is given), and \
-note rising or falling attention. If no messages were given (nothing \
-posted in this window), say so plainly rather than guessing. Retail \
-social sentiment is noisy and often contrarian -- do not treat volume or \
-tag mix alone as a signal of where the stock is headed. Never say to \
-buy, sell, or hold.
+independently assess one stock given a totals summary (how many recent \
+StockTwits messages were Bullish/Bearish/untagged) plus a sample list of \
+the actual messages mentioning it, from a specific recent time window. \
+Each message gives you who posted it, when, how many likes it got, its \
+text, and -- importantly -- a Bullish/Bearish tag the POSTER THEMSELVES \
+chose when writing it (or untagged, if they didn't pick one). Give a \
+short (60-100 word) read on what these messages suggest about retail \
+sentiment and interest right now: weigh the self-tagged Bullish/Bearish \
+split directly, using the totals line as the authoritative count even if \
+only a sample of messages is listed below it (don't just infer tone from \
+wording when an explicit tag is given), and note rising or falling \
+attention. If no messages were given (nothing posted in this window), \
+say so plainly rather than guessing. Retail social sentiment is noisy \
+and often contrarian -- do not treat volume or tag mix alone as a signal \
+of where the stock is headed. Never say to buy, sell, or hold.
 
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",
