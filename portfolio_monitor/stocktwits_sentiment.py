@@ -51,6 +51,11 @@ def get_recent_messages(ticker: str, window: str, now: Optional[datetime] = None
         response = requests.get(
             f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json",
             timeout=15,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+            },
         )
         response.raise_for_status()
         payload = response.json()

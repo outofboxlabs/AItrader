@@ -32,7 +32,7 @@ def test_get_recent_messages_returns_normalized_shape(monkeypatch):
 
     captured = {}
 
-    def fake_get(url, timeout=None):
+    def fake_get(url, timeout=None, headers=None):
         captured["url"] = url
         return _FakeResponse({"messages": [recent]})
 
@@ -53,7 +53,7 @@ def test_get_recent_messages_filters_out_messages_before_the_window(monkeypatch)
     within_window = _message("2026-09-14T11:55:00Z")  # 5 min ago -- inside "hour"
     outside_window = _message("2026-09-14T09:00:00Z")  # 3 hours ago -- outside "hour"
 
-    monkeypatch.setattr(sts.requests, "get", lambda url, timeout=None: _FakeResponse({"messages": [within_window, outside_window]}))
+    monkeypatch.setattr(sts.requests, "get", lambda url, timeout=None, headers=None: _FakeResponse({"messages": [within_window, outside_window]}))
 
     messages = sts.get_recent_messages("ORCL", "hour", now=now)
     assert len(messages) == 1
@@ -63,7 +63,7 @@ def test_get_recent_messages_filters_out_messages_before_the_window(monkeypatch)
 def test_get_recent_messages_handles_untagged_sentiment(monkeypatch):
     now = datetime(2026, 9, 14, 12, 0, 0, tzinfo=timezone.utc)
     untagged = _message("2026-09-14T11:59:00Z", sentiment=None)
-    monkeypatch.setattr(sts.requests, "get", lambda url, timeout=None: _FakeResponse({"messages": [untagged]}))
+    monkeypatch.setattr(sts.requests, "get", lambda url, timeout=None, headers=None: _FakeResponse({"messages": [untagged]}))
 
     messages = sts.get_recent_messages("ORCL", "hour", now=now)
     assert messages[0]["sentiment"] is None
@@ -74,7 +74,7 @@ def test_get_recent_messages_returns_none_for_unknown_window():
 
 
 def test_get_recent_messages_returns_none_on_network_failure(monkeypatch):
-    def boom(url, timeout=None):
+    def boom(url, timeout=None, headers=None):
         raise RuntimeError("network error")
 
     monkeypatch.setattr(sts.requests, "get", boom)
@@ -82,12 +82,12 @@ def test_get_recent_messages_returns_none_on_network_failure(monkeypatch):
 
 
 def test_get_recent_messages_returns_none_on_http_error(monkeypatch):
-    monkeypatch.setattr(sts.requests, "get", lambda url, timeout=None: _FakeResponse(None, status_ok=False))
+    monkeypatch.setattr(sts.requests, "get", lambda url, timeout=None, headers=None: _FakeResponse(None, status_ok=False))
     assert sts.get_recent_messages("ORCL", "today") is None
 
 
 def test_get_recent_messages_returns_empty_list_when_no_messages(monkeypatch):
-    monkeypatch.setattr(sts.requests, "get", lambda url, timeout=None: _FakeResponse({"messages": []}))
+    monkeypatch.setattr(sts.requests, "get", lambda url, timeout=None, headers=None: _FakeResponse({"messages": []}))
     assert sts.get_recent_messages("ORCL", "week") == []
 
 
@@ -95,7 +95,7 @@ def test_get_recent_messages_skips_messages_with_unparseable_timestamps(monkeypa
     now = datetime(2026, 9, 14, 12, 0, 0, tzinfo=timezone.utc)
     bad = _message("not-a-real-timestamp")
     good = _message("2026-09-14T11:59:00Z")
-    monkeypatch.setattr(sts.requests, "get", lambda url, timeout=None: _FakeResponse({"messages": [bad, good]}))
+    monkeypatch.setattr(sts.requests, "get", lambda url, timeout=None, headers=None: _FakeResponse({"messages": [bad, good]}))
 
     messages = sts.get_recent_messages("ORCL", "hour", now=now)
     assert len(messages) == 1
