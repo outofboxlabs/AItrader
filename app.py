@@ -472,7 +472,7 @@ def resolve_stock_analysis_ticker():
     ticker + a fresh market-data snapshot, via Yahoo's own search --
     a lookup problem, not something to ask an AI to guess at. No AI
     call happens here; that's only triggered by the separate
-    Analyze / Generate 5 AI Agents buttons once a ticker is resolved."""
+    Analyze / Run selected agents controls once a ticker is resolved."""
     body = request.get_json(force=True)
     query = (body.get("query") or "").strip()
     if not query:
@@ -1215,9 +1215,9 @@ PAGE_TEMPLATE = """<!doctype html>
       52-week low, with at least {{ nearlow_min_ratings_count }} analyst ratings of which
       {{ nearlow_min_buy_ratio_pct }}% or more are "buy" or "strong buy". Both conditions are required --
       this is not investment advice, just a starting point for further research. Click "Analyze" on a
-      candidate for a ~200-word expert take (with a buy-opportunity verdict), then optionally generate a
-      5-agent panel (technical / fundamental / news / analyst-ratings-timing / macro) that argues it from
-      different angles.
+      candidate for a ~200-word expert take (with a buy-opportunity verdict), then pick which of 7
+      independent agents to run (technical / fundamental / news / analyst-ratings-timing / macro /
+      SEC filings / social sentiment) for their own take on it.
     </p>
     <div id="nl-status"></div>
     <div id="nl-as-of" class="muted" style="margin-bottom:8px;"></div>
@@ -1240,9 +1240,10 @@ PAGE_TEMPLATE = """<!doctype html>
   <div class="tab-panel" id="tab-stock-analysis">
     <p class="muted" style="max-width:640px;">
       Type a ticker or company name -- Yahoo's own search resolves it to the right symbol -- and get a
-      ~200-word expert take with a buy-opportunity verdict, plus an optional 5-agent deep dive
-      (technical / fundamental / news / analyst-ratings-timing / macro). Works for any stock, not just
-      ones near a 52-week low. This is not investment advice.
+      ~200-word expert take with a buy-opportunity verdict, plus a pick-your-own-agents deep dive: technical
+      (real indicators), fundamental (real financials), news, analyst-ratings-timing, macro, SEC filings, and
+      social sentiment (with a selectable time window). Works for any stock, not just ones near a 52-week
+      low. This is not investment advice.
     </p>
     <div class="controls">
       <input type="text" id="sa-query" placeholder="Ticker or company name" style="min-width:240px;" onkeydown="if(event.key==='Enter') lookupStockAnalysis();">
