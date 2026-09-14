@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
+import pytest
 
 from portfolio_monitor import data as data_mod
 
@@ -192,3 +193,134 @@ def test_get_price_history_window_falls_back_when_1m_pull_is_empty(monkeypatch):
     assert interval == "5m"
     assert calls == ["1m", "5m"]
     assert history[0]["close"] == 150.0
+
+
+# --- resolve_ticker_query ------------------------------------------------
+
+
+def test_resolve_ticker_query_prefers_exact_symbol_match(monkeypatch):
+    quotes = [
+        {"symbol": "ORCL", "shortname": "Oracle Corp", "quoteType": "EQUITY", "exchange": "NYQ"},
+        {"symbol": "ORCLW", "shortname": "Oracle Warrant Co", "quoteType": "EQUITY", "exchange": "NYQ"},
+    ]
+
+    class FakeSearch:
+        def __init__(self, query, max_results=8):
+            self.quotes = quotes
+
+    monkeypatch.setattr(data_mod.yf, "Search", FakeSearch)
+
+    result = data_mod.resolve_ticker_query("orcl")
+    assert result == {"ticker": "ORCL", "name": "Oracle Corp", "exchange": "NYQ"}
+
+
+def test_resolve_ticker_query_resolves_company_name_to_first_equity_result(monkeypatch):
+    quotes = [
+        {"symbol": "^ORCLIDX", "shortname": "Some Related Index", "quoteType": "INDEX"},
+        {"symbol": "ORCL", "shortname": "Oracle Corp", "quoteType": "EQUITY", "exchange": "NYQ"},
+    ]
+
+    class FakeSearch:
+        def __init__(self, query, max_results=8):
+            self.quotes = quotes
+
+    monkeypatch.setattr(data_mod.yf, "Search", FakeSearch)
+
+    result = data_mod.resolve_ticker_query("oracle")
+    assert result["ticker"] == "ORCL"
+    assert result["name"] == "Oracle Corp"
+
+
+def test_resolve_ticker_query_returns_none_when_nothing_matches(monkeypatch):
+    class FakeSearch:
+        def __init__(self, query, max_results=8):
+            self.quotes = []
+
+    monkeypatch.setattr(data_mod.yf, "Search", FakeSearch)
+    assert data_mod.resolve_ticker_query("zzznotarealcompanyzzz") is None
+
+
+def test_resolve_ticker_query_returns_none_on_exception(monkeypatch):
+    class FakeSearch:
+        def __init__(self, query, max_results=8):
+            raise RuntimeError("network error")
+
+    monkeypatch.setattr(data_mod.yf, "Search", FakeSearch)
+    assert data_mod.resolve_ticker_query("oracle") is None
+
+
+# --- get_stock_snapshot ---------------------------------------------------
+
+
+class _FakeFastInfo:
+    def __init__(self, last_price, year_high, year_low, market_cap):
+        self.last_price = last_price
+        self.year_high = year_high
+        self.year_low = year_low
+        self.market_cap = market_cap
+
+
+def test_get_stock_snapshot_returns_expected_shape(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            self.fast_info = _FakeFastInfo(150.0, 200.0, 100.0, 5_000_000_000)
+
+        def get_recommendations_summary(self, as_dict=False):
+            return {"strongBuy": {0: 3}, "buy": {0: 2}, "hold": {0: 2}, "sell": {0: 0}, "strongSell": {0: 0}}
+
+        def get_analyst_price_targets(self):
+            return {"current": 150.0, "mean": 180.0}
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+
+    snap = data_mod.get_stock_snapshot("ACME")
+    assert snap["ticker"] == "ACME"
+    assert snap["price"] == 150.0
+    assert snap["year_low"] == 100.0
+    assert snap["year_high"] == 200.0
+    assert snap["pct_from_52w_low"] == pytest.approx(50.0)
+    assert snap["pct_from_52w_high"] == pytest.approx(-25.0)
+    assert snap["target_mean"] == 180.0
+    assert snap["target_upside_pct"] == pytest.approx(20.0)
+    assert snap["analyst_ratings"] == {"strongBuy": 3, "buy": 2, "hold": 2, "sell": 0, "strongSell": 0}
+    assert snap["buy_ratio_pct"] == pytest.approx(5 / 7 * 100)
+    assert snap["market_cap"] == 5_000_000_000
+
+
+def test_get_stock_snapshot_returns_none_when_ticker_lookup_fails(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            raise RuntimeError("bad ticker")
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    assert data_mod.get_stock_snapshot("NOTREAL") is None
+
+
+def test_get_stock_snapshot_returns_none_when_year_low_missing(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            self.fast_info = _FakeFastInfo(150.0, 200.0, None, 5_000_000_000)
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    assert data_mod.get_stock_snapshot("ACME") is None
+
+
+def test_get_stock_snapshot_degrades_gracefully_when_ratings_and_targets_fail(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            self.fast_info = _FakeFastInfo(150.0, 200.0, 100.0, 5_000_000_000)
+
+        def get_recommendations_summary(self, as_dict=False):
+            raise RuntimeError("no data")
+
+        def get_analyst_price_targets(self):
+            raise RuntimeError("no data")
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+
+    snap = data_mod.get_stock_snapshot("ACME")
+    assert snap["analyst_ratings"] == {}
+    assert snap["buy_ratio_pct"] is None
+    assert snap["target_mean"] is None
+    assert snap["target_upside_pct"] is None
+    assert snap["price"] == 150.0

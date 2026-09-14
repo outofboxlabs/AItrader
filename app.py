@@ -427,6 +427,91 @@ def nearlow_expert_panel():
     return jsonify({"ticker": ticker, "panel": panel})
 
 
+# --- Stock Analysis tab (any ticker/company, not gated by any screen) --
+
+
+@app.route("/api/stock-analysis/resolve", methods=["POST"])
+def resolve_stock_analysis_ticker():
+    """Turns free text (a ticker or a company name) into a resolved
+    ticker + a fresh market-data snapshot, via Yahoo's own search --
+    a lookup problem, not something to ask an AI to guess at. No AI
+    call happens here; that's only triggered by the separate
+    Analyze / Generate 5 AI Agents buttons once a ticker is resolved."""
+    body = request.get_json(force=True)
+    query = (body.get("query") or "").strip()
+    if not query:
+        return jsonify({"error": "query required"}), 400
+
+    resolved = data.resolve_ticker_query(query)
+    if resolved is None:
+        return jsonify({"error": f'No match found for "{query}".'}), 404
+
+    snapshot = data.get_stock_snapshot(resolved["ticker"])
+    if snapshot is None:
+        return jsonify({"error": f"Could not fetch market data for {resolved['ticker']}."}), 502
+
+    candidate = {**snapshot, "name": resolved["name"]}
+    return jsonify({"ticker": resolved["ticker"], "name": resolved["name"], "candidate": candidate})
+
+
+@app.route("/api/stock-analysis/analyze", methods=["POST"])
+def analyze_stock_analysis_ticker():
+    """Same ~200-word expert take as the Near 52W Low tab's Analyze
+    button, but for any ticker resolved via /api/stock-analysis/resolve
+    -- the frontend passes back the exact candidate snapshot that
+    endpoint returned rather than this route re-deriving it, the same
+    way /api/forex-calendar/analyze-impact takes a full event object
+    back from the client."""
+    body = request.get_json(force=True)
+    ticker = (body.get("ticker") or "").strip().upper()
+    candidate = body.get("candidate")
+    if not ticker or not isinstance(candidate, dict):
+        return jsonify({"error": "ticker and candidate required"}), 400
+
+    requested_provider = body.get("provider")
+    if requested_provider and requested_provider not in PROVIDERS:
+        return jsonify({"error": f"unknown provider {requested_provider!r}"}), 400
+    provider, api_key = _resolve_forex_analysis_provider(requested_provider)
+    if not api_key:
+        return jsonify({"error": "No saved API key for any provider. Add one in the Settings tab first."}), 400
+    model = body.get("model") or NEWS_DEFAULT_MODEL[provider]
+
+    ctx = _nearlow_analysis_context(ticker)
+    try:
+        result = nearlow_analysis.analyze_expert_take(
+            ticker, candidate, ctx["rating_timeline"], ctx["headlines"], ctx["macro_score"], provider, model, api_key=api_key
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"error": str(exc)}), 502
+    return jsonify(result)
+
+
+@app.route("/api/stock-analysis/panel", methods=["POST"])
+def stock_analysis_panel():
+    """Same 5-persona panel as the Near 52W Low tab, for any ticker
+    resolved via /api/stock-analysis/resolve."""
+    body = request.get_json(force=True)
+    ticker = (body.get("ticker") or "").strip().upper()
+    candidate = body.get("candidate")
+    if not ticker or not isinstance(candidate, dict):
+        return jsonify({"error": "ticker and candidate required"}), 400
+
+    requested_provider = body.get("provider")
+    if requested_provider and requested_provider not in PROVIDERS:
+        return jsonify({"error": f"unknown provider {requested_provider!r}"}), 400
+    provider, api_key = _resolve_forex_analysis_provider(requested_provider)
+    if not api_key:
+        return jsonify({"error": "No saved API key for any provider. Add one in the Settings tab first."}), 400
+    model = body.get("model") or NEWS_DEFAULT_MODEL[provider]
+
+    ctx = _nearlow_analysis_context(ticker)
+    panel = nearlow_analysis.run_expert_panel(
+        ticker, candidate, ctx["rating_timeline"], ctx["headlines"], ctx["macro_score"], provider, model, api_key=api_key
+    )
+    return jsonify({"ticker": ticker, "panel": panel})
+
+
 # --- Forex Factory economic calendar (Forex Calendar tab) -------------------
 #
 # Informational only -- shows the scheduled high-impact news calendar so
@@ -954,6 +1039,7 @@ PAGE_TEMPLATE = """<!doctype html>
   <button class="tab-btn" data-tab="movers">Top Movers</button>
   <button class="tab-btn" data-tab="growth">Top Growth</button>
   <button class="tab-btn" data-tab="nearlow">Near 52W Low</button>
+  <button class="tab-btn" data-tab="stock-analysis">Stock Analysis</button>
   <button class="tab-btn" data-tab="forex">Forex Calendar</button>
   <button class="tab-btn" data-tab="positions">Positions</button>
   <button class="tab-btn" data-tab="settings">Settings</button>
@@ -1110,6 +1196,22 @@ PAGE_TEMPLATE = """<!doctype html>
       </tr></thead>
       <tbody id="nl-body"></tbody>
     </table>
+  </div>
+
+  <!-- ===================== STOCK ANALYSIS TAB ===================== -->
+  <div class="tab-panel" id="tab-stock-analysis">
+    <p class="muted" style="max-width:640px;">
+      Type a ticker or company name -- Yahoo's own search resolves it to the right symbol -- and get a
+      ~200-word expert take with a buy-opportunity verdict, plus an optional 5-agent deep dive
+      (technical / fundamental / news / analyst-ratings-timing / macro). Works for any stock, not just
+      ones near a 52-week low. This is not investment advice.
+    </p>
+    <div class="controls">
+      <input type="text" id="sa-query" placeholder="Ticker or company name" style="min-width:240px;" onkeydown="if(event.key==='Enter') lookupStockAnalysis();">
+      <button class="action" id="sa-lookup-btn" onclick="lookupStockAnalysis()">Look Up</button>
+    </div>
+    <div id="sa-status" style="margin-top:8px;"></div>
+    <div id="sa-result" style="display:none; margin-top:12px; max-width:720px;"></div>
   </div>
 
   <!-- ===================== FOREX CALENDAR TAB ===================== -->
@@ -2055,6 +2157,118 @@ async function loadNearlowPanel(ticker) {
     nearlowPanel[ticker] = resData.panel;
     statusEl.textContent = "";
     renderNearlowDetail(ticker);
+  } catch (err) {
+    statusEl.textContent = "Error: " + err;
+  }
+}
+
+// ---------- STOCK ANALYSIS TAB ----------
+
+let saCurrent = null;  // { ticker, name, candidate } from the last successful lookup
+let saExpert = null;
+let saPanel = null;
+
+async function lookupStockAnalysis() {
+  const query = document.getElementById("sa-query").value.trim();
+  if (!query) return;
+  const statusEl = document.getElementById("sa-status");
+  const resultEl = document.getElementById("sa-result");
+  const btn = document.getElementById("sa-lookup-btn");
+  resultEl.style.display = "none";
+  saCurrent = null;
+  saExpert = null;
+  saPanel = null;
+  btn.disabled = true;
+  statusEl.innerHTML = '<span class="spinner"></span> Looking up...';
+  try {
+    const res = await fetch("/api/stock-analysis/resolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
+    });
+    const resData = await res.json();
+    if (!res.ok) { statusEl.textContent = "Error: " + resData.error; return; }
+    saCurrent = resData;
+    statusEl.textContent = "";
+    renderStockAnalysisResult();
+  } catch (err) {
+    statusEl.textContent = "Error: " + err;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderStockAnalysisResult() {
+  const resultEl = document.getElementById("sa-result");
+  const c = saCurrent.candidate;
+  const upsideStr = c.target_upside_pct !== null && c.target_upside_pct !== undefined
+    ? `${c.target_upside_pct >= 0 ? "+" : ""}${fmtNum(c.target_upside_pct, 1)}%`
+    : "n/a";
+
+  let expertHtml = '<button class="secondary" style="font-size:0.75rem; padding:4px 10px;" onclick="analyzeStockAnalysisTicker()">Analyze</button>';
+  if (saExpert) {
+    const [label, color] = nearlowVerdictLabel(saExpert.verdict);
+    expertHtml = `
+      <span style="display:inline-block; padding:2px 8px; border-radius:10px; background:${color}22; color:${color}; font-size:0.75rem; font-weight:600;">${escapeHtml(label)}</span>
+      <div style="margin-top:6px;">${escapeHtml(saExpert.analysis || "n/a")}</div>
+      <div class="disclaimer" style="margin-top:6px;">${escapeHtml(saExpert.disclaimer || "This is not investment advice.")}</div>`;
+  }
+
+  let panelHtml = "";
+  if (saExpert) {
+    panelHtml = saPanel
+      ? saPanel.map(renderNearlowPanelCard).join("")
+      : '<button class="secondary" style="font-size:0.75rem; padding:4px 10px;" onclick="runStockAnalysisPanel()">Generate 5 AI Agents</button>';
+  }
+
+  resultEl.innerHTML = `
+    <div class="news-card">
+      <span class="ticker">${escapeHtml(saCurrent.ticker)}</span> <span class="muted">${escapeHtml(saCurrent.name || "")}</span>
+      <div style="margin-top:4px;">
+        Price: ${fmtMoney(c.price)} &middot; 52w range: ${fmtMoney(c.year_low)}\\u2013${fmtMoney(c.year_high)}
+        &middot; Target: ${fmtMoney(c.target_mean)} (${upsideStr}) &middot; Mkt cap: ${fmtCap(c.market_cap)}
+      </div>
+      <div id="sa-expert" style="margin-top:10px;">${expertHtml}</div>
+      <div id="sa-panel-status" class="muted" style="margin-top:8px;"></div>
+      <div id="sa-panel-cards" style="margin-top:6px;">${panelHtml}</div>
+    </div>`;
+  resultEl.style.display = "block";
+}
+
+async function analyzeStockAnalysisTicker() {
+  const expertEl = document.getElementById("sa-expert");
+  expertEl.innerHTML = '<span class="muted"><span class="spinner"></span> Loading expert take...</span>';
+  try {
+    const res = await fetch("/api/stock-analysis/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker: saCurrent.ticker, candidate: saCurrent.candidate }),
+    });
+    const resData = await res.json();
+    if (!res.ok) { expertEl.innerHTML = `Error: ${escapeHtml(resData.error)}`; return; }
+    saExpert = resData;
+    renderStockAnalysisResult();
+  } catch (err) {
+    expertEl.innerHTML = `Error: ${escapeHtml(String(err))}`;
+  }
+}
+
+async function runStockAnalysisPanel() {
+  const statusEl = document.getElementById("sa-panel-status");
+  const cardsEl = document.getElementById("sa-panel-cards");
+  statusEl.innerHTML = '<span class="spinner"></span> Running 5 AI agents (technical, fundamental, news, ratings-timing, macro)\\u2014this makes 5 AI calls and can take a bit.';
+  cardsEl.innerHTML = "";
+  try {
+    const res = await fetch("/api/stock-analysis/panel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker: saCurrent.ticker, candidate: saCurrent.candidate }),
+    });
+    const resData = await res.json();
+    if (!res.ok) { statusEl.textContent = "Error: " + resData.error; return; }
+    saPanel = resData.panel;
+    statusEl.textContent = "";
+    renderStockAnalysisResult();
   } catch (err) {
     statusEl.textContent = "Error: " + err;
   }

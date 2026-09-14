@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import numbers
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -163,6 +165,127 @@ def _safe_float(value) -> Optional[float]:
         return None if f != f else f  # filter NaN
     except (TypeError, ValueError):
         return None
+
+
+def resolve_ticker_query(query: str) -> Optional[dict]:
+    """Resolve free text -- a ticker symbol or a company name -- to a
+    single best-match ticker via Yahoo's own search index. This is a
+    lookup problem, not a reasoning one, so it goes through Yahoo's
+    search rather than asking an AI to guess a symbol (which can
+    hallucinate a plausible-looking but wrong ticker). Prefers an exact
+    case-insensitive symbol match if the query itself is one of the
+    returned symbols, else the first equity-type result, else the first
+    result of any type. Returns None if nothing matched at all."""
+    from yfinance import Search
+
+    try:
+        quotes = Search(query, max_results=8).quotes
+    except Exception:
+        return None
+    if not quotes:
+        return None
+
+    query_upper = query.strip().upper()
+    exact = next((q for q in quotes if (q.get("symbol") or "").upper() == query_upper), None)
+    if exact:
+        best = exact
+    else:
+        equities = [q for q in quotes if q.get("quoteType") == "EQUITY"]
+        best = (equities or quotes)[0]
+
+    ticker = best.get("symbol")
+    if not ticker:
+        return None
+    return {
+        "ticker": ticker,
+        "name": best.get("shortname") or best.get("longname"),
+        "exchange": best.get("exchange"),
+    }
+
+
+def _current_period_ratings(recommendations: dict) -> dict:
+    """Same shape-parsing as growth_screener._current_period_ratings and
+    nearlow_screener._current_period_ratings -- duplicated locally rather
+    than shared, since it's a small, self-contained piece of pandas
+    .to_dict()-shape parsing and this module otherwise has no dependency
+    on either screener."""
+    result = {}
+    for category in ("strongBuy", "buy", "hold", "sell", "strongSell"):
+        col = recommendations.get(category)
+        if isinstance(col, dict) and col:
+            result[category] = next(iter(col.values()))
+        elif isinstance(col, list) and col:
+            result[category] = col[0]
+    return result
+
+
+def _buy_ratio_pct(ratings: dict) -> tuple[Optional[float], int]:
+    """% of all analyst ratings that are "buy" or "strong buy", plus the
+    total ratings count. See nearlow_screener._buy_ratio_pct for why
+    numbers.Real is used instead of isinstance(v, (int, float))."""
+    total = sum(v for v in ratings.values() if isinstance(v, numbers.Real))
+    if not total:
+        return None, 0
+    buy_like = float(ratings.get("strongBuy", 0)) + float(ratings.get("buy", 0))
+    return buy_like / total * 100.0, int(total)
+
+
+def get_stock_snapshot(ticker: str) -> Optional[dict]:
+    """The same "candidate" shape the growth/near-low screeners produce
+    (price, 52-week range, analyst price target, ratings breakdown,
+    market cap) but for one arbitrary ticker on demand -- not gated by
+    any screen's filters or cached results. This is what lets a human
+    type ANY ticker into the Stock Analysis tab and get it analyzed, not
+    just names that happened to pass a screen. Returns None if the
+    ticker doesn't resolve to real market data (bad symbol, delisted,
+    etc.)."""
+    try:
+        t = yf.Ticker(ticker)
+        fast_info = t.fast_info
+        current_price = fast_info.last_price
+        year_high = fast_info.year_high
+        year_low = fast_info.year_low
+        market_cap = fast_info.market_cap
+    except Exception:
+        return None
+    if not current_price or not year_low:
+        return None
+
+    pct_from_52w_low = (current_price - year_low) / year_low * 100.0
+    pct_from_52w_high = (current_price - year_high) / year_high * 100.0 if year_high else None
+
+    ratings: dict = {}
+    try:
+        recommendations = t.get_recommendations_summary(as_dict=True) or {}
+        ratings = _current_period_ratings(recommendations)
+    except Exception:
+        pass
+    buy_ratio_pct, _ratings_count = _buy_ratio_pct(ratings)
+
+    mean_target = None
+    try:
+        price_targets = t.get_analyst_price_targets() or {}
+        mean_target = price_targets.get("mean")
+    except Exception:
+        pass
+    target_upside_pct = (mean_target - current_price) / current_price * 100.0 if mean_target else None
+
+    snapshot = {
+        "ticker": ticker,
+        "price": current_price,
+        "year_low": year_low,
+        "year_high": year_high,
+        "pct_from_52w_low": pct_from_52w_low,
+        "pct_from_52w_high": pct_from_52w_high,
+        "target_mean": mean_target,
+        "target_upside_pct": target_upside_pct,
+        "analyst_ratings": ratings,
+        "buy_ratio_pct": buy_ratio_pct,
+        "market_cap": market_cap,
+    }
+    # Same round-trip as the screeners -- yfinance's dict conversions carry
+    # numpy/pandas types that json.dumps chokes on downstream (jsonify).
+    return json.loads(json.dumps(snapshot, default=str))
 
 
 def find_quote(chain: dict, expiry: str, option_type: str, strike: float) -> Optional[Quote]:

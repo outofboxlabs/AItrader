@@ -1157,3 +1157,138 @@ def test_nearlow_panel_returns_five_agent_takes(client, monkeypatch):
     assert data["ticker"] == "ACME"
     assert len(data["panel"]) == 5
     assert {p["persona"] for p in data["panel"]} == {"technical", "fundamental", "news_sentiment", "ratings_timing", "macro_risk"}
+
+
+# --- Stock Analysis tab (free-text ticker/company lookup) ---------------
+
+
+def _fake_candidate(**overrides):
+    candidate = {
+        "ticker": "ORCL",
+        "name": "Oracle Corp",
+        "price": 150.0,
+        "year_low": 100.0,
+        "year_high": 200.0,
+        "pct_from_52w_low": 50.0,
+        "pct_from_52w_high": -25.0,
+        "target_mean": 180.0,
+        "target_upside_pct": 20.0,
+        "analyst_ratings": {"buy": 5, "hold": 2},
+        "buy_ratio_pct": 71.4,
+        "market_cap": 5_000_000_000,
+    }
+    candidate.update(overrides)
+    return candidate
+
+
+def test_resolve_stock_analysis_ticker_requires_query(client):
+    res = client.post("/api/stock-analysis/resolve", data=json.dumps({}), content_type="application/json")
+    assert res.status_code == 400
+
+
+def test_resolve_stock_analysis_ticker_returns_404_when_nothing_matches(client, monkeypatch):
+    monkeypatch.setattr(app_mod.data, "resolve_ticker_query", lambda query: None)
+    res = client.post("/api/stock-analysis/resolve", data=json.dumps({"query": "zzznotreal"}), content_type="application/json")
+    assert res.status_code == 404
+
+
+def test_resolve_stock_analysis_ticker_returns_502_when_snapshot_fails(client, monkeypatch):
+    monkeypatch.setattr(app_mod.data, "resolve_ticker_query", lambda query: {"ticker": "ORCL", "name": "Oracle Corp"})
+    monkeypatch.setattr(app_mod.data, "get_stock_snapshot", lambda ticker: None)
+    res = client.post("/api/stock-analysis/resolve", data=json.dumps({"query": "oracle"}), content_type="application/json")
+    assert res.status_code == 502
+
+
+def test_resolve_stock_analysis_ticker_returns_candidate(client, monkeypatch):
+    monkeypatch.setattr(app_mod.data, "resolve_ticker_query", lambda query: {"ticker": "ORCL", "name": "Oracle Corp"})
+    monkeypatch.setattr(app_mod.data, "get_stock_snapshot", lambda ticker: _fake_candidate())
+
+    res = client.post("/api/stock-analysis/resolve", data=json.dumps({"query": "oracle"}), content_type="application/json")
+    assert res.status_code == 200
+    body = res.get_json()
+    assert body["ticker"] == "ORCL"
+    assert body["name"] == "Oracle Corp"
+    assert body["candidate"]["price"] == 150.0
+
+
+def test_analyze_stock_analysis_ticker_requires_ticker_and_candidate(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    res = client.post("/api/stock-analysis/analyze", data=json.dumps({"ticker": "ORCL"}), content_type="application/json")
+    assert res.status_code == 400
+    res2 = client.post("/api/stock-analysis/analyze", data=json.dumps({"candidate": {}}), content_type="application/json")
+    assert res2.status_code == 400
+
+
+def test_analyze_stock_analysis_ticker_returns_expert_take(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
+
+    captured = {}
+
+    def fake_analyze(ticker, candidate, rating_timeline, headlines, macro_score, provider, model, api_key=None):
+        captured["ticker"] = ticker
+        captured["candidate"] = candidate
+        return {"analysis": "About 200 words.", "verdict": "buy_opportunity", "disclaimer": "This is not investment advice.", "parse_error": False}
+
+    monkeypatch.setattr(app_mod.nearlow_analysis, "analyze_expert_take", fake_analyze)
+
+    res = client.post(
+        "/api/stock-analysis/analyze",
+        data=json.dumps({"ticker": "orcl", "candidate": _fake_candidate()}),
+        content_type="application/json",
+    )
+    assert res.status_code == 200
+    body = res.get_json()
+    assert body["analysis"] == "About 200 words."
+    assert captured["ticker"] == "ORCL"
+    assert captured["candidate"]["ticker"] == "ORCL"
+
+
+def test_analyze_stock_analysis_ticker_handles_ai_failure(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
+
+    def boom(*a, **kw):
+        raise RuntimeError("rate limited")
+
+    monkeypatch.setattr(app_mod.nearlow_analysis, "analyze_expert_take", boom)
+
+    res = client.post(
+        "/api/stock-analysis/analyze",
+        data=json.dumps({"ticker": "ORCL", "candidate": _fake_candidate()}),
+        content_type="application/json",
+    )
+    assert res.status_code == 502
+
+
+def test_stock_analysis_panel_requires_ticker_and_candidate(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    res = client.post("/api/stock-analysis/panel", data=json.dumps({"ticker": "ORCL"}), content_type="application/json")
+    assert res.status_code == 400
+
+
+def test_stock_analysis_panel_returns_five_agent_takes(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
+
+    fake_panel = [
+        {"persona": "technical", "label": "Technical Analyst", "take": "x", "stance": "bullish", "error": None},
+        {"persona": "fundamental", "label": "Fundamental Analyst", "take": "x", "stance": "neutral", "error": None},
+        {"persona": "news_sentiment", "label": "News & Sentiment Analyst", "take": "x", "stance": "bearish", "error": None},
+        {"persona": "ratings_timing", "label": "Analyst-Ratings Auditor", "take": "x", "stance": "neutral", "error": None},
+        {"persona": "macro_risk", "label": "Macro & Risk Manager", "take": "x", "stance": "neutral", "error": None},
+    ]
+    monkeypatch.setattr(app_mod.nearlow_analysis, "run_expert_panel", lambda *a, **kw: fake_panel)
+
+    res = client.post(
+        "/api/stock-analysis/panel",
+        data=json.dumps({"ticker": "ORCL", "candidate": _fake_candidate()}),
+        content_type="application/json",
+    )
+    assert res.status_code == 200
+    body = res.get_json()
+    assert body["ticker"] == "ORCL"
+    assert len(body["panel"]) == 5

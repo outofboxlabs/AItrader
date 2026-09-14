@@ -1,12 +1,17 @@
-"""On-demand AI analysis for the Near-52-Week-Low screen: a single ~200-word
-expert take with a buy-opportunity verdict, and 5 independent single-focus
-analyst inquiries (technical / fundamental / news / analyst-ratings-timing /
-macro-risk) about the same stock. The 5 are genuinely separate calls, each
-given only the narrow slice of data its own question needs -- not one
-prompt told "you are 5 agents on a panel" with the full context repeated
-five times. Both are informational only -- never a buy/sell/hold
-instruction -- and only run when a human clicks a button for one specific
-ticker; nothing here runs automatically across a whole screen.
+"""On-demand AI stock analysis: a single ~200-word expert take with a
+buy-opportunity verdict, and 5 independent single-focus analyst inquiries
+(technical / fundamental / news / analyst-ratings-timing / macro-risk)
+about the same stock. Used both by the Near 52W Low screen (one of its
+candidates) and by the free-text Stock Analysis tab (any ticker a human
+types in) -- the prompts here don't assume the stock is currently near its
+low, only that its 52-week range is known.
+
+The 5 are genuinely separate calls, each given only the narrow slice of
+data its own question needs -- not one prompt told "you are 5 agents on a
+panel" with the full context repeated five times. Both are informational
+only -- never a buy/sell/hold instruction -- and only run when a human
+clicks a button for one specific ticker; nothing here runs automatically
+across a whole screen.
 """
 
 from __future__ import annotations
@@ -178,14 +183,14 @@ def build_context_user_message(
 
 
 EXPERT_SYSTEM_PROMPT = """You are a seasoned equity research analyst embedded \
-in a portfolio monitoring tool. You are given one stock trading near its \
-52-week low: its price/range data, current analyst consensus, recent analyst \
-rating CHANGES with their dates and the stock's price at each one, recent \
-headlines, and the current macro environment. Your job is ONLY to inform, \
-never to advise.
+in a portfolio monitoring tool. You are given one stock: its price/52-week- \
+range data, current analyst consensus, recent analyst rating CHANGES with \
+their dates and the stock's price at each one, recent headlines, and the \
+current macro environment. Your job is ONLY to inform, never to advise.
 
 Write ONE analysis of about 200 words (180-220 is fine) covering:
-- Why the stock may be down near its low, based on the headlines/data given.
+- Why the stock is trading where it is in its 52-week range, based on the \
+headlines/data given.
 - Whether the current analyst consensus and any recent rating changes still \
 look credible given how much time has passed and how the price has moved \
 since. Use the "% above what would become its 52-week low when issued" \
@@ -349,13 +354,14 @@ PANEL_SYSTEM_PROMPTS = {
     "technical": (
         "Technical Analyst",
         """You are a technical analyst. You're asked to independently assess one \
-stock trading near its 52-week low, given only its current price, 52-week \
-high/low, and the date of its own 52-week low. Give a short (60-100 word) \
-technical read: where the current price sits in its range, whether the low \
-looks like it may be forming a base or still falling, and what price level \
-would change your mind either way. You have no chart or indicator data \
-beyond what's given -- be honest about that limit rather than inventing \
-patterns you can't see. Never say to buy, sell, or hold.
+stock given only its current price, 52-week high/low, and the date of its \
+own 52-week low. Give a short (60-100 word) technical read: where the \
+current price sits in its 52-week range, what that positioning suggests \
+about momentum (e.g. basing near a low, extended near a high, or \
+range-bound), and what price level would change your mind either way. You \
+have no chart or indicator data beyond what's given -- be honest about \
+that limit rather than inventing patterns you can't see. Never say to buy, \
+sell, or hold.
 
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",
@@ -363,8 +369,8 @@ Respond with ONLY a JSON object, no other text: \
     "fundamental": (
         "Fundamental Analyst",
         """You are a fundamental analyst. You're asked to independently assess \
-one stock trading near its 52-week low, given only its market cap, analyst \
-mean price target, and the buy-ratio among current ratings. Give a short \
+one stock given only its market cap, analyst mean price target, and the \
+buy-ratio among current ratings. Give a short \
 (60-100 word) fundamental read on whether the current price plausibly \
 undervalues the business given what analysts are pricing in via their \
 target, and what would need to be true about the business for the stock to \
@@ -378,11 +384,11 @@ Respond with ONLY a JSON object, no other text: \
     "news_sentiment": (
         "News & Sentiment Analyst",
         """You are a news/sentiment analyst. You're asked to independently assess \
-one stock trading near its 52-week low, given only its recent headlines. \
-Give a short (60-100 word) read on what the news flow suggests is driving \
-the price action, and whether sentiment looks like it's stabilizing, still \
-deteriorating, or already reflects a worst case. If no headlines were \
-given, say so plainly rather than guessing. Never say to buy, sell, or hold.
+one stock given only its recent headlines. Give a short (60-100 word) read \
+on what the news flow suggests is driving the price action, and whether \
+sentiment looks like it's improving, stabilizing, or deteriorating. If no \
+headlines were given, say so plainly rather than guessing. Never say to \
+buy, sell, or hold.
 
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",
@@ -390,9 +396,9 @@ Respond with ONLY a JSON object, no other text: \
     "ratings_timing": (
         "Analyst-Ratings Auditor",
         """You are an analyst-ratings auditor. Your ONLY job is to independently \
-check the TIMING of recent analyst rating changes for one stock trading near \
-its 52-week low against the stock's own price action -- nothing else about \
-this stock is in scope for you. For each recent rating change you are given \
+check the TIMING of recent analyst rating changes for one stock against the \
+stock's own price action -- nothing else about this stock is in scope for \
+you. For each recent rating change you are given \
 its date, the stock's price on/near that date, how far above what LATER \
 became the stock's 52-week low that price already was at the time (e.g. \
 "was 10% above what would become its 52-week low when issued"), whether the \
@@ -427,14 +433,14 @@ Respond with ONLY a JSON object, no other text: \
     "macro_risk": (
         "Macro & Risk Analyst",
         """You are a macro/risk analyst. You're asked to independently assess one \
-stock trading near its 52-week low, given only how far above that low it \
-currently sits and the current macro "calm" score (0-100, higher = \
-calmer) -- no company-specific fundamentals or news are in scope for you. \
-Give a short (60-100 word) devil's-advocate read: what could keep a stock \
-like this down further regardless of company-specific factors (macro \
-conditions, sector rotation, liquidity), and whether the current macro \
-backdrop supports or argues against adding risk to a name like this right \
-now. Never say to buy, sell, or hold.
+stock given only how far above its 52-week low it currently sits and the \
+current macro "calm" score (0-100, higher = calmer) -- no company-specific \
+fundamentals or news are in scope for you. Give a short (60-100 word) \
+devil's-advocate read: what macro-level factors (rate environment, sector \
+rotation, liquidity) could move a stock like this regardless of company- \
+specifics, and whether the current macro backdrop supports or argues \
+against adding risk to a name like this right now. Never say to buy, \
+sell, or hold.
 
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",
