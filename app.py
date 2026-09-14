@@ -27,7 +27,7 @@ from typing import Optional
 from flask import Flask, jsonify, render_template_string, request
 
 import config
-from portfolio_monitor import credentials, data, edgar, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_analysis, nearlow_screener, news, pipeline, reddit_sentiment, scheduler, technical_indicators, vision
+from portfolio_monitor import credentials, data, edgar, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_analysis, nearlow_screener, news, pipeline, scheduler, stocktwits_sentiment, technical_indicators, vision
 from portfolio_monitor import db as db_mod
 from portfolio_monitor.models import Position
 
@@ -367,7 +367,7 @@ def _build_agent_context(
     and panel functions read from. `selected_personas` (the panel-only
     case; leave as None for the single expert take) lets this skip
     network calls a persona that wasn't picked doesn't need -- no SEC
-    EDGAR call unless "filings" is selected, no Reddit call unless
+    EDGAR call unless "filings" is selected, no StockTwits call unless
     "social_sentiment" is selected. daily_history is fetched once and
     reused for both the rating timeline and the technical indicators
     rather than pulled twice."""
@@ -391,14 +391,7 @@ def _build_agent_context(
         context["filings"] = edgar.get_recent_filings(ticker)
     if "social_sentiment" in selected:
         context["social_sentiment_window"] = social_sentiment_window
-        reddit_client_id = credentials.resolve_api_key("reddit_client_id", interactive=False)
-        reddit_client_secret = credentials.resolve_api_key("reddit_client_secret", interactive=False)
-        if reddit_client_id and reddit_client_secret:
-            context["social_sentiment"] = reddit_sentiment.search_recent_posts(
-                ticker, social_sentiment_window, reddit_client_id, reddit_client_secret
-            )
-        else:
-            context["social_sentiment"] = None
+        context["social_sentiment"] = stocktwits_sentiment.get_recent_messages(ticker, social_sentiment_window)
 
     return context
 
@@ -951,15 +944,12 @@ def has_key():
     return jsonify({"has_key": bool(key)})
 
 
-SAVABLE_CREDENTIAL_KEYS = PROVIDERS + ["reddit_client_id", "reddit_client_secret"]
-
-
 @app.route("/api/settings/api-key", methods=["POST"])
 def save_api_key():
     body = request.get_json(force=True)
     provider = body.get("provider")
     api_key = body.get("api_key")
-    if provider not in SAVABLE_CREDENTIAL_KEYS:
+    if provider not in PROVIDERS:
         return jsonify({"error": "unknown provider"}), 400
     if not api_key:
         return jsonify({"error": "api_key required"}), 400
@@ -1333,10 +1323,6 @@ PAGE_TEMPLATE = """<!doctype html>
     <h2 style="font-size:1rem;">AI provider API keys</h2>
     <p class="muted">Saved locally to .credentials.json on this machine -- never committed to git, never sent anywhere but the provider you choose.</p>
     <div class="settings-grid" id="settings-keys"></div>
-
-    <h2 style="font-size:1rem; margin-top: 1.5rem;">Other data source keys</h2>
-    <p class="muted">Optional -- only needed for agents that use them (e.g. the Social Sentiment agent needs a free Reddit "script" app -- register one at reddit.com/prefs/apps to get a Client ID and Secret). Same local storage as above.</p>
-    <div class="settings-grid" id="settings-extra-keys"></div>
 
     <h2 style="font-size:1rem; margin-top: 1.5rem;">Daily Top Movers scheduler</h2>
     <p class="muted" id="settings-scheduler-info">loading...</p>
@@ -2662,10 +2648,6 @@ async function parseScreenshots() {
 
 // ---------- SETTINGS TAB ----------
 const PROVIDER_LABELS = { anthropic: "Anthropic (Claude)", openai: "OpenAI (GPT)", gemini: "Google (Gemini)" };
-const EXTRA_KEY_LABELS = {
-  reddit_client_id: "Reddit Client ID (social sentiment agent)",
-  reddit_client_secret: "Reddit Client Secret (social sentiment agent)",
-};
 
 async function loadKeyGrid(labels, containerId) {
   const container = document.getElementById(containerId);
@@ -2689,7 +2671,6 @@ async function loadKeyGrid(labels, containerId) {
 
 async function loadSettings() {
   await loadKeyGrid(PROVIDER_LABELS, "settings-keys");
-  await loadKeyGrid(EXTRA_KEY_LABELS, "settings-extra-keys");
 }
 
 async function saveKey(provider) {

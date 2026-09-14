@@ -407,20 +407,18 @@ def _social_sentiment_lines(ticker: str, context: dict) -> list[str]:
     candidate = context["candidate"]
     window = context.get("social_sentiment_window") or "today"
     window_phrase = _WINDOW_PHRASE.get(window, f"in the past {window}")
-    posts = context.get("social_sentiment")
+    messages = context.get("social_sentiment")
     lines = [
         f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})",
-        f"Recent Reddit posts mentioning this ticker {window_phrase} "
-        f"(from r/wallstreetbets, r/stocks, r/investing, r/StockMarket, r/options):",
+        f"Recent StockTwits messages mentioning this ticker {window_phrase} "
+        f"(each tagged Bullish/Bearish by the trader who posted it, or untagged):",
     ]
-    if posts:
-        for p in posts:
-            lines.append(
-                f"- [{p.get('created_at')}] r/{p.get('subreddit')} "
-                f"({p.get('score')} upvotes, {p.get('num_comments')} comments): \"{p.get('title')}\""
-            )
+    if messages:
+        for m in messages:
+            tag = m.get("sentiment") or "untagged"
+            lines.append(f"- [{m.get('created_at')}] @{m.get('username')} ({tag}, {m.get('likes')} likes): \"{m.get('body')}\"")
     else:
-        lines.append("(no posts found -- no Reddit API credentials saved, or nothing posted in this window)")
+        lines.append("(no messages found for this window)")
     return lines
 
 
@@ -550,17 +548,19 @@ Respond with ONLY a JSON object, no other text: \
     "social_sentiment": (
         "Social Sentiment Analyst",
         """You are a social-media sentiment analyst. You're asked to \
-independently assess one stock given only a list of recent Reddit posts \
-mentioning it (title, subreddit, upvotes, comment count, and when posted) \
-from a specific recent time window -- you do not see the comments \
-themselves, only the post-level data. Give a short (60-100 word) read on \
-what these posts suggest about retail sentiment and interest right now -- \
-rising or falling attention, and whether the tone of the titles/framing \
-leans bullish, bearish, or mixed. If no posts were given (no Reddit API \
-credentials configured, or nothing posted in this window), say so plainly \
-rather than guessing. Retail social sentiment is noisy and often \
-contrarian -- do not treat volume or tone alone as a signal of where the \
-stock is headed. Never say to buy, sell, or hold.
+independently assess one stock given only a list of recent StockTwits \
+messages mentioning it, from a specific recent time window. Each message \
+gives you who posted it, when, how many likes it got, its text, and --\
+importantly -- a Bullish/Bearish tag the POSTER THEMSELVES chose when \
+writing it (or untagged, if they didn't pick one). Give a short (60-100 \
+word) read on what these messages suggest about retail sentiment and \
+interest right now: weigh the self-tagged Bullish/Bearish split directly \
+(don't just infer tone from wording when an explicit tag is given), and \
+note rising or falling attention. If no messages were given (nothing \
+posted in this window), say so plainly rather than guessing. Retail \
+social sentiment is noisy and often contrarian -- do not treat volume or \
+tag mix alone as a signal of where the stock is headed. Never say to \
+buy, sell, or hold.
 
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",
