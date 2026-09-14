@@ -16,6 +16,7 @@ like every other external call in this app, rather than crashing.
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -47,6 +48,7 @@ def get_recent_messages(ticker: str, window: str, now: Optional[datetime] = None
     now = now or datetime.now(timezone.utc)
     cutoff = now - cutoff_delta
 
+    response = None
     try:
         response = requests.get(
             f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json",
@@ -59,10 +61,14 @@ def get_recent_messages(ticker: str, window: str, now: Optional[datetime] = None
         )
         response.raise_for_status()
         payload = response.json()
-    except Exception:
+    except Exception as exc:
+        status = getattr(response, "status_code", "no response")
+        print(f"[social_sentiment] StockTwits request for {ticker} failed (status={status}): {type(exc).__name__}: {exc}", file=sys.stderr)
         return None
 
     raw_messages = payload.get("messages") or []
+    if not raw_messages:
+        print(f"[social_sentiment] StockTwits returned 0 messages for {ticker} (response keys: {sorted(payload.keys())})", file=sys.stderr)
     messages = []
     for m in raw_messages:
         created_at_str = (m.get("created_at") or "").replace("Z", "+00:00")
