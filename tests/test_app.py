@@ -1173,10 +1173,11 @@ def test_nearlow_panel_only_fetches_data_for_selected_personas(client, monkeypat
     monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
     _seed_nearlow_candidate()
 
-    calls = {"financials": 0, "filings": 0, "sentiment": 0}
+    calls = {"financials": 0, "filings": 0, "sentiment": 0, "price_targets": 0}
     monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: calls.__setitem__("financials", calls["financials"] + 1) or None)
     monkeypatch.setattr(app_mod.edgar, "get_recent_filings", lambda ticker: calls.__setitem__("filings", calls["filings"] + 1) or [])
     monkeypatch.setattr(app_mod.stocktwits_sentiment, "get_recent_messages", lambda *a, **kw: calls.__setitem__("sentiment", calls["sentiment"] + 1) or None)
+    monkeypatch.setattr(app_mod.price_targets, "get_price_target_history", lambda *a, **kw: calls.__setitem__("price_targets", calls["price_targets"] + 1) or None)
 
     captured = {}
     monkeypatch.setattr(
@@ -1191,10 +1192,11 @@ def test_nearlow_panel_only_fetches_data_for_selected_personas(client, monkeypat
         content_type="application/json",
     )
     assert res.status_code == 200
-    assert calls == {"financials": 0, "filings": 0, "sentiment": 0}  # none of these personas were selected
+    assert calls == {"financials": 0, "filings": 0, "sentiment": 0, "price_targets": 0}  # none of these personas were selected
     assert captured["personas"] == ["technical", "news"]
     assert "financials" not in captured["context"]
     assert "filings" not in captured["context"]
+    assert "price_targets" not in captured["context"]
 
 
 def test_nearlow_panel_fetches_social_sentiment_with_requested_window(client, monkeypatch):
@@ -1222,6 +1224,61 @@ def test_nearlow_panel_fetches_social_sentiment_with_requested_window(client, mo
     assert res.status_code == 200
     assert captured["ticker"] == "ACME"
     assert captured["window"] == "month"
+
+
+def test_nearlow_panel_fetches_price_targets_when_fmp_key_saved(client, monkeypatch):
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker, **kw: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: [])
+    monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: {"fmp": "fmp-key-123"}.get(provider, "sk-ai"))
+    _seed_nearlow_candidate()
+
+    captured = {}
+
+    def fake_get_price_target_history(ticker, api_key, **kw):
+        captured["ticker"] = ticker
+        captured["api_key"] = api_key
+        return [{"published_date": "2026-08-14", "target_date": "2027-08-14", "price_target": 60.0}]
+
+    monkeypatch.setattr(app_mod.price_targets, "get_price_target_history", fake_get_price_target_history)
+    monkeypatch.setattr(app_mod.nearlow_analysis, "run_expert_panel", lambda *a, **kw: [])
+
+    res = client.post(
+        "/api/nearlow/panel",
+        data=json.dumps({"ticker": "ACME", "personas": ["price_targets"]}),
+        content_type="application/json",
+    )
+    assert res.status_code == 200
+    assert captured["ticker"] == "ACME"
+    assert captured["api_key"] == "fmp-key-123"
+
+
+def test_nearlow_panel_skips_price_targets_call_without_fmp_key(client, monkeypatch):
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker, **kw: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: [])
+    monkeypatch.setattr(app_mod.news, "fetch_recent_headlines", lambda ticker, window_days=5: [])
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: {"fmp": None}.get(provider, "sk-ai"))
+    _seed_nearlow_candidate()
+
+    calls = {"price_targets": 0}
+    monkeypatch.setattr(app_mod.price_targets, "get_price_target_history", lambda *a, **kw: calls.__setitem__("price_targets", calls["price_targets"] + 1) or None)
+
+    captured = {}
+    monkeypatch.setattr(
+        app_mod.nearlow_analysis,
+        "run_expert_panel",
+        lambda ticker, context, personas, provider, model, api_key=None: captured.update(context=context) or [],
+    )
+
+    res = client.post(
+        "/api/nearlow/panel",
+        data=json.dumps({"ticker": "ACME", "personas": ["price_targets"]}),
+        content_type="application/json",
+    )
+    assert res.status_code == 200
+    assert calls == {"price_targets": 0}
+    assert captured["context"]["fmp_key_configured"] is False
+    assert captured["context"]["price_targets"] is None
 
 
 # --- Stock Analysis tab (free-text ticker/company lookup) ---------------

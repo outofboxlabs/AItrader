@@ -247,7 +247,7 @@ def test_analyze_expert_take_propagates_api_failure(monkeypatch):
 
 # --- run_expert_panel -----------------------------------------------------
 
-ALL_PERSONAS = ["technical", "fundamental", "news", "ratings_timing", "macro_risk", "filings", "social_sentiment"]
+ALL_PERSONAS = ["technical", "fundamental", "news", "ratings_timing", "macro_risk", "filings", "social_sentiment", "price_targets"]
 
 
 def test_run_expert_panel_calls_only_selected_personas(monkeypatch):
@@ -340,6 +340,20 @@ def test_run_expert_panel_gives_each_persona_only_its_own_tailored_data(monkeypa
             {"body": "ACME to the moon", "username": "trader1", "sentiment": "Bullish", "likes": 120, "created_at": "2026-09-14T12:00:00+00:00"}
         ],
         social_sentiment_window="week",
+        fmp_key_configured=True,
+        price_targets=[
+            {
+                "published_date": "2026-08-14",
+                "target_date": "2027-08-14",
+                "analyst_company": "Big Bank Securities",
+                "analyst_name": "Jane Doe",
+                "price_target": 60.0,
+                "price_when_posted": 42.0,
+                "implied_pct_change": 42.9,
+                "news_title": "Big Bank Securities raises ACME target",
+                "news_url": "https://example.com/news",
+            }
+        ],
     )
 
     nla.run_expert_panel("ACME", context, ALL_PERSONAS, "anthropic", "claude-haiku-4-5", api_key="sk-test")
@@ -386,6 +400,13 @@ def test_run_expert_panel_gives_each_persona_only_its_own_tailored_data(monkeypa
     assert "Market cap" not in captured["social_sentiment"]
     assert "Acme misses on guidance" not in captured["social_sentiment"]
 
+    # Price targets: only the FMP price-target list.
+    assert "Big Bank Securities" in captured["price_targets"]
+    assert "Jane Doe" in captured["price_targets"]
+    assert "2027-08-14" in captured["price_targets"]
+    assert "Market cap" not in captured["price_targets"]
+    assert "Acme misses on guidance" not in captured["price_targets"]
+
 
 def test_filings_lines_reports_when_none_found():
     lines = nla._filings_lines("ACME", _context(filings=[]))
@@ -421,6 +442,42 @@ def test_social_sentiment_lines_reports_totals_and_truncates_long_lists():
     assert "msg 59" in joined
     assert "msg 60" not in joined  # beyond the per-prompt cap
     assert "20 more messages omitted" in joined
+
+
+def test_price_target_lines_reports_missing_api_key():
+    lines = nla._price_target_lines("ACME", _context(price_targets=None, fmp_key_configured=False))
+    joined = "\n".join(lines)
+    assert "No Financial Modeling Prep API key" in joined
+
+
+def test_price_target_lines_reports_when_none_found():
+    lines = nla._price_target_lines("ACME", _context(price_targets=[], fmp_key_configured=True))
+    assert any("none found" in line for line in lines)
+
+
+def test_price_target_lines_lists_real_targets():
+    targets = [
+        {
+            "published_date": "2026-08-14",
+            "target_date": "2027-08-14",
+            "analyst_company": "Big Bank Securities",
+            "analyst_name": "Jane Doe",
+            "price_target": 60.0,
+            "price_when_posted": 42.0,
+            "implied_pct_change": 42.9,
+            "news_title": "x",
+            "news_url": "y",
+        }
+    ]
+    lines = nla._price_target_lines("ACME", _context(price_targets=targets, fmp_key_configured=True))
+    joined = "\n".join(lines)
+    assert "Big Bank Securities" in joined
+    assert "Jane Doe" in joined
+    assert "$60.0" in joined
+    assert "$42.0" in joined
+    assert "+42.9%" in joined
+    assert "2027-08-14" in joined
+    assert "12 months" in joined
 
 
 def test_technical_lines_reports_when_indicators_unavailable():

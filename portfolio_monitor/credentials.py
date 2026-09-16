@@ -20,12 +20,14 @@ ENV_VAR_BY_PROVIDER = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
     "gemini": "GEMINI_API_KEY",
+    "fmp": "FMP_API_KEY",
 }
 
 DISPLAY_NAME_BY_PROVIDER = {
     "anthropic": "Anthropic (Claude)",
     "openai": "OpenAI (GPT)",
     "gemini": "Google (Gemini)",
+    "fmp": "Financial Modeling Prep (price targets)",
 }
 
 

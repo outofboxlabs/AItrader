@@ -434,6 +434,39 @@ def _social_sentiment_lines(ticker: str, context: dict) -> list[str]:
     return lines
 
 
+def _price_target_lines(ticker: str, context: dict) -> list[str]:
+    candidate = context["candidate"]
+    targets = context.get("price_targets")
+    lines = [f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})", ""]
+    if targets is None and not context.get("fmp_key_configured"):
+        lines.append(
+            "No Financial Modeling Prep API key is configured, so no price-target "
+            "history is available. (Add one in the Settings tab to use this agent.)"
+        )
+        return lines
+    lines.append(
+        "Recent individual analyst price-target announcements (most recent first). "
+        "target_date is this app's own estimate -- published_date + 12 months, the "
+        "conventional Wall Street horizon -- not a date the firm itself stated:"
+    )
+    if targets:
+        for t in targets:
+            pct = t.get("implied_pct_change")
+            pct_str = f"{pct:+.1f}%" if pct is not None else "n/a"
+            analyst_name = t.get("analyst_name")
+            firm_part = t.get("analyst_company") or "Unknown firm"
+            if analyst_name:
+                firm_part += f" ({analyst_name})"
+            lines.append(
+                f"- [{t.get('published_date')}] {firm_part}: "
+                f"target ${t.get('price_target')} (price then ${t.get('price_when_posted')}, "
+                f"implied {pct_str}), expected to play out by ~{t.get('target_date')}"
+            )
+    else:
+        lines.append("(none found for this ticker)")
+    return lines
+
+
 PANEL_CONTEXT_BUILDERS = {
     "technical": _price_range_lines,
     "fundamental": _fundamental_lines,
@@ -442,6 +475,7 @@ PANEL_CONTEXT_BUILDERS = {
     "macro_risk": _macro_lines,
     "filings": _filings_lines,
     "social_sentiment": _social_sentiment_lines,
+    "price_targets": _price_target_lines,
 }
 
 
@@ -575,6 +609,26 @@ attention. If no messages were given (nothing posted in this window), \
 say so plainly rather than guessing. Retail social sentiment is noisy \
 and often contrarian -- do not treat volume or tag mix alone as a signal \
 of where the stock is headed. Never say to buy, sell, or hold.
+
+Respond with ONLY a JSON object, no other text: \
+{"take": "...", "stance": "bullish|bearish|neutral"}""",
+    ),
+    "price_targets": (
+        "Price Target Analyst",
+        """You are a price-target analyst. You're asked to independently assess \
+one stock given a list of individual analyst price-target announcements: \
+each one names the firm (and analyst, when known), the date it was \
+published, the dollar price target, the stock's price at that time, the \
+implied % move that target called for, and a target_date -- this app's \
+own estimate of when that call was meant to play out (published date + \
+12 months, the conventional Wall Street horizon, NOT something the firm \
+itself necessarily stated). Give a short (60-100 word) read on where \
+these targets cluster (bullish/bearish/mixed), how recent vs. stale they \
+are, and whether the implied moves look aggressive or conservative given \
+how much time each target_date has left to run. If no price targets were \
+given, say so plainly rather than inventing figures. A single analyst's \
+target is one opinion, not a guarantee -- do not treat it as a prediction \
+that will necessarily come true. Never say to buy, sell, or hold.
 
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",

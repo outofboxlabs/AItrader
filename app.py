@@ -27,13 +27,17 @@ from typing import Optional
 from flask import Flask, jsonify, render_template_string, request
 
 import config
-from portfolio_monitor import credentials, data, edgar, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_analysis, nearlow_screener, news, pipeline, scheduler, stocktwits_sentiment, technical_indicators, vision
+from portfolio_monitor import credentials, data, edgar, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_analysis, nearlow_screener, news, pipeline, price_targets, scheduler, stocktwits_sentiment, technical_indicators, vision
 from portfolio_monitor import db as db_mod
 from portfolio_monitor.models import Position
 
 app = Flask(__name__)
 
 PROVIDERS = ["anthropic", "openai", "gemini"]
+# Non-AI-provider data-source keys a human can also save from Settings --
+# kept separate from PROVIDERS since those drive model/news-provider
+# lookups (NEWS_DEFAULT_MODEL etc.) that don't apply here.
+EXTRA_SAVABLE_KEYS = ["fmp"]
 NEWS_DEFAULT_MODEL = {
     "anthropic": config.ANTHROPIC_NEWS_MODEL,
     "openai": config.OPENAI_NEWS_MODEL,
@@ -368,7 +372,8 @@ def _build_agent_context(
     case; leave as None for the single expert take) lets this skip
     network calls a persona that wasn't picked doesn't need -- no SEC
     EDGAR call unless "filings" is selected, no StockTwits call unless
-    "social_sentiment" is selected. daily_history is fetched once and
+    "social_sentiment" is selected, no FMP call unless "price_targets" is
+    selected. daily_history is fetched once and
     reused for both the rating timeline and the technical indicators
     rather than pulled twice."""
     selected = set(selected_personas or [])
@@ -392,6 +397,10 @@ def _build_agent_context(
     if "social_sentiment" in selected:
         context["social_sentiment_window"] = social_sentiment_window
         context["social_sentiment"] = stocktwits_sentiment.get_recent_messages(ticker, social_sentiment_window)
+    if "price_targets" in selected:
+        fmp_key = credentials.resolve_api_key("fmp", interactive=False)
+        context["fmp_key_configured"] = bool(fmp_key)
+        context["price_targets"] = price_targets.get_price_target_history(ticker, fmp_key) if fmp_key else None
 
     return context
 
@@ -949,7 +958,7 @@ def save_api_key():
     body = request.get_json(force=True)
     provider = body.get("provider")
     api_key = body.get("api_key")
-    if provider not in PROVIDERS:
+    if provider not in PROVIDERS and provider not in EXTRA_SAVABLE_KEYS:
         return jsonify({"error": "unknown provider"}), 400
     if not api_key:
         return jsonify({"error": "api_key required"}), 400
@@ -1210,9 +1219,9 @@ PAGE_TEMPLATE = """<!doctype html>
       52-week low, with at least {{ nearlow_min_ratings_count }} analyst ratings of which
       {{ nearlow_min_buy_ratio_pct }}% or more are "buy" or "strong buy". Both conditions are required --
       this is not investment advice, just a starting point for further research. Click "Analyze" on a
-      candidate for a ~200-word expert take (with a buy-opportunity verdict), then pick which of 7
+      candidate for a ~200-word expert take (with a buy-opportunity verdict), then pick which of 8
       independent agents to run (technical / fundamental / news / analyst-ratings-timing / macro /
-      SEC filings / social sentiment) for their own take on it.
+      SEC filings / social sentiment / price targets) for their own take on it.
     </p>
     <div id="nl-status"></div>
     <div id="nl-as-of" class="muted" style="margin-bottom:8px;"></div>
@@ -1323,6 +1332,10 @@ PAGE_TEMPLATE = """<!doctype html>
     <h2 style="font-size:1rem;">AI provider API keys</h2>
     <p class="muted">Saved locally to .credentials.json on this machine -- never committed to git, never sent anywhere but the provider you choose.</p>
     <div class="settings-grid" id="settings-keys"></div>
+
+    <h2 style="font-size:1rem; margin-top: 1.5rem;">Other data source keys</h2>
+    <p class="muted">Optional -- only needed for agents that use them. The Price Target Analyst agent needs a free Financial Modeling Prep account (site.financialmodelingprep.com) for its API key. Same local storage as above.</p>
+    <div class="settings-grid" id="settings-extra-keys"></div>
 
     <h2 style="font-size:1rem; margin-top: 1.5rem;">Daily Top Movers scheduler</h2>
     <p class="muted" id="settings-scheduler-info">loading...</p>
@@ -2098,6 +2111,7 @@ const AGENT_LABELS = {
   macro_risk: "Macro & Risk",
   filings: "SEC Filings",
   social_sentiment: "Social Sentiment",
+  price_targets: "Price Targets (FMP, needs API key)",
 };
 const DEFAULT_SELECTED_AGENTS = ["technical", "fundamental", "news", "ratings_timing", "macro_risk"];
 
@@ -2648,6 +2662,7 @@ async function parseScreenshots() {
 
 // ---------- SETTINGS TAB ----------
 const PROVIDER_LABELS = { anthropic: "Anthropic (Claude)", openai: "OpenAI (GPT)", gemini: "Google (Gemini)" };
+const EXTRA_KEY_LABELS = { fmp: "Financial Modeling Prep (price target agent)" };
 
 async function loadKeyGrid(labels, containerId) {
   const container = document.getElementById(containerId);
@@ -2671,6 +2686,7 @@ async function loadKeyGrid(labels, containerId) {
 
 async function loadSettings() {
   await loadKeyGrid(PROVIDER_LABELS, "settings-keys");
+  await loadKeyGrid(EXTRA_KEY_LABELS, "settings-extra-keys");
 }
 
 async function saveKey(provider) {
