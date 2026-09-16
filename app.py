@@ -1542,6 +1542,28 @@ function directionColors(direction) {
   return DIRECTION_COLORS[direction] || DIRECTION_COLORS.neutral;
 }
 
+// yfinance's own upgrade/downgrade action codes -- reused for the rating
+// chart's marker colors (green=upgrade, red=downgrade, blue=everything
+// else: maintained, initiated, reiterated) and for a human-readable label
+// in place of the raw code (e.g. "main" -> "Maintained").
+const RATING_ACTION_LABELS = {
+  up: "Upgrade",
+  down: "Downgrade",
+  main: "Maintained",
+  init: "Initiated",
+  reit: "Reiterated",
+};
+function ratingActionDirection(action) {
+  const a = (action || "").toLowerCase();
+  if (a === "up") return "better";
+  if (a === "down") return "worse";
+  return "neutral";
+}
+function ratingActionLabel(action) {
+  const a = (action || "").toLowerCase();
+  return RATING_ACTION_LABELS[a] || (action || "n/a");
+}
+
 // Draws "1", "2", ... above each marked bar in the "High-impact event"
 // dataset, matching the numbers in the legend built alongside the chart --
 // Chart.js has no built-in per-bar text label, so this is a small custom
@@ -2229,6 +2251,10 @@ async function toggleRatingChart(scopeId, ticker) {
       markerBars[idx] = maxClose;
       markerByIndex[idx] = a;
     });
+    const markerColors = data.history.map((h, i) => {
+      const a = markerByIndex[i];
+      return a ? directionColors(ratingActionDirection(a.action)).bar : "transparent";
+    });
 
     const snapshot = data.price_target_snapshot;
     let targetStar = null;
@@ -2246,7 +2272,7 @@ async function toggleRatingChart(scopeId, ticker) {
         type: "bar",
         label: "Analyst rating change",
         data: markerBars,
-        backgroundColor: "rgba(45, 108, 223, 0.35)",
+        backgroundColor: markerColors,
         barPercentage: 1.0,
         categoryPercentage: 1.0,
         order: 2,
@@ -2270,9 +2296,12 @@ async function toggleRatingChart(scopeId, ticker) {
         data: targetStar,
         showLine: false,
         pointStyle: "star",
-        pointRadius: 8,
-        pointBackgroundColor: "#e0a030",
-        pointBorderColor: "#e0a030",
+        pointRadius: 11,
+        pointHoverRadius: 14,
+        pointBackgroundColor: "#ffc94d",
+        pointBorderColor: "#fff6e0",
+        pointBorderWidth: 2,
+        rotation: 0,
         order: 0,
       });
     }
@@ -2301,7 +2330,7 @@ async function toggleRatingChart(scopeId, ticker) {
                 const a = markerByIndex[items[0].dataIndex];
                 if (!a) return [];
                 const priceThen = a.price_at_rating != null ? `$${a.price_at_rating.toFixed(2)}` : "n/a";
-                return [`${a.firm || "Unknown firm"}: ${a.from_grade || "?"} → ${a.to_grade || "?"} (${a.action || "n/a"})`, `Price then: ${priceThen}`];
+                return [`${a.firm || "Unknown firm"}: ${a.from_grade || "?"} → ${a.to_grade || "?"} (${ratingActionLabel(a.action)})`, `Price then: ${priceThen}`];
               },
             },
           },
@@ -2313,11 +2342,14 @@ async function toggleRatingChart(scopeId, ticker) {
       ? '<span class="muted">No analyst rating changes found for this ticker.</span>'
       : actions.slice().reverse().map((a, i) => {
           const priceThen = a.price_at_rating != null ? `$${a.price_at_rating.toFixed(2)}` : "n/a";
-          return `<div style="margin-top:2px;">${actions.length - i}. [${escapeHtml(a.date)}] ${escapeHtml(a.firm || "Unknown firm")}: ${escapeHtml(a.from_grade || "?")} → ${escapeHtml(a.to_grade || "?")} (price: ${priceThen})</div>`;
+          const dot = directionColors(ratingActionDirection(a.action)).dot;
+          return `<div style="margin-top:2px;">
+            <span style="display:inline-block; width:9px; height:9px; border-radius:50%; background:${dot}; margin-right:4px;"></span>
+            ${actions.length - i}. [${escapeHtml(a.date)}] ${escapeHtml(a.firm || "Unknown firm")}: ${escapeHtml(a.from_grade || "?")} → ${escapeHtml(a.to_grade || "?")} (${escapeHtml(ratingActionLabel(a.action))}, price: ${priceThen})</div>`;
         }).join("");
     document.getElementById(`${scopeId}-rating-chart-legend`).innerHTML = legendHtml;
 
-    statusEl.textContent = `${data.history.length} daily bars (past year). Blue bars mark real analyst rating changes -- hover for details.${targetStatusNote}`;
+    statusEl.textContent = `${data.history.length} daily bars (past year). Bar color: green = upgrade, red = downgrade, blue = maintained/initiated -- hover for details.${targetStatusNote}`;
   } catch (err) {
     statusEl.textContent = "Error: " + err;
   }
