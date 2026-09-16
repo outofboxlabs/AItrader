@@ -64,6 +64,33 @@ def get_daily_price_history(ticker: str, period: str = "1y") -> list[dict]:
     return [{"date": idx.strftime("%Y-%m-%d"), "close": float(row["Close"])} for idx, row in hist.iterrows()]
 
 
+def get_analyst_price_target_snapshot(ticker: str) -> Optional[dict]:
+    """Live analyst price-target snapshot via yfinance's own free
+    get_analyst_price_targets() -- the same call already used elsewhere
+    in this app (get_stock_snapshot, the screeners) for target_mean/
+    target_upside_pct, just exposed here in its own right for the rating
+    chart's target-price star and the Price Target Analyst persona.
+    Unlike FMP's free plan, yfinance has no per-symbol restriction here
+    -- it works on small-caps and recent IPOs the same as on AAPL.
+    `target_date` is this app's own estimate (today + 365 days, the
+    conventional 12-month horizon), not something yfinance provides.
+    Returns None if yfinance has no target data for this ticker."""
+    try:
+        pt = yf.Ticker(ticker).get_analyst_price_targets() or {}
+    except Exception:
+        return None
+    mean = pt.get("mean")
+    if mean is None:
+        return None
+    return {
+        "target_high": pt.get("high"),
+        "target_low": pt.get("low"),
+        "target_mean": mean,
+        "target_median": pt.get("median"),
+        "target_date": (datetime.now(timezone.utc) + timedelta(days=365)).date().isoformat(),
+    }
+
+
 def get_price_history_window(
     ticker: str, center_time: datetime, window_hours: float = 2.0, interval: Optional[str] = None
 ) -> tuple[list[dict], str]:

@@ -86,6 +86,47 @@ def test_get_daily_price_history_returns_empty_list_on_failure(monkeypatch):
     assert data_mod.get_daily_price_history("AAPL") == []
 
 
+def test_get_analyst_price_target_snapshot_returns_normalized_shape(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def get_analyst_price_targets(self):
+            return {"current": 250.0, "low": 245.0, "high": 400.0, "mean": 339.35, "median": 360.0}
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    snapshot = data_mod.get_analyst_price_target_snapshot("AAPL")
+    assert snapshot["target_mean"] == 339.35
+    assert snapshot["target_median"] == 360.0
+    assert snapshot["target_high"] == 400.0
+    assert snapshot["target_low"] == 245.0
+    assert snapshot["target_date"] is not None
+
+
+def test_get_analyst_price_target_snapshot_returns_none_when_no_mean(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def get_analyst_price_targets(self):
+            return {}
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    assert data_mod.get_analyst_price_target_snapshot("ZZZZ") is None
+
+
+def test_get_analyst_price_target_snapshot_returns_none_on_failure(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def get_analyst_price_targets(self):
+            raise RuntimeError("network error")
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    assert data_mod.get_analyst_price_target_snapshot("AAPL") is None
+
+
 def test_get_price_history_window_uses_1m_for_recent_event(monkeypatch):
     center = datetime.now(timezone.utc) - timedelta(hours=3)  # well within the last 7 days
     idx = pd.DatetimeIndex([center])

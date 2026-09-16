@@ -27,17 +27,13 @@ from typing import Optional
 from flask import Flask, jsonify, render_template_string, request
 
 import config
-from portfolio_monitor import credentials, data, edgar, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_analysis, nearlow_screener, news, pipeline, price_targets, scheduler, stocktwits_sentiment, technical_indicators, vision
+from portfolio_monitor import credentials, data, edgar, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_analysis, nearlow_screener, news, pipeline, scheduler, stocktwits_sentiment, technical_indicators, vision
 from portfolio_monitor import db as db_mod
 from portfolio_monitor.models import Position
 
 app = Flask(__name__)
 
 PROVIDERS = ["anthropic", "openai", "gemini"]
-# Non-AI-provider data-source keys a human can also save from Settings --
-# kept separate from PROVIDERS since those drive model/news-provider
-# lookups (NEWS_DEFAULT_MODEL etc.) that don't apply here.
-EXTRA_SAVABLE_KEYS = ["fmp"]
 NEWS_DEFAULT_MODEL = {
     "anthropic": config.ANTHROPIC_NEWS_MODEL,
     "openai": config.OPENAI_NEWS_MODEL,
@@ -372,8 +368,8 @@ def _build_agent_context(
     case; leave as None for the single expert take) lets this skip
     network calls a persona that wasn't picked doesn't need -- no SEC
     EDGAR call unless "filings" is selected, no StockTwits call unless
-    "social_sentiment" is selected, no FMP call unless "price_targets" is
-    selected. daily_history is fetched once and
+    "social_sentiment" is selected, no analyst-price-target call unless
+    "price_targets" is selected. daily_history is fetched once and
     reused for both the rating timeline and the technical indicators
     rather than pulled twice."""
     selected = set(selected_personas or [])
@@ -398,9 +394,7 @@ def _build_agent_context(
         context["social_sentiment_window"] = social_sentiment_window
         context["social_sentiment"] = stocktwits_sentiment.get_recent_messages(ticker, social_sentiment_window)
     if "price_targets" in selected:
-        fmp_key = credentials.resolve_api_key("fmp", interactive=False)
-        context["fmp_key_configured"] = bool(fmp_key)
-        context["price_targets"] = price_targets.get_price_target_snapshot(ticker, fmp_key) if fmp_key else None
+        context["price_targets"] = data.get_analyst_price_target_snapshot(ticker)
 
     return context
 
@@ -473,23 +467,20 @@ def nearlow_expert_panel():
 @app.route("/api/rating-chart", methods=["GET"])
 def get_rating_chart():
     """Daily price history (past year) for one ticker plus its real
-    analyst rating-change history (yfinance, free, no API key) -- shared
-    by the Near 52W Low and Stock Analysis tabs so a human can see
-    exactly when each rating was issued relative to the price action,
-    not just read about it in an AI-generated paragraph. Also includes
-    the FMP price-target snapshot (same data/limitations as the Price
-    Target Analyst agent) when a key is configured, so the chart can
-    draw a projected line to the 12-month consensus target where FMP
-    actually has data for this ticker; None/error here just means the
-    chart won't draw that line, not a failure of the whole request."""
+    analyst rating-change history and current analyst price-target
+    snapshot -- both via yfinance, free, no API key, and no per-symbol
+    coverage restriction -- shared by the Near 52W Low and Stock
+    Analysis tabs so a human can see exactly when each rating was
+    issued, and where analysts currently see the price headed, relative
+    to the price action, not just read about it in an AI-generated
+    paragraph."""
     ticker = (request.args.get("ticker") or "").strip().upper()
     if not ticker:
         return jsonify({"error": "ticker required"}), 400
 
     history = data.get_daily_price_history(ticker)
     rating_timeline = nearlow_analysis.get_rating_timeline(ticker, daily_history=history)
-    fmp_key = credentials.resolve_api_key("fmp", interactive=False)
-    price_target_snapshot = price_targets.get_price_target_snapshot(ticker, fmp_key) if fmp_key else None
+    price_target_snapshot = data.get_analyst_price_target_snapshot(ticker)
     return jsonify(
         {
             "ticker": ticker,
@@ -989,7 +980,7 @@ def save_api_key():
     body = request.get_json(force=True)
     provider = body.get("provider")
     api_key = body.get("api_key")
-    if provider not in PROVIDERS and provider not in EXTRA_SAVABLE_KEYS:
+    if provider not in PROVIDERS:
         return jsonify({"error": "unknown provider"}), 400
     if not api_key:
         return jsonify({"error": "api_key required"}), 400
@@ -1364,10 +1355,6 @@ PAGE_TEMPLATE = """<!doctype html>
     <h2 style="font-size:1rem;">AI provider API keys</h2>
     <p class="muted">Saved locally to .credentials.json on this machine -- never committed to git, never sent anywhere but the provider you choose.</p>
     <div class="settings-grid" id="settings-keys"></div>
-
-    <h2 style="font-size:1rem; margin-top: 1.5rem;">Other data source keys</h2>
-    <p class="muted">Optional -- only needed for agents that use them. The Price Target Analyst agent needs a free Financial Modeling Prep account (site.financialmodelingprep.com) for its API key. Same local storage as above.</p>
-    <div class="settings-grid" id="settings-extra-keys"></div>
 
     <h2 style="font-size:1rem; margin-top: 1.5rem;">Daily Top Movers scheduler</h2>
     <p class="muted" id="settings-scheduler-info">loading...</p>
@@ -2146,7 +2133,7 @@ const AGENT_LABELS = {
   macro_risk: "Macro & Risk",
   filings: "SEC Filings",
   social_sentiment: "Social Sentiment",
-  price_targets: "Price Targets (FMP, needs API key)",
+  price_targets: "Price Targets",
 };
 const DEFAULT_SELECTED_AGENTS = ["technical", "fundamental", "news", "ratings_timing", "macro_risk"];
 
@@ -2246,14 +2233,12 @@ async function toggleRatingChart(scopeId, ticker) {
     const snapshot = data.price_target_snapshot;
     let targetStar = null;
     let targetStatusNote = "";
-    if (snapshot && snapshot.error) {
-      targetStatusNote = " No consensus target star: " + snapshot.error;
-    } else if (snapshot && snapshot.target_consensus != null && closes.length > 0) {
+    if (snapshot && snapshot.target_mean != null && closes.length > 0) {
       targetStar = new Array(labels.length).fill(null);
-      targetStar[closes.length - 1] = snapshot.target_consensus;
-      targetStatusNote = ` ★ = $${snapshot.target_consensus} consensus 12-month target (as of today, per FMP).`;
+      targetStar[closes.length - 1] = snapshot.target_mean;
+      targetStatusNote = ` ★ = $${snapshot.target_mean} mean analyst 12-month target (as of today).`;
     } else {
-      targetStatusNote = " No consensus target star: add an FMP API key in Settings to enable it.";
+      targetStatusNote = " No analyst price target available for this ticker.";
     }
 
     const datasets = [
@@ -2281,7 +2266,7 @@ async function toggleRatingChart(scopeId, ticker) {
     if (targetStar) {
       datasets.push({
         type: "line",
-        label: "12-month consensus target (FMP)",
+        label: "12-month mean analyst target",
         data: targetStar,
         showLine: false,
         pointStyle: "star",
@@ -2326,7 +2311,10 @@ async function toggleRatingChart(scopeId, ticker) {
 
     const legendHtml = actions.length === 0
       ? '<span class="muted">No analyst rating changes found for this ticker.</span>'
-      : actions.slice().reverse().map((a, i) => `<div style="margin-top:2px;">${actions.length - i}. [${escapeHtml(a.date)}] ${escapeHtml(a.firm || "Unknown firm")}: ${escapeHtml(a.from_grade || "?")} → ${escapeHtml(a.to_grade || "?")}</div>`).join("");
+      : actions.slice().reverse().map((a, i) => {
+          const priceThen = a.price_at_rating != null ? `$${a.price_at_rating.toFixed(2)}` : "n/a";
+          return `<div style="margin-top:2px;">${actions.length - i}. [${escapeHtml(a.date)}] ${escapeHtml(a.firm || "Unknown firm")}: ${escapeHtml(a.from_grade || "?")} → ${escapeHtml(a.to_grade || "?")} (price: ${priceThen})</div>`;
+        }).join("");
     document.getElementById(`${scopeId}-rating-chart-legend`).innerHTML = legendHtml;
 
     statusEl.textContent = `${data.history.length} daily bars (past year). Blue bars mark real analyst rating changes -- hover for details.${targetStatusNote}`;
@@ -2850,7 +2838,6 @@ async function parseScreenshots() {
 
 // ---------- SETTINGS TAB ----------
 const PROVIDER_LABELS = { anthropic: "Anthropic (Claude)", openai: "OpenAI (GPT)", gemini: "Google (Gemini)" };
-const EXTRA_KEY_LABELS = { fmp: "Financial Modeling Prep (price target agent)" };
 
 async function loadKeyGrid(labels, containerId) {
   const container = document.getElementById(containerId);
@@ -2874,7 +2861,6 @@ async function loadKeyGrid(labels, containerId) {
 
 async function loadSettings() {
   await loadKeyGrid(PROVIDER_LABELS, "settings-keys");
-  await loadKeyGrid(EXTRA_KEY_LABELS, "settings-extra-keys");
 }
 
 async function saveKey(provider) {

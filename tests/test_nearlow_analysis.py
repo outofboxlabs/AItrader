@@ -340,14 +340,12 @@ def test_run_expert_panel_gives_each_persona_only_its_own_tailored_data(monkeypa
             {"body": "ACME to the moon", "username": "trader1", "sentiment": "Bullish", "likes": 120, "created_at": "2026-09-14T12:00:00+00:00"}
         ],
         social_sentiment_window="week",
-        fmp_key_configured=True,
         price_targets={
             "target_high": 70.0,
             "target_low": 50.0,
-            "target_consensus": 60.0,
+            "target_mean": 60.0,
             "target_median": 60.0,
             "target_date": "2027-08-14",
-            "trailing_windows": [{"window": "lastMonth", "avg_price_target": 61.0, "count": 3}],
         },
     )
 
@@ -395,11 +393,9 @@ def test_run_expert_panel_gives_each_persona_only_its_own_tailored_data(monkeypa
     assert "Market cap" not in captured["social_sentiment"]
     assert "Acme misses on guidance" not in captured["social_sentiment"]
 
-    # Price targets: only the FMP price-target snapshot.
+    # Price targets: only the analyst price-target snapshot.
     assert "60.0" in captured["price_targets"]
     assert "2027-08-14" in captured["price_targets"]
-    assert "lastMonth" not in captured["price_targets"]  # raw key -- should use the human label
-    assert "last month" in captured["price_targets"]
     assert "Market cap" not in captured["price_targets"]
     assert "Acme misses on guidance" not in captured["price_targets"]
 
@@ -440,52 +436,25 @@ def test_social_sentiment_lines_reports_totals_and_truncates_long_lists():
     assert "20 more messages omitted" in joined
 
 
-def test_price_target_lines_reports_missing_api_key():
-    lines = nla._price_target_lines("ACME", _context(price_targets=None, fmp_key_configured=False))
-    joined = "\n".join(lines)
-    assert "No Financial Modeling Prep API key" in joined
-
-
 def test_price_target_lines_reports_when_none_found():
-    lines = nla._price_target_lines("ACME", _context(price_targets=[], fmp_key_configured=True))
-    assert any("none found" in line for line in lines)
+    lines = nla._price_target_lines("ACME", _context(price_targets=None))
+    assert any("no analyst price-target data found" in line for line in lines)
 
 
-def test_price_target_lines_reports_real_api_error_distinctly_from_no_data():
-    snapshot = {"error": "HTTP 402 from FMP: This value set for 'symbol' is not available under your current subscription"}
-    lines = nla._price_target_lines("BBW", _context(price_targets=snapshot, fmp_key_configured=True))
-    joined = "\n".join(lines)
-    assert "HTTP 402" in joined
-    assert "not available under your current subscription" in joined
-    assert not any("none found" in line for line in lines)  # not the same as "no data" -- a real API failure
-
-
-def test_price_target_lines_lists_snapshot_and_trailing_windows():
+def test_price_target_lines_lists_snapshot():
     snapshot = {
         "target_high": 70.0,
         "target_low": 50.0,
-        "target_consensus": 60.0,
+        "target_mean": 60.0,
         "target_median": 60.0,
         "target_date": "2027-08-14",
-        "trailing_windows": [
-            {"window": "lastMonth", "avg_price_target": 61.0, "count": 3},
-            {"window": "lastYear", "avg_price_target": 55.0, "count": 12},
-        ],
     }
-    lines = nla._price_target_lines("ACME", _context(price_targets=snapshot, fmp_key_configured=True))
+    lines = nla._price_target_lines("ACME", _context(price_targets=snapshot))
     joined = "\n".join(lines)
     assert "$60.0" in joined
     assert "$50.0-$70.0" in joined
     assert "2027-08-14" in joined
     assert "12 months" in joined
-    assert "last month: avg $61.0 across 3 target(s)" in joined
-    assert "last year: avg $55.0 across 12 target(s)" in joined
-
-
-def test_price_target_lines_omits_trailing_section_when_absent():
-    snapshot = {"target_high": 70.0, "target_low": 50.0, "target_consensus": 60.0, "target_median": 60.0, "target_date": "2027-08-14", "trailing_windows": []}
-    lines = nla._price_target_lines("ACME", _context(price_targets=snapshot, fmp_key_configured=True))
-    assert not any("Trailing average" in line for line in lines)
 
 
 def test_technical_lines_reports_when_indicators_unavailable():
