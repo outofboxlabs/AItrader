@@ -830,6 +830,7 @@ def test_get_rating_chart_returns_history_and_rating_actions(client, monkeypatch
     assert data["history"] == daily
     assert data["rating_actions"] == timeline["actions"]
     assert data["week_52_low"] == timeline["week_52_low"]
+    assert data["price_target_snapshot"] is None  # no FMP key saved in this test
     assert captured["ticker"] == "BBW"
     assert captured["daily_history"] == daily  # reused, not fetched twice
 
@@ -844,6 +845,29 @@ def test_get_rating_chart_handles_empty_history_and_no_actions(client, monkeypat
     assert data["history"] == []
     assert data["rating_actions"] == []
     assert data["week_52_low"] is None
+    assert data["price_target_snapshot"] is None
+
+
+def test_get_rating_chart_includes_price_target_snapshot_when_fmp_key_saved(client, monkeypatch):
+    monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: [])
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker, **kw: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: {"fmp": "fmp-key-123"}.get(provider))
+
+    captured = {}
+
+    def fake_get_price_target_snapshot(ticker, api_key, **kw):
+        captured["ticker"] = ticker
+        captured["api_key"] = api_key
+        return {"target_consensus": 60.0, "target_date": "2027-08-14", "trailing_windows": []}
+
+    monkeypatch.setattr(app_mod.price_targets, "get_price_target_snapshot", fake_get_price_target_snapshot)
+
+    res = client.get("/api/rating-chart?ticker=ACME")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["price_target_snapshot"]["target_consensus"] == 60.0
+    assert captured["ticker"] == "ACME"
+    assert captured["api_key"] == "fmp-key-123"
 
 
 def test_get_portfolio_price_chart_zoom_returns_history_and_interval(client, monkeypatch):

@@ -476,19 +476,27 @@ def get_rating_chart():
     analyst rating-change history (yfinance, free, no API key) -- shared
     by the Near 52W Low and Stock Analysis tabs so a human can see
     exactly when each rating was issued relative to the price action,
-    not just read about it in an AI-generated paragraph."""
+    not just read about it in an AI-generated paragraph. Also includes
+    the FMP price-target snapshot (same data/limitations as the Price
+    Target Analyst agent) when a key is configured, so the chart can
+    draw a projected line to the 12-month consensus target where FMP
+    actually has data for this ticker; None/error here just means the
+    chart won't draw that line, not a failure of the whole request."""
     ticker = (request.args.get("ticker") or "").strip().upper()
     if not ticker:
         return jsonify({"error": "ticker required"}), 400
 
     history = data.get_daily_price_history(ticker)
     rating_timeline = nearlow_analysis.get_rating_timeline(ticker, daily_history=history)
+    fmp_key = credentials.resolve_api_key("fmp", interactive=False)
+    price_target_snapshot = price_targets.get_price_target_snapshot(ticker, fmp_key) if fmp_key else None
     return jsonify(
         {
             "ticker": ticker,
             "history": history,
             "rating_actions": rating_timeline.get("actions") or [],
             "week_52_low": rating_timeline.get("week_52_low"),
+            "price_target_snapshot": price_target_snapshot,
         }
     )
 
@@ -2235,34 +2243,59 @@ async function toggleRatingChart(scopeId, ticker) {
       markerByIndex[idx] = a;
     });
 
+    const snapshot = data.price_target_snapshot;
+    let targetStar = null;
+    let targetStatusNote = "";
+    if (snapshot && snapshot.error) {
+      targetStatusNote = " No consensus target star: " + snapshot.error;
+    } else if (snapshot && snapshot.target_consensus != null && closes.length > 0) {
+      targetStar = new Array(labels.length).fill(null);
+      targetStar[closes.length - 1] = snapshot.target_consensus;
+      targetStatusNote = ` ★ = $${snapshot.target_consensus} consensus 12-month target (as of today, per FMP).`;
+    } else {
+      targetStatusNote = " No consensus target star: add an FMP API key in Settings to enable it.";
+    }
+
+    const datasets = [
+      {
+        type: "bar",
+        label: "Analyst rating change",
+        data: markerBars,
+        backgroundColor: "rgba(45, 108, 223, 0.35)",
+        barPercentage: 1.0,
+        categoryPercentage: 1.0,
+        order: 2,
+      },
+      {
+        type: "line",
+        label: ticker + " price",
+        data: closes,
+        borderColor: "#2d6cdf",
+        backgroundColor: "transparent",
+        pointRadius: 0,
+        borderWidth: 1.5,
+        tension: 0.1,
+        order: 1,
+      },
+    ];
+    if (targetStar) {
+      datasets.push({
+        type: "line",
+        label: "12-month consensus target (FMP)",
+        data: targetStar,
+        showLine: false,
+        pointStyle: "star",
+        pointRadius: 8,
+        pointBackgroundColor: "#e0a030",
+        pointBorderColor: "#e0a030",
+        order: 0,
+      });
+    }
+
     const ctx = document.getElementById(`${scopeId}-rating-chart-canvas`).getContext("2d");
     if (ratingCharts[scopeId]) ratingCharts[scopeId].destroy();
     ratingCharts[scopeId] = new Chart(ctx, {
-      data: {
-        labels,
-        datasets: [
-          {
-            type: "bar",
-            label: "Analyst rating change",
-            data: markerBars,
-            backgroundColor: "rgba(45, 108, 223, 0.35)",
-            barPercentage: 1.0,
-            categoryPercentage: 1.0,
-            order: 2,
-          },
-          {
-            type: "line",
-            label: ticker + " price",
-            data: closes,
-            borderColor: "#2d6cdf",
-            backgroundColor: "transparent",
-            pointRadius: 0,
-            borderWidth: 1.5,
-            tension: 0.1,
-            order: 1,
-          },
-        ],
-      },
+      data: { labels, datasets },
       options: {
         animation: false,
         scales: {
@@ -2296,7 +2329,7 @@ async function toggleRatingChart(scopeId, ticker) {
       : actions.slice().reverse().map((a, i) => `<div style="margin-top:2px;">${actions.length - i}. [${escapeHtml(a.date)}] ${escapeHtml(a.firm || "Unknown firm")}: ${escapeHtml(a.from_grade || "?")} → ${escapeHtml(a.to_grade || "?")}</div>`).join("");
     document.getElementById(`${scopeId}-rating-chart-legend`).innerHTML = legendHtml;
 
-    statusEl.textContent = `${data.history.length} daily bars (past year). Blue bars mark real analyst rating changes -- hover for details.`;
+    statusEl.textContent = `${data.history.length} daily bars (past year). Blue bars mark real analyst rating changes -- hover for details.${targetStatusNote}`;
   } catch (err) {
     statusEl.textContent = "Error: " + err;
   }
