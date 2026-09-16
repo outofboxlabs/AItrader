@@ -434,36 +434,46 @@ def _social_sentiment_lines(ticker: str, context: dict) -> list[str]:
     return lines
 
 
+_TRAILING_WINDOW_LABEL = {
+    "lastMonth": "last month",
+    "lastQuarter": "last quarter",
+    "lastYear": "last year",
+    "allTime": "all time",
+}
+
+
 def _price_target_lines(ticker: str, context: dict) -> list[str]:
     candidate = context["candidate"]
-    targets = context.get("price_targets")
+    snapshot = context.get("price_targets")
     lines = [f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})", ""]
-    if targets is None and not context.get("fmp_key_configured"):
+    if snapshot is None and not context.get("fmp_key_configured"):
         lines.append(
             "No Financial Modeling Prep API key is configured, so no price-target "
-            "history is available. (Add one in the Settings tab to use this agent.)"
+            "data is available. (Add one in the Settings tab to use this agent.)"
         )
         return lines
-    lines.append(
-        "Recent individual analyst price-target announcements (most recent first). "
-        "target_date is this app's own estimate -- published_date + 12 months, the "
-        "conventional Wall Street horizon -- not a date the firm itself stated:"
-    )
-    if targets:
-        for t in targets:
-            pct = t.get("implied_pct_change")
-            pct_str = f"{pct:+.1f}%" if pct is not None else "n/a"
-            analyst_name = t.get("analyst_name")
-            firm_part = t.get("analyst_company") or "Unknown firm"
-            if analyst_name:
-                firm_part += f" ({analyst_name})"
-            lines.append(
-                f"- [{t.get('published_date')}] {firm_part}: "
-                f"target ${t.get('price_target')} (price then ${t.get('price_when_posted')}, "
-                f"implied {pct_str}), expected to play out by ~{t.get('target_date')}"
-            )
-    else:
+    if not snapshot:
         lines.append("(none found for this ticker)")
+        return lines
+
+    lines.append(
+        "Live analyst price-target snapshot (NOT a history of individual ratings -- "
+        "FMP's free plan only gives today's aggregate across all covering analysts; "
+        "per-analyst historical price targets require a separate paid add-on this app "
+        "doesn't use). target_date is this app's own estimate -- today + 12 months, the "
+        "conventional Wall Street horizon -- not a date any firm itself stated:"
+    )
+    lines.append(
+        f"Current consensus target: ${snapshot.get('target_consensus')} "
+        f"(median ${snapshot.get('target_median')}, range ${snapshot.get('target_low')}-"
+        f"${snapshot.get('target_high')}), expected to play out by ~{snapshot.get('target_date')}"
+    )
+    trailing = snapshot.get("trailing_windows") or []
+    if trailing:
+        lines.append("Trailing average target by window (is the average rising or falling recently?):")
+        for w in trailing:
+            label = _TRAILING_WINDOW_LABEL.get(w["window"], w["window"])
+            lines.append(f"- {label}: avg ${w.get('avg_price_target')} across {w.get('count')} target(s)")
     return lines
 
 
@@ -616,19 +626,19 @@ Respond with ONLY a JSON object, no other text: \
     "price_targets": (
         "Price Target Analyst",
         """You are a price-target analyst. You're asked to independently assess \
-one stock given a list of individual analyst price-target announcements: \
-each one names the firm (and analyst, when known), the date it was \
-published, the dollar price target, the stock's price at that time, the \
-implied % move that target called for, and a target_date -- this app's \
-own estimate of when that call was meant to play out (published date + \
-12 months, the conventional Wall Street horizon, NOT something the firm \
-itself necessarily stated). Give a short (60-100 word) read on where \
-these targets cluster (bullish/bearish/mixed), how recent vs. stale they \
-are, and whether the implied moves look aggressive or conservative given \
-how much time each target_date has left to run. If no price targets were \
-given, say so plainly rather than inventing figures. A single analyst's \
-target is one opinion, not a guarantee -- do not treat it as a prediction \
-that will necessarily come true. Never say to buy, sell, or hold.
+one stock given a LIVE snapshot of analyst price targets -- NOT a history of \
+individual ratings: today's consensus/median/high/low target across all \
+covering analysts, a target_date (this app's own estimate -- today + 12 \
+months, the conventional Wall Street horizon, NOT something any firm itself \
+stated), and, when available, the average target over a few trailing \
+windows (last month/quarter/year/all-time) with how many targets went into \
+each. Give a short (60-100 word) read on what the current consensus implies \
+versus the stock's price, and -- if trailing windows are given -- whether \
+the average target has been rising, falling, or flat recently (compare the \
+shorter windows to the longer ones). If no price-target data was given, say \
+so plainly rather than inventing figures. A consensus target is an \
+aggregate opinion, not a guarantee -- do not treat it as a prediction that \
+will necessarily come true. Never say to buy, sell, or hold.
 
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",

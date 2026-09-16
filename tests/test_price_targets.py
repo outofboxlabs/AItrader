@@ -16,91 +16,95 @@ class _FakeResponse:
         return self._payload
 
 
-def _record(published_date="2026-08-14", price_target=250.0, price_when_posted=200.0, company="Morgan Stanley", analyst_name="Jane Doe"):
-    return {
-        "publishedDate": published_date,
-        "priceTarget": price_target,
-        "priceWhenPosted": price_when_posted,
-        "analystCompany": company,
-        "analystName": analyst_name,
-        "newsTitle": "Some headline",
-        "newsURL": "https://example.com/news",
-    }
+CONSENSUS_RECORD = {"symbol": "AAPL", "targetHigh": 400, "targetLow": 245, "targetConsensus": 339.35, "targetMedian": 360}
+SUMMARY_RECORD = {
+    "symbol": "AAPL",
+    "lastMonthCount": 5,
+    "lastMonthAvgPriceTarget": 345.0,
+    "lastQuarterCount": 12,
+    "lastQuarterAvgPriceTarget": 330.0,
+    "lastYearCount": 40,
+    "lastYearAvgPriceTarget": 300.0,
+    "allTimeCount": 100,
+    "allTimeAvgPriceTarget": 250.0,
+}
 
 
-def test_get_price_target_history_returns_none_without_api_key():
-    assert pt.get_price_target_history("ORCL", api_key="") is None
-    assert pt.get_price_target_history("ORCL", api_key=None) is None
+def test_get_price_target_snapshot_returns_none_without_api_key():
+    assert pt.get_price_target_snapshot("AAPL", api_key="") is None
+    assert pt.get_price_target_snapshot("AAPL", api_key=None) is None
 
 
-def test_get_price_target_history_returns_normalized_shape(monkeypatch):
-    rec = _record()
+def test_get_price_target_snapshot_returns_normalized_shape(monkeypatch):
     captured = {}
 
     def fake_get(url, params=None, timeout=None):
-        captured["url"] = url
-        captured["params"] = params
-        return _FakeResponse([rec])
+        captured.setdefault("urls", []).append(url)
+        captured.setdefault("params", []).append(params)
+        if url == pt.CONSENSUS_URL:
+            return _FakeResponse([CONSENSUS_RECORD])
+        return _FakeResponse([SUMMARY_RECORD])
 
     monkeypatch.setattr(pt.requests, "get", fake_get)
 
-    targets = pt.get_price_target_history("ORCL", api_key="test-key")
-    assert captured["url"] == pt.BASE_URL
-    assert captured["params"]["symbol"] == "ORCL"
-    assert captured["params"]["apikey"] == "test-key"
-    assert len(targets) == 1
-    t = targets[0]
-    assert t["published_date"] == "2026-08-14"
-    assert t["target_date"] == "2027-08-14"
-    assert t["analyst_company"] == "Morgan Stanley"
-    assert t["analyst_name"] == "Jane Doe"
-    assert t["price_target"] == 250.0
-    assert t["price_when_posted"] == 200.0
-    assert t["implied_pct_change"] == 25.0
+    snapshot = pt.get_price_target_snapshot("AAPL", api_key="test-key")
+    assert pt.CONSENSUS_URL in captured["urls"]
+    assert pt.SUMMARY_URL in captured["urls"]
+    assert all(p["symbol"] == "AAPL" and p["apikey"] == "test-key" for p in captured["params"])
+
+    assert snapshot["target_high"] == 400
+    assert snapshot["target_low"] == 245
+    assert snapshot["target_consensus"] == 339.35
+    assert snapshot["target_median"] == 360
+    assert snapshot["target_date"] is not None
+
+    windows = {w["window"]: w for w in snapshot["trailing_windows"]}
+    assert windows["lastMonth"]["avg_price_target"] == 345.0
+    assert windows["lastMonth"]["count"] == 5
+    assert windows["allTime"]["avg_price_target"] == 250.0
 
 
-def test_get_price_target_history_handles_missing_price_when_posted(monkeypatch):
-    rec = _record(price_when_posted=None)
-    monkeypatch.setattr(pt.requests, "get", lambda url, params=None, timeout=None: _FakeResponse([rec]))
-    targets = pt.get_price_target_history("ORCL", api_key="test-key")
-    assert targets[0]["implied_pct_change"] is None
+def test_get_price_target_snapshot_returns_none_when_consensus_fails(monkeypatch):
+    def fake_get(url, params=None, timeout=None):
+        if url == pt.CONSENSUS_URL:
+            raise RuntimeError("network error")
+        return _FakeResponse([SUMMARY_RECORD])
+
+    monkeypatch.setattr(pt.requests, "get", fake_get)
+    assert pt.get_price_target_snapshot("AAPL", api_key="test-key") is None
 
 
-def test_get_price_target_history_skips_records_without_a_price_target(monkeypatch):
-    no_target = _record()
-    no_target["priceTarget"] = None
-    good = _record()
-    monkeypatch.setattr(pt.requests, "get", lambda url, params=None, timeout=None: _FakeResponse([no_target, good]))
-    targets = pt.get_price_target_history("ORCL", api_key="test-key")
-    assert len(targets) == 1
-
-
-def test_get_price_target_history_skips_unparseable_dates(monkeypatch):
-    bad = _record(published_date="not-a-date")
-    good = _record()
-    monkeypatch.setattr(pt.requests, "get", lambda url, params=None, timeout=None: _FakeResponse([bad, good]))
-    targets = pt.get_price_target_history("ORCL", api_key="test-key")
-    assert len(targets) == 1
-
-
-def test_get_price_target_history_returns_none_on_network_failure(monkeypatch):
-    def boom(url, params=None, timeout=None):
+def test_get_price_target_snapshot_still_returns_consensus_when_summary_fails(monkeypatch):
+    def fake_get(url, params=None, timeout=None):
+        if url == pt.CONSENSUS_URL:
+            return _FakeResponse([CONSENSUS_RECORD])
         raise RuntimeError("network error")
 
-    monkeypatch.setattr(pt.requests, "get", boom)
-    assert pt.get_price_target_history("ORCL", api_key="test-key") is None
+    monkeypatch.setattr(pt.requests, "get", fake_get)
+    snapshot = pt.get_price_target_snapshot("AAPL", api_key="test-key")
+    assert snapshot["target_consensus"] == 339.35
+    assert snapshot["trailing_windows"] == []
 
 
-def test_get_price_target_history_returns_none_on_http_error(monkeypatch):
-    monkeypatch.setattr(pt.requests, "get", lambda url, params=None, timeout=None: _FakeResponse(None, status_ok=False, status_code=403, text="plan upgrade required"))
-    assert pt.get_price_target_history("ORCL", api_key="test-key") is None
+def test_get_price_target_snapshot_returns_none_on_http_error(monkeypatch):
+    monkeypatch.setattr(pt.requests, "get", lambda url, params=None, timeout=None: _FakeResponse(None, status_ok=False, status_code=403))
+    assert pt.get_price_target_snapshot("AAPL", api_key="test-key") is None
 
 
-def test_get_price_target_history_returns_none_on_unexpected_shape(monkeypatch):
-    monkeypatch.setattr(pt.requests, "get", lambda url, params=None, timeout=None: _FakeResponse({"Error Message": "Invalid API KEY"}))
-    assert pt.get_price_target_history("ORCL", api_key="bad-key") is None
-
-
-def test_get_price_target_history_returns_empty_list_when_none_found(monkeypatch):
+def test_get_price_target_snapshot_returns_none_on_empty_list(monkeypatch):
     monkeypatch.setattr(pt.requests, "get", lambda url, params=None, timeout=None: _FakeResponse([]))
-    assert pt.get_price_target_history("ORCL", api_key="test-key") == []
+    assert pt.get_price_target_snapshot("AAPL", api_key="test-key") is None
+
+
+def test_get_price_target_snapshot_handles_missing_trailing_window_fields(monkeypatch):
+    partial_summary = {"symbol": "AAPL", "lastMonthCount": 5, "lastMonthAvgPriceTarget": 345.0}
+
+    def fake_get(url, params=None, timeout=None):
+        if url == pt.CONSENSUS_URL:
+            return _FakeResponse([CONSENSUS_RECORD])
+        return _FakeResponse([partial_summary])
+
+    monkeypatch.setattr(pt.requests, "get", fake_get)
+    snapshot = pt.get_price_target_snapshot("AAPL", api_key="test-key")
+    assert len(snapshot["trailing_windows"]) == 1
+    assert snapshot["trailing_windows"][0]["window"] == "lastMonth"

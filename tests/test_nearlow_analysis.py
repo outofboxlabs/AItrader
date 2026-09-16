@@ -341,19 +341,14 @@ def test_run_expert_panel_gives_each_persona_only_its_own_tailored_data(monkeypa
         ],
         social_sentiment_window="week",
         fmp_key_configured=True,
-        price_targets=[
-            {
-                "published_date": "2026-08-14",
-                "target_date": "2027-08-14",
-                "analyst_company": "Big Bank Securities",
-                "analyst_name": "Jane Doe",
-                "price_target": 60.0,
-                "price_when_posted": 42.0,
-                "implied_pct_change": 42.9,
-                "news_title": "Big Bank Securities raises ACME target",
-                "news_url": "https://example.com/news",
-            }
-        ],
+        price_targets={
+            "target_high": 70.0,
+            "target_low": 50.0,
+            "target_consensus": 60.0,
+            "target_median": 60.0,
+            "target_date": "2027-08-14",
+            "trailing_windows": [{"window": "lastMonth", "avg_price_target": 61.0, "count": 3}],
+        },
     )
 
     nla.run_expert_panel("ACME", context, ALL_PERSONAS, "anthropic", "claude-haiku-4-5", api_key="sk-test")
@@ -400,10 +395,11 @@ def test_run_expert_panel_gives_each_persona_only_its_own_tailored_data(monkeypa
     assert "Market cap" not in captured["social_sentiment"]
     assert "Acme misses on guidance" not in captured["social_sentiment"]
 
-    # Price targets: only the FMP price-target list.
-    assert "Big Bank Securities" in captured["price_targets"]
-    assert "Jane Doe" in captured["price_targets"]
+    # Price targets: only the FMP price-target snapshot.
+    assert "60.0" in captured["price_targets"]
     assert "2027-08-14" in captured["price_targets"]
+    assert "lastMonth" not in captured["price_targets"]  # raw key -- should use the human label
+    assert "last month" in captured["price_targets"]
     assert "Market cap" not in captured["price_targets"]
     assert "Acme misses on guidance" not in captured["price_targets"]
 
@@ -455,29 +451,32 @@ def test_price_target_lines_reports_when_none_found():
     assert any("none found" in line for line in lines)
 
 
-def test_price_target_lines_lists_real_targets():
-    targets = [
-        {
-            "published_date": "2026-08-14",
-            "target_date": "2027-08-14",
-            "analyst_company": "Big Bank Securities",
-            "analyst_name": "Jane Doe",
-            "price_target": 60.0,
-            "price_when_posted": 42.0,
-            "implied_pct_change": 42.9,
-            "news_title": "x",
-            "news_url": "y",
-        }
-    ]
-    lines = nla._price_target_lines("ACME", _context(price_targets=targets, fmp_key_configured=True))
+def test_price_target_lines_lists_snapshot_and_trailing_windows():
+    snapshot = {
+        "target_high": 70.0,
+        "target_low": 50.0,
+        "target_consensus": 60.0,
+        "target_median": 60.0,
+        "target_date": "2027-08-14",
+        "trailing_windows": [
+            {"window": "lastMonth", "avg_price_target": 61.0, "count": 3},
+            {"window": "lastYear", "avg_price_target": 55.0, "count": 12},
+        ],
+    }
+    lines = nla._price_target_lines("ACME", _context(price_targets=snapshot, fmp_key_configured=True))
     joined = "\n".join(lines)
-    assert "Big Bank Securities" in joined
-    assert "Jane Doe" in joined
     assert "$60.0" in joined
-    assert "$42.0" in joined
-    assert "+42.9%" in joined
+    assert "$50.0-$70.0" in joined
     assert "2027-08-14" in joined
     assert "12 months" in joined
+    assert "last month: avg $61.0 across 3 target(s)" in joined
+    assert "last year: avg $55.0 across 12 target(s)" in joined
+
+
+def test_price_target_lines_omits_trailing_section_when_absent():
+    snapshot = {"target_high": 70.0, "target_low": 50.0, "target_consensus": 60.0, "target_median": 60.0, "target_date": "2027-08-14", "trailing_windows": []}
+    lines = nla._price_target_lines("ACME", _context(price_targets=snapshot, fmp_key_configured=True))
+    assert not any("Trailing average" in line for line in lines)
 
 
 def test_technical_lines_reports_when_indicators_unavailable():

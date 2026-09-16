@@ -1177,7 +1177,7 @@ def test_nearlow_panel_only_fetches_data_for_selected_personas(client, monkeypat
     monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: calls.__setitem__("financials", calls["financials"] + 1) or None)
     monkeypatch.setattr(app_mod.edgar, "get_recent_filings", lambda ticker: calls.__setitem__("filings", calls["filings"] + 1) or [])
     monkeypatch.setattr(app_mod.stocktwits_sentiment, "get_recent_messages", lambda *a, **kw: calls.__setitem__("sentiment", calls["sentiment"] + 1) or None)
-    monkeypatch.setattr(app_mod.price_targets, "get_price_target_history", lambda *a, **kw: calls.__setitem__("price_targets", calls["price_targets"] + 1) or None)
+    monkeypatch.setattr(app_mod.price_targets, "get_price_target_snapshot", lambda *a, **kw: calls.__setitem__("price_targets", calls["price_targets"] + 1) or None)
 
     captured = {}
     monkeypatch.setattr(
@@ -1235,12 +1235,12 @@ def test_nearlow_panel_fetches_price_targets_when_fmp_key_saved(client, monkeypa
 
     captured = {}
 
-    def fake_get_price_target_history(ticker, api_key, **kw):
+    def fake_get_price_target_snapshot(ticker, api_key, **kw):
         captured["ticker"] = ticker
         captured["api_key"] = api_key
-        return [{"published_date": "2026-08-14", "target_date": "2027-08-14", "price_target": 60.0}]
+        return {"target_consensus": 60.0, "target_date": "2027-08-14", "trailing_windows": []}
 
-    monkeypatch.setattr(app_mod.price_targets, "get_price_target_history", fake_get_price_target_history)
+    monkeypatch.setattr(app_mod.price_targets, "get_price_target_snapshot", fake_get_price_target_snapshot)
     monkeypatch.setattr(app_mod.nearlow_analysis, "run_expert_panel", lambda *a, **kw: [])
 
     res = client.post(
@@ -1261,7 +1261,7 @@ def test_nearlow_panel_skips_price_targets_call_without_fmp_key(client, monkeypa
     _seed_nearlow_candidate()
 
     calls = {"price_targets": 0}
-    monkeypatch.setattr(app_mod.price_targets, "get_price_target_history", lambda *a, **kw: calls.__setitem__("price_targets", calls["price_targets"] + 1) or None)
+    monkeypatch.setattr(app_mod.price_targets, "get_price_target_snapshot", lambda *a, **kw: calls.__setitem__("price_targets", calls["price_targets"] + 1) or None)
 
     captured = {}
     monkeypatch.setattr(

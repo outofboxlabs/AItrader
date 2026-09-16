@@ -400,7 +400,7 @@ def _build_agent_context(
     if "price_targets" in selected:
         fmp_key = credentials.resolve_api_key("fmp", interactive=False)
         context["fmp_key_configured"] = bool(fmp_key)
-        context["price_targets"] = price_targets.get_price_target_history(ticker, fmp_key) if fmp_key else None
+        context["price_targets"] = price_targets.get_price_target_snapshot(ticker, fmp_key) if fmp_key else None
 
     return context
 
