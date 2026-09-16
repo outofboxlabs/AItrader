@@ -798,6 +798,54 @@ def test_get_portfolio_price_chart_handles_data_failure(client, monkeypatch):
     assert res.status_code == 502
 
 
+# --- Rating chart (shared: Near 52W Low + Stock Analysis) ---------------
+
+
+def test_get_rating_chart_requires_ticker(client):
+    res = client.get("/api/rating-chart")
+    assert res.status_code == 400
+
+
+def test_get_rating_chart_returns_history_and_rating_actions(client, monkeypatch):
+    daily = [{"date": "2026-08-01", "close": 40.0}, {"date": "2026-09-14", "close": 25.74}]
+    monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: daily)
+
+    timeline = {
+        "week_52_low": {"date": "2026-09-14", "close": 25.74},
+        "actions": [{"date": "2026-08-28", "firm": "DA Davidson", "to_grade": "Buy", "from_grade": "Buy", "action": "main", "price_at_rating": 29.85}],
+    }
+    captured = {}
+
+    def fake_get_rating_timeline(ticker, daily_history=None):
+        captured["ticker"] = ticker
+        captured["daily_history"] = daily_history
+        return timeline
+
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", fake_get_rating_timeline)
+
+    res = client.get("/api/rating-chart?ticker=bbw")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["ticker"] == "BBW"
+    assert data["history"] == daily
+    assert data["rating_actions"] == timeline["actions"]
+    assert data["week_52_low"] == timeline["week_52_low"]
+    assert captured["ticker"] == "BBW"
+    assert captured["daily_history"] == daily  # reused, not fetched twice
+
+
+def test_get_rating_chart_handles_empty_history_and_no_actions(client, monkeypatch):
+    monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: [])
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker, **kw: {"week_52_low": None, "actions": []})
+
+    res = client.get("/api/rating-chart?ticker=ZZZZ")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["history"] == []
+    assert data["rating_actions"] == []
+    assert data["week_52_low"] is None
+
+
 def test_get_portfolio_price_chart_zoom_returns_history_and_interval(client, monkeypatch):
     captured = {}
 

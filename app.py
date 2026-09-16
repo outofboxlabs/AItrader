@@ -470,6 +470,29 @@ def nearlow_expert_panel():
     return jsonify({"ticker": ticker, "panel": panel})
 
 
+@app.route("/api/rating-chart", methods=["GET"])
+def get_rating_chart():
+    """Daily price history (past year) for one ticker plus its real
+    analyst rating-change history (yfinance, free, no API key) -- shared
+    by the Near 52W Low and Stock Analysis tabs so a human can see
+    exactly when each rating was issued relative to the price action,
+    not just read about it in an AI-generated paragraph."""
+    ticker = (request.args.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker required"}), 400
+
+    history = data.get_daily_price_history(ticker)
+    rating_timeline = nearlow_analysis.get_rating_timeline(ticker, daily_history=history)
+    return jsonify(
+        {
+            "ticker": ticker,
+            "history": history,
+            "rating_actions": rating_timeline.get("actions") or [],
+            "week_52_low": rating_timeline.get("week_52_low"),
+        }
+    )
+
+
 # --- Stock Analysis tab (any ticker/company, not gated by any screen) --
 
 
@@ -1255,6 +1278,7 @@ PAGE_TEMPLATE = """<!doctype html>
     </div>
     <div id="sa-status" style="margin-top:8px;"></div>
     <div id="sa-result" style="display:none; margin-top:12px; max-width:720px;"></div>
+    <div id="sa-chart" style="max-width:720px;"></div>
   </div>
 
   <!-- ===================== FOREX CALENDAR TAB ===================== -->
@@ -2091,7 +2115,10 @@ function renderNearlowTable() {
       <td><button class="secondary" style="font-size:0.75rem; padding:3px 8px;" id="nl-toggle-${c.ticker}" onclick="toggleNearlowDetail('${c.ticker}')">Analyze</button></td>
     </tr>
     <tr id="nl-detail-row-${c.ticker}" style="display:none;">
-      <td colspan="8" style="border-top:none;"><div id="nl-detail-${c.ticker}"></div></td>
+      <td colspan="8" style="border-top:none;">
+        <div id="nl-detail-${c.ticker}"></div>
+        <div id="nl-chart-${c.ticker}" style="max-width:720px;"></div>
+      </td>
     </tr>`;
   }).join("");
 }
@@ -2155,6 +2182,119 @@ function toggleSentimentWindowVisibility(scopeId) {
   if (row) row.style.display = (checkbox && checkbox.checked) ? "block" : "none";
 }
 
+// ---------- Rating chart (shared: Near 52W Low + Stock Analysis) ----------
+// Daily price line with a marker at each real analyst rating-change date
+// (yfinance, free, no API key) -- lets a human see when each rating was
+// issued relative to the price action, not just read about it in text.
+
+const ratingCharts = {};
+
+function ratingChartHtml(scopeId, ticker) {
+  return `
+    <div style="margin-top:10px;">
+      <button class="secondary" style="font-size:0.75rem; padding:4px 10px;" id="${scopeId}-rating-chart-btn" onclick="toggleRatingChart('${scopeId}', '${escapeHtml(ticker)}')">Show Rating Chart</button>
+      <div id="${scopeId}-rating-chart-wrap" style="display:none; margin-top:8px;">
+        <canvas id="${scopeId}-rating-chart-canvas" height="180"></canvas>
+        <div id="${scopeId}-rating-chart-status" class="muted" style="margin-top:4px; font-size:0.75rem;"></div>
+        <div id="${scopeId}-rating-chart-legend" style="margin-top:6px; font-size:0.75rem;"></div>
+      </div>
+    </div>`;
+}
+
+async function toggleRatingChart(scopeId, ticker) {
+  const wrap = document.getElementById(`${scopeId}-rating-chart-wrap`);
+  const btn = document.getElementById(`${scopeId}-rating-chart-btn`);
+  if (wrap.style.display === "block") {
+    wrap.style.display = "none";
+    btn.textContent = "Show Rating Chart";
+    return;
+  }
+  wrap.style.display = "block";
+  btn.textContent = "Hide Rating Chart";
+  if (ratingCharts[scopeId]) return;  // already loaded once
+
+  const statusEl = document.getElementById(`${scopeId}-rating-chart-status`);
+  statusEl.textContent = "Loading...";
+  try {
+    const res = await fetch(`/api/rating-chart?ticker=${encodeURIComponent(ticker)}`);
+    const data = await res.json();
+    if (!res.ok) { statusEl.textContent = "Error: " + data.error; return; }
+    if (!data.history || data.history.length === 0) { statusEl.textContent = "No price history available for this ticker."; return; }
+
+    const labels = data.history.map(h => h.date);
+    const closes = data.history.map(h => h.close);
+    const maxClose = Math.max(...closes);
+
+    const actions = [...(data.rating_actions || [])].sort((a, b) => a.date.localeCompare(b.date));
+    const markerBars = new Array(data.history.length).fill(null);
+    const markerByIndex = {};
+    actions.forEach(a => {
+      let idx = data.history.findIndex(h => h.date >= a.date);
+      if (idx === -1) idx = data.history.length - 1;
+      markerBars[idx] = maxClose;
+      markerByIndex[idx] = a;
+    });
+
+    const ctx = document.getElementById(`${scopeId}-rating-chart-canvas`).getContext("2d");
+    if (ratingCharts[scopeId]) ratingCharts[scopeId].destroy();
+    ratingCharts[scopeId] = new Chart(ctx, {
+      data: {
+        labels,
+        datasets: [
+          {
+            type: "bar",
+            label: "Analyst rating change",
+            data: markerBars,
+            backgroundColor: "rgba(45, 108, 223, 0.35)",
+            barPercentage: 1.0,
+            categoryPercentage: 1.0,
+            order: 2,
+          },
+          {
+            type: "line",
+            label: ticker + " price",
+            data: closes,
+            borderColor: "#2d6cdf",
+            backgroundColor: "transparent",
+            pointRadius: 0,
+            borderWidth: 1.5,
+            tension: 0.1,
+            order: 1,
+          },
+        ],
+      },
+      options: {
+        animation: false,
+        scales: {
+          x: { ticks: { maxTicksLimit: 10, autoSkip: true } },
+          y: { position: "right" },
+        },
+        plugins: {
+          tooltip: {
+            callbacks: {
+              afterBody: (items) => {
+                const a = markerByIndex[items[0].dataIndex];
+                if (!a) return [];
+                const priceThen = a.price_at_rating != null ? `$${a.price_at_rating.toFixed(2)}` : "n/a";
+                return [`${a.firm || "Unknown firm"}: ${a.from_grade || "?"} → ${a.to_grade || "?"} (${a.action || "n/a"})`, `Price then: ${priceThen}`];
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const legendHtml = actions.length === 0
+      ? '<span class="muted">No analyst rating changes found for this ticker.</span>'
+      : actions.slice().reverse().map((a, i) => `<div style="margin-top:2px;">${actions.length - i}. [${escapeHtml(a.date)}] ${escapeHtml(a.firm || "Unknown firm")}: ${escapeHtml(a.from_grade || "?")} → ${escapeHtml(a.to_grade || "?")}</div>`).join("");
+    document.getElementById(`${scopeId}-rating-chart-legend`).innerHTML = legendHtml;
+
+    statusEl.textContent = `${data.history.length} daily bars (past year). Blue bars mark real analyst rating changes -- hover for details.`;
+  } catch (err) {
+    statusEl.textContent = "Error: " + err;
+  }
+}
+
 // ---------- NEAR 52W LOW: per-stock expert take + selectable-agent panel ----------
 
 const nearlowExpert = {};
@@ -2173,6 +2313,10 @@ function toggleNearlowDetail(ticker) {
   btn.textContent = "Hide";
   if (!nearlowExpert[ticker]) {
     loadNearlowExpert(ticker);
+  }
+  const chartEl = document.getElementById(`nl-chart-${ticker}`);
+  if (chartEl && !chartEl.innerHTML) {
+    chartEl.innerHTML = ratingChartHtml(`nl-${ticker}`, ticker);
   }
 }
 
@@ -2278,8 +2422,11 @@ async function lookupStockAnalysis() {
   if (!query) return;
   const statusEl = document.getElementById("sa-status");
   const resultEl = document.getElementById("sa-result");
+  const chartEl = document.getElementById("sa-chart");
   const btn = document.getElementById("sa-lookup-btn");
   resultEl.style.display = "none";
+  chartEl.innerHTML = "";
+  delete ratingCharts["sa"];
   saCurrent = null;
   saExpert = null;
   saPanel = null;
@@ -2296,6 +2443,7 @@ async function lookupStockAnalysis() {
     saCurrent = resData;
     statusEl.textContent = "";
     renderStockAnalysisResult();
+    chartEl.innerHTML = ratingChartHtml("sa", saCurrent.ticker);
   } catch (err) {
     statusEl.textContent = "Error: " + err;
   } finally {
