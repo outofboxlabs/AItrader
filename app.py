@@ -2272,6 +2272,13 @@ async function toggleRatingChart(scopeId, ticker) {
         plugins: {
           tooltip: {
             callbacks: {
+              label: (item) => {
+                // The marker bar's own height is just maxClose (drawn tall
+                // so it's visible), not real data -- suppress it here since
+                // the actual rating details are added below via afterBody.
+                if (item.dataset.label === "Analyst rating change") return null;
+                return `${item.dataset.label}: $${item.formattedValue}`;
+              },
               afterBody: (items) => {
                 const a = markerByIndex[items[0].dataIndex];
                 if (!a) return [];
