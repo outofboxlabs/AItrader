@@ -64,14 +64,15 @@ def test_get_price_target_snapshot_returns_normalized_shape(monkeypatch):
     assert windows["allTime"]["avg_price_target"] == 250.0
 
 
-def test_get_price_target_snapshot_returns_none_when_consensus_fails(monkeypatch):
+def test_get_price_target_snapshot_surfaces_error_when_consensus_call_fails(monkeypatch):
     def fake_get(url, params=None, timeout=None):
         if url == pt.CONSENSUS_URL:
             raise RuntimeError("network error")
         return _FakeResponse([SUMMARY_RECORD])
 
     monkeypatch.setattr(pt.requests, "get", fake_get)
-    assert pt.get_price_target_snapshot("AAPL", api_key="test-key") is None
+    snapshot = pt.get_price_target_snapshot("AAPL", api_key="test-key")
+    assert snapshot == {"error": "RuntimeError: network error"}
 
 
 def test_get_price_target_snapshot_still_returns_consensus_when_summary_fails(monkeypatch):
@@ -86,9 +87,23 @@ def test_get_price_target_snapshot_still_returns_consensus_when_summary_fails(mo
     assert snapshot["trailing_windows"] == []
 
 
-def test_get_price_target_snapshot_returns_none_on_http_error(monkeypatch):
+def test_get_price_target_snapshot_surfaces_error_on_http_error(monkeypatch):
     monkeypatch.setattr(pt.requests, "get", lambda url, params=None, timeout=None: _FakeResponse(None, status_ok=False, status_code=403))
-    assert pt.get_price_target_snapshot("AAPL", api_key="test-key") is None
+    snapshot = pt.get_price_target_snapshot("AAPL", api_key="test-key")
+    assert "error" in snapshot
+    assert "HTTP 403" in snapshot["error"]
+
+
+def test_get_price_target_snapshot_surfaces_plan_restriction_body_on_402(monkeypatch):
+    """Real-world case: FMP's free plan covers only a subset of symbols
+    for this endpoint -- a smaller-cap ticker gets a 402 with a body
+    explaining the symbol isn't covered, which should reach the human
+    verbatim rather than being flattened into a generic "no data"."""
+    body = "Special Endpoint : This value set for 'symbol' is not available under your current subscription"
+    monkeypatch.setattr(pt.requests, "get", lambda url, params=None, timeout=None: _FakeResponse(None, status_ok=False, status_code=402, text=body))
+    snapshot = pt.get_price_target_snapshot("BBW", api_key="test-key")
+    assert "HTTP 402" in snapshot["error"]
+    assert "not available under your current subscription" in snapshot["error"]
 
 
 def test_get_price_target_snapshot_returns_none_on_empty_list(monkeypatch):

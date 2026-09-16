@@ -452,6 +452,14 @@ def _price_target_lines(ticker: str, context: dict) -> list[str]:
             "data is available. (Add one in the Settings tab to use this agent.)"
         )
         return lines
+    if snapshot and snapshot.get("error"):
+        lines.append(
+            f"Price-target data could not be retrieved for this ticker: {snapshot['error']}. "
+            "This may mean the ticker isn't covered under the current FMP plan (FMP's free "
+            "plan covers only a limited set of symbols for this data), not that no analysts "
+            "cover it."
+        )
+        return lines
     if not snapshot:
         lines.append("(none found for this ticker)")
         return lines

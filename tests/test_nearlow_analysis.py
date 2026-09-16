@@ -451,6 +451,15 @@ def test_price_target_lines_reports_when_none_found():
     assert any("none found" in line for line in lines)
 
 
+def test_price_target_lines_reports_real_api_error_distinctly_from_no_data():
+    snapshot = {"error": "HTTP 402 from FMP: This value set for 'symbol' is not available under your current subscription"}
+    lines = nla._price_target_lines("BBW", _context(price_targets=snapshot, fmp_key_configured=True))
+    joined = "\n".join(lines)
+    assert "HTTP 402" in joined
+    assert "not available under your current subscription" in joined
+    assert not any("none found" in line for line in lines)  # not the same as "no data" -- a real API failure
+
+
 def test_price_target_lines_lists_snapshot_and_trailing_windows():
     snapshot = {
         "target_high": 70.0,
