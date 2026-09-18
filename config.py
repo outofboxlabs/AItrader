@@ -134,6 +134,21 @@ NEARLOW_MIN_RATINGS_COUNT = 3
 NEARLOW_MAX_RESULTS = 100
 NEARLOW_MAX_WORKERS = 20
 
+# --- Penny stock screener (Penny Stocks tab) ---
+# Cheap, liquid US stocks under a price cap -- unlike Near 52W Low, no
+# single quality filter (analyst buy ratio, momentum) is imposed, since
+# many penny stocks have no analyst coverage at all. Instead every
+# candidate carries buy_ratio_pct, pct_from_52w_high (momentum), and
+# volume as columns so a human can sort/judge by whichever angle they
+# care about. Two price thresholds are offered ("5" and "1"), run as
+# separate screens sharing the pool/liquidity settings below.
+PENNYSTOCK_THRESHOLDS = {"5": 5.0, "1": 1.0}
+PENNYSTOCK_CANDIDATE_POOL_SIZE = 200
+PENNYSTOCK_MIN_MARKET_CAP = 10_000_000
+PENNYSTOCK_MIN_VOLUME = 200_000
+PENNYSTOCK_MAX_RESULTS = 100
+PENNYSTOCK_MAX_WORKERS = 20
+
 # --- Forex Factory economic calendar (Forex Calendar tab) ---
 # Forex Factory has no official public API for this. It does publish a
 # public JSON/XML/CSV/ICS feed that powers their own embeddable calendar

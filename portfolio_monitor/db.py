@@ -186,6 +186,26 @@ CREATE TABLE IF NOT EXISTS nearlow_candidates (
     PRIMARY KEY (asof_date, ticker)
 );
 
+CREATE TABLE IF NOT EXISTS pennystock_candidates (
+    asof_date TEXT NOT NULL,
+    threshold TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    name TEXT,
+    price REAL,
+    year_low REAL,
+    year_high REAL,
+    pct_from_52w_low REAL,
+    pct_from_52w_high REAL,
+    volume REAL,
+    target_mean REAL,
+    target_upside_pct REAL,
+    analyst_ratings_json TEXT,
+    buy_ratio_pct REAL,
+    ratings_count INTEGER,
+    market_cap REAL,
+    PRIMARY KEY (asof_date, threshold, ticker)
+);
+
 CREATE TABLE IF NOT EXISTS forex_calendar_events (
     event_date TEXT NOT NULL,
     country TEXT NOT NULL,
@@ -593,6 +613,57 @@ def get_nearlow_candidates(conn, asof_date: str) -> list[dict]:
 
 def get_latest_nearlow_candidates_date(conn) -> Optional[str]:
     row = conn.execute("SELECT MAX(asof_date) AS d FROM nearlow_candidates").fetchone()
+    return row["d"] if row else None
+
+
+def save_pennystock_candidates(conn, asof_date: str, threshold: str, candidates: list[dict]) -> None:
+    conn.executemany(
+        """INSERT OR REPLACE INTO pennystock_candidates
+           (asof_date, threshold, ticker, name, price, year_low, year_high, pct_from_52w_low,
+            pct_from_52w_high, volume, target_mean, target_upside_pct, analyst_ratings_json,
+            buy_ratio_pct, ratings_count, market_cap)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        [
+            (
+                asof_date,
+                threshold,
+                c["ticker"],
+                c.get("name"),
+                c.get("price"),
+                c.get("year_low"),
+                c.get("year_high"),
+                c.get("pct_from_52w_low"),
+                c.get("pct_from_52w_high"),
+                c.get("volume"),
+                c.get("target_mean"),
+                c.get("target_upside_pct"),
+                json.dumps(c.get("analyst_ratings") or {}),
+                c.get("buy_ratio_pct"),
+                c.get("ratings_count"),
+                c.get("market_cap"),
+            )
+            for c in candidates
+        ],
+    )
+
+
+def get_pennystock_candidates(conn, asof_date: str, threshold: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM pennystock_candidates WHERE asof_date=? AND threshold=? ORDER BY volume DESC",
+        (asof_date, threshold),
+    ).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["analyst_ratings"] = json.loads(d.pop("analyst_ratings_json")) if d.get("analyst_ratings_json") else {}
+        result.append(d)
+    return result
+
+
+def get_latest_pennystock_candidates_date(conn, threshold: str) -> Optional[str]:
+    row = conn.execute(
+        "SELECT MAX(asof_date) AS d FROM pennystock_candidates WHERE threshold=?", (threshold,)
+    ).fetchone()
     return row["d"] if row else None
 
 

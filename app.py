@@ -27,7 +27,7 @@ from typing import Optional
 from flask import Flask, jsonify, render_template_string, request
 
 import config
-from portfolio_monitor import credentials, data, edgar, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_analysis, nearlow_screener, news, pipeline, scheduler, stocktwits_sentiment, technical_indicators, vision
+from portfolio_monitor import credentials, data, edgar, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_analysis, nearlow_screener, news, pennystock_screener, pipeline, scheduler, stocktwits_sentiment, technical_indicators, vision
 from portfolio_monitor import db as db_mod
 from portfolio_monitor.models import Position
 
@@ -337,6 +337,61 @@ def run_nearlow_now():
         traceback.print_exc()
         return jsonify({"error": str(exc)}), 502
     return jsonify({"asof_date": date.today().isoformat(), "candidates": candidates})
+
+
+# --- Penny stock screener (Penny Stocks tab) ----------------------------
+
+
+def _pennystock_threshold_key(raw: Optional[str]) -> Optional[str]:
+    key = (raw or "5").strip()
+    return key if key in config.PENNYSTOCK_THRESHOLDS else None
+
+
+def _run_pennystock_screen(threshold_key: str, asof_date: Optional[date] = None) -> list[dict]:
+    """No news/AI call here -- this is a pure data screen, same as
+    Near 52W Low and Growth."""
+    asof_date = asof_date or date.today()
+    db_mod.init_db(config.DB_PATH)
+    candidates = pennystock_screener.find_pennystock_candidates(
+        price_threshold=config.PENNYSTOCK_THRESHOLDS[threshold_key],
+        candidate_pool_size=config.PENNYSTOCK_CANDIDATE_POOL_SIZE,
+        min_market_cap=config.PENNYSTOCK_MIN_MARKET_CAP,
+        min_volume=config.PENNYSTOCK_MIN_VOLUME,
+        max_results=config.PENNYSTOCK_MAX_RESULTS,
+        max_workers=config.PENNYSTOCK_MAX_WORKERS,
+    )
+    with db_mod.connect(config.DB_PATH) as conn:
+        db_mod.save_pennystock_candidates(conn, asof_date.isoformat(), threshold_key, candidates)
+    exports.export_to_csv(candidates, "penny_stocks", f"penny_stocks_under_{threshold_key}", export_root=config.EXPORTS_DIR)
+    return candidates
+
+
+@app.route("/api/pennystock", methods=["GET"])
+def get_pennystock():
+    threshold_key = _pennystock_threshold_key(request.args.get("threshold"))
+    if threshold_key is None:
+        return jsonify({"error": f"threshold must be one of {sorted(config.PENNYSTOCK_THRESHOLDS)}"}), 400
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        latest_date = db_mod.get_latest_pennystock_candidates_date(conn, threshold_key)
+        if not latest_date:
+            return jsonify({"asof_date": None, "threshold": threshold_key, "candidates": []})
+        candidates = db_mod.get_pennystock_candidates(conn, latest_date, threshold_key)
+    return jsonify({"asof_date": latest_date, "threshold": threshold_key, "candidates": candidates})
+
+
+@app.route("/api/pennystock/run", methods=["POST"])
+def run_pennystock_now():
+    body = request.get_json(silent=True) or {}
+    threshold_key = _pennystock_threshold_key(body.get("threshold"))
+    if threshold_key is None:
+        return jsonify({"error": f"threshold must be one of {sorted(config.PENNYSTOCK_THRESHOLDS)}"}), 400
+    try:
+        candidates = _run_pennystock_screen(threshold_key)
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"error": str(exc)}), 502
+    return jsonify({"asof_date": date.today().isoformat(), "threshold": threshold_key, "candidates": candidates})
 
 
 def _load_nearlow_candidate(ticker: str) -> Optional[dict]:
@@ -1103,6 +1158,7 @@ PAGE_TEMPLATE = """<!doctype html>
   <button class="tab-btn" data-tab="movers">Top Movers</button>
   <button class="tab-btn" data-tab="growth">Top Growth</button>
   <button class="tab-btn" data-tab="nearlow">Near 52W Low</button>
+  <button class="tab-btn" data-tab="pennystock">Penny Stocks</button>
   <button class="tab-btn" data-tab="stock-analysis">Stock Analysis</button>
   <button class="tab-btn" data-tab="forex">Forex Calendar</button>
   <button class="tab-btn" data-tab="positions">Positions</button>
@@ -1259,6 +1315,42 @@ PAGE_TEMPLATE = """<!doctype html>
         <th>Analysis</th>
       </tr></thead>
       <tbody id="nl-body"></tbody>
+    </table>
+  </div>
+
+  <!-- ===================== PENNY STOCKS TAB ===================== -->
+  <div class="tab-panel" id="tab-pennystock">
+    <div class="controls">
+      <div><label>Price threshold</label><br>
+        <select id="ps-threshold" onchange="loadPennystock()">
+          <option value="5" selected>Under $5</option>
+          <option value="1">Under $1</option>
+        </select>
+      </div>
+      <button class="action" id="ps-run-btn" onclick="runPennystockNow()">Run Now</button>
+    </div>
+    <p class="muted" style="max-width:640px;">
+      Cheap, liquid US stocks under the selected price threshold. Unlike Near 52W Low, no single
+      quality filter is imposed here -- most penny stocks have no analyst coverage at all -- so every
+      candidate carries three independent columns to judge by instead: analyst buy ratio (when there
+      is any), momentum (% from its own 52-week high), and trading volume. This is not investment
+      advice, just a starting point for further research. Click "Analyze" on a candidate for a
+      ~200-word expert take (with a buy-opportunity verdict), then pick which of 8 independent agents
+      to run for their own take on it.
+    </p>
+    <div id="ps-status"></div>
+    <div id="ps-as-of" class="muted" style="margin-bottom:8px;"></div>
+    <table>
+      <thead><tr id="ps-head">
+        <th class="sortable" data-sort="ticker">Ticker<span class="arrow"></span></th>
+        <th class="sortable" data-sort="price">Price<span class="arrow"></span></th>
+        <th class="sortable" data-sort="volume">Volume<span class="arrow"></span></th>
+        <th class="sortable" data-sort="pct_from_52w_high">From 52w High<span class="arrow"></span></th>
+        <th class="sortable" data-sort="buy_ratio_pct">Buy Ratio %<span class="arrow"></span></th>
+        <th class="sortable" data-sort="market_cap">Market Cap<span class="arrow"></span></th>
+        <th>Analysis</th>
+      </tr></thead>
+      <tbody id="ps-body"></tbody>
     </table>
   </div>
 
@@ -2145,6 +2237,207 @@ document.getElementById("nl-head").addEventListener("click", (e) => {
   if (th) sortNearlow(th.dataset.sort);
 });
 
+// ---------- PENNY STOCKS TAB ----------
+// Mirrors the Near 52W Low tab's structure, but Analyze/Run selected
+// agents reuse the generic Stock Analysis endpoints (candidate passed
+// in the request body) instead of a dedicated pennystock-specific
+// analyze/panel route, since those already accept any ticker+candidate.
+let pennystockRows = [];
+let pennystockSort = { field: "volume", dir: -1 };
+const pennystockExpert = {};
+const pennystockPanel = {};
+
+async function loadPennystock() {
+  const threshold = document.getElementById("ps-threshold").value;
+  const res = await fetch(`/api/pennystock?threshold=${encodeURIComponent(threshold)}`);
+  const data = await res.json();
+  renderPennystock(data);
+}
+
+async function runPennystockNow() {
+  const threshold = document.getElementById("ps-threshold").value;
+  const btn = document.getElementById("ps-run-btn");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Screening...';
+  document.getElementById("ps-status").style.display = "none";
+  try {
+    const res = await fetch("/api/pennystock/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ threshold }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showStatus("ps-status", "Error: " + data.error, false); return; }
+    renderPennystock(data);
+    showStatus("ps-status", `Found ${data.candidates.length} candidate(s) under $${threshold}.`, true);
+  } catch (err) {
+    showStatus("ps-status", "Error: " + err, false);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Run Now";
+  }
+}
+
+function renderPennystock(data) {
+  document.getElementById("ps-as-of").textContent = data.asof_date ? `As of ${data.asof_date}` : "No scan has run yet.";
+  pennystockRows = data.candidates || [];
+  renderPennystockTable();
+}
+
+function sortPennystock(field) {
+  if (pennystockSort.field === field) {
+    pennystockSort.dir *= -1;
+  } else {
+    pennystockSort.field = field;
+    pennystockSort.dir = field === "ticker" ? 1 : -1;
+  }
+  renderPennystockTable();
+}
+
+function renderPennystockTable() {
+  const body = document.getElementById("ps-body");
+  const { field, dir } = pennystockSort;
+
+  document.querySelectorAll("#ps-head th.sortable").forEach(th => {
+    const arrow = th.querySelector(".arrow");
+    arrow.textContent = th.dataset.sort === field ? (dir === 1 ? "\\u25b2" : "\\u25bc") : "";
+  });
+
+  if (pennystockRows.length === 0) {
+    body.innerHTML = '<tr><td colspan="7" class="muted">No candidates found. Click "Run Now" to screen today\\'s market.</td></tr>';
+    return;
+  }
+
+  const sorted = [...pennystockRows].sort((a, b) => {
+    let av = a[field], bv = b[field];
+    if (av === null || av === undefined) return 1;
+    if (bv === null || bv === undefined) return -1;
+    if (typeof av === "string") { av = av.toLowerCase(); bv = bv.toLowerCase(); }
+    if (av < bv) return -1 * dir;
+    if (av > bv) return 1 * dir;
+    return 0;
+  });
+
+  body.innerHTML = sorted.map(c => {
+    const ratings = c.analyst_ratings || {};
+    const ratingsStr = Object.keys(ratings).length
+      ? Object.entries(ratings).map(([k, v]) => `${k}: ${v}`).join(", ")
+      : "n/a";
+    const buyRatioCell = c.buy_ratio_pct !== null && c.buy_ratio_pct !== undefined
+      ? `${fmtNum(c.buy_ratio_pct, 0)}% <span class="muted">(${ratingsStr})</span>`
+      : `<span class="muted">no coverage</span>`;
+    const fromHighCell = c.pct_from_52w_high !== null && c.pct_from_52w_high !== undefined
+      ? fmtNum(c.pct_from_52w_high, 1) + "%" : "n/a";
+    return `<tr>
+      <td><a class="ticker-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(c.ticker)}" target="_blank" rel="noopener">${c.ticker}</a>${c.name ? ` <span class="muted">(${c.name})</span>` : ""}</td>
+      <td>${fmtMoney(c.price)}</td>
+      <td>${c.volume !== null && c.volume !== undefined ? Number(c.volume).toLocaleString() : "n/a"}</td>
+      <td>${fromHighCell}</td>
+      <td>${buyRatioCell}</td>
+      <td>${fmtCap(c.market_cap)}</td>
+      <td><button class="secondary" style="font-size:0.75rem; padding:3px 8px;" id="ps-toggle-${c.ticker}" onclick="togglePennystockDetail('${c.ticker}')">Analyze</button></td>
+    </tr>
+    <tr id="ps-detail-row-${c.ticker}" style="display:none;">
+      <td colspan="7" style="border-top:none;">
+        <div id="ps-detail-${c.ticker}"></div>
+        <div id="ps-chart-${c.ticker}" style="max-width:720px;"></div>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+document.getElementById("ps-head").addEventListener("click", (e) => {
+  const th = e.target.closest("th.sortable");
+  if (th) sortPennystock(th.dataset.sort);
+});
+
+function togglePennystockDetail(ticker) {
+  const row = document.getElementById(`ps-detail-row-${ticker}`);
+  const btn = document.getElementById(`ps-toggle-${ticker}`);
+  const isOpen = row.style.display !== "none";
+  if (isOpen) {
+    row.style.display = "none";
+    btn.textContent = "Analyze";
+    return;
+  }
+  row.style.display = "table-row";
+  btn.textContent = "Hide";
+  if (!pennystockExpert[ticker]) {
+    loadPennystockExpert(ticker);
+  }
+  const chartEl = document.getElementById(`ps-chart-${ticker}`);
+  if (chartEl && !chartEl.innerHTML) {
+    chartEl.innerHTML = ratingChartHtml(`ps-${ticker}`, ticker);
+  }
+}
+
+function pennystockCandidate(ticker) {
+  return pennystockRows.find(c => c.ticker === ticker);
+}
+
+async function loadPennystockExpert(ticker) {
+  const container = document.getElementById(`ps-detail-${ticker}`);
+  container.innerHTML = '<div class="muted" style="padding:8px 0;"><span class="spinner"></span> Loading expert take...</div>';
+  try {
+    const res = await fetch("/api/stock-analysis/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker, candidate: pennystockCandidate(ticker) }),
+    });
+    const resData = await res.json();
+    if (!res.ok) {
+      container.innerHTML = `<div class="muted" style="padding:8px 0;">Error: ${escapeHtml(resData.error)}</div>`;
+      return;
+    }
+    pennystockExpert[ticker] = resData;
+    renderPennystockDetail(ticker);
+  } catch (err) {
+    container.innerHTML = `<div class="muted" style="padding:8px 0;">Error: ${escapeHtml(String(err))}</div>`;
+  }
+}
+
+function renderPennystockDetail(ticker) {
+  const container = document.getElementById(`ps-detail-${ticker}`);
+  const expert = pennystockExpert[ticker];
+  if (!expert) return;
+  const [label, color] = nearlowVerdictLabel(expert.verdict);
+  const panel = pennystockPanel[ticker];
+  const cardsHtml = panel ? panel.map(renderNearlowPanelCard).join("") : "";
+
+  container.innerHTML = `
+    <div style="padding:10px 0 14px; max-width:720px;">
+      <span style="display:inline-block; padding:2px 8px; border-radius:10px; background:${color}22; color:${color}; font-size:0.75rem; font-weight:600;">${escapeHtml(label)}</span>
+      <div style="margin-top:6px;">${escapeHtml(expert.analysis || "n/a")}</div>
+      <div class="disclaimer" style="margin-top:6px;">${escapeHtml(expert.disclaimer || "This is not investment advice.")}</div>
+      <div id="ps-panel-cards-${ticker}" style="margin-top:10px;">${cardsHtml}</div>
+      <div id="ps-panel-status-${ticker}" class="muted" style="margin-top:8px;"></div>
+      <div style="margin-top:8px;">${agentPickerHtml(`ps-${ticker}`, `loadPennystockPanel('${ticker}')`)}</div>
+    </div>`;
+}
+
+async function loadPennystockPanel(ticker) {
+  const scopeId = `ps-${ticker}`;
+  const personas = collectSelectedPersonas(scopeId);
+  const socialSentimentWindow = collectSentimentWindow(scopeId);
+  const statusEl = document.getElementById(`ps-panel-status-${ticker}`);
+  if (personas.length === 0) { statusEl.textContent = "Pick at least one agent to run."; return; }
+  statusEl.innerHTML = `<span class="spinner"></span> Running ${personas.length} agent(s)\\u2014this makes ${personas.length} AI call(s) and can take a bit.`;
+  try {
+    const res = await fetch("/api/stock-analysis/panel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker, candidate: pennystockCandidate(ticker), personas, social_sentiment_window: socialSentimentWindow }),
+    });
+    const resData = await res.json();
+    if (!res.ok) { statusEl.textContent = "Error: " + resData.error; return; }
+    pennystockPanel[ticker] = mergePanelResults(pennystockPanel[ticker], resData.panel);
+    statusEl.textContent = "";
+    renderPennystockDetail(ticker);
+  } catch (err) {
+    statusEl.textContent = "Error: " + err;
+  }
+}
+
 // ---------- Selectable-agent panel picker (shared: Near 52W Low + Stock Analysis) ----------
 
 const AGENT_LABELS = {
@@ -2928,6 +3221,7 @@ loadPositions();
 loadMovers();
 loadGrowth();
 loadNearlow();
+loadPennystock();
 loadForex();
 loadSchedulerStatus();
 loadSettings();

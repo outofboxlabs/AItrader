@@ -375,6 +375,90 @@ def test_run_nearlow_now_handles_screener_failure(client, monkeypatch):
     assert "error" in res.get_json()
 
 
+# --- penny stock screener -------------------------------------------------
+
+
+def test_get_pennystock_empty_when_no_scan_yet(client):
+    res = client.get("/api/pennystock?threshold=5")
+    assert res.status_code == 200
+    assert res.get_json() == {"asof_date": None, "threshold": "5", "candidates": []}
+
+
+def test_get_pennystock_defaults_to_threshold_5(client):
+    res = client.get("/api/pennystock")
+    assert res.status_code == 200
+    assert res.get_json()["threshold"] == "5"
+
+
+def test_get_pennystock_rejects_unknown_threshold(client):
+    res = client.get("/api/pennystock?threshold=100")
+    assert res.status_code == 400
+
+
+def test_run_pennystock_now_returns_and_persists_results(client, monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_find(**kw):
+        captured.update(kw)
+        return [
+            {
+                "ticker": "CHEAP",
+                "name": "Cheap Co",
+                "price": 2.0,
+                "year_low": 1.0,
+                "year_high": 4.0,
+                "pct_from_52w_low": 100.0,
+                "pct_from_52w_high": -50.0,
+                "volume": 900_000,
+                "target_mean": 3.0,
+                "target_upside_pct": 50.0,
+                "analyst_ratings": {"strongBuy": 2, "buy": 1},
+                "buy_ratio_pct": 75.0,
+                "ratings_count": 4,
+                "market_cap": 5e7,
+            }
+        ]
+
+    monkeypatch.setattr(app_mod.pennystock_screener, "find_pennystock_candidates", fake_find)
+    res = client.post("/api/pennystock/run", data=json.dumps({"threshold": "1"}), content_type="application/json")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["threshold"] == "1"
+    assert data["candidates"][0]["ticker"] == "CHEAP"
+    assert data["asof_date"] == date.today().isoformat()
+    assert captured["price_threshold"] == 1.0
+
+    # Persisted -- a fresh GET for the same threshold reads it back.
+    res2 = client.get("/api/pennystock?threshold=1")
+    data2 = res2.get_json()
+    assert data2["candidates"][0]["ticker"] == "CHEAP"
+    assert data2["candidates"][0]["analyst_ratings"]["strongBuy"] == 2
+
+    # A different threshold has nothing scanned yet -- thresholds don't bleed together.
+    res3 = client.get("/api/pennystock?threshold=5")
+    assert res3.get_json()["candidates"] == []
+
+    # And a CSV landed in the configured exports dir under penny_stocks/.
+    export_dir = tmp_path / "exports" / "penny_stocks"
+    assert export_dir.exists()
+    assert len(list(export_dir.glob("*.csv"))) == 1
+
+
+def test_run_pennystock_now_rejects_unknown_threshold(client):
+    res = client.post("/api/pennystock/run", data=json.dumps({"threshold": "100"}), content_type="application/json")
+    assert res.status_code == 400
+
+
+def test_run_pennystock_now_handles_screener_failure(client, monkeypatch):
+    def boom(**kw):
+        raise RuntimeError("yahoo screener down")
+
+    monkeypatch.setattr(app_mod.pennystock_screener, "find_pennystock_candidates", boom)
+    res = client.post("/api/pennystock/run", data=json.dumps({"threshold": "5"}), content_type="application/json")
+    assert res.status_code == 502
+    assert "error" in res.get_json()
+
+
 # --- forex calendar -------------------------------------------------------
 
 
