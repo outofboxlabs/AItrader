@@ -1375,7 +1375,7 @@ PAGE_TEMPLATE = """<!doctype html>
         <th class="sortable" data-sort="price">Price<span class="arrow"></span></th>
         <th class="sortable" data-sort="volume">Volume<span class="arrow"></span></th>
         <th class="sortable" data-sort="year_high">52w High<span class="arrow"></span></th>
-        <th class="sortable" data-sort="pct_from_52w_high">From 52w High<span class="arrow"></span></th>
+        <th class="sortable" data-sort="year_low">52w Low<span class="arrow"></span></th>
         <th class="sortable" data-sort="buy_ratio_pct">Buy Ratio %<span class="arrow"></span></th>
         <th class="sortable" data-sort="market_cap">Market Cap<span class="arrow"></span></th>
         <th>Analysis</th>
@@ -2356,14 +2356,17 @@ function renderPennystockTable() {
     const buyRatioCell = c.buy_ratio_pct !== null && c.buy_ratio_pct !== undefined
       ? `${fmtNum(c.buy_ratio_pct, 0)}% <span class="muted">(${ratingsStr})</span>`
       : `<span class="muted">no coverage</span>`;
-    const fromHighCell = c.pct_from_52w_high !== null && c.pct_from_52w_high !== undefined
-      ? fmtNum(c.pct_from_52w_high, 1) + "%" : "n/a";
+    const pctStr = (v) => v !== null && v !== undefined ? `${v >= 0 ? "+" : ""}${fmtNum(v, 1)}%` : "n/a";
+    const highCell = c.year_high !== null && c.year_high !== undefined
+      ? `${fmtMoney(c.year_high)} <span class="muted">(${pctStr(c.pct_from_52w_high)})</span>` : "n/a";
+    const lowCell = c.year_low !== null && c.year_low !== undefined
+      ? `${fmtMoney(c.year_low)} <span class="muted">(${pctStr(c.pct_from_52w_low)})</span>` : "n/a";
     return `<tr>
       <td><a class="ticker-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(c.ticker)}" target="_blank" rel="noopener">${c.ticker}</a>${c.name ? ` <span class="muted">(${c.name})</span>` : ""}</td>
       <td>${fmtMoney(c.price)}</td>
       <td>${c.volume !== null && c.volume !== undefined ? Number(c.volume).toLocaleString() : "n/a"}</td>
-      <td>${fmtMoney(c.year_high)}</td>
-      <td>${fromHighCell}</td>
+      <td>${highCell}</td>
+      <td>${lowCell}</td>
       <td>${buyRatioCell}</td>
       <td>${fmtCap(c.market_cap)}</td>
       <td><button class="secondary" style="font-size:0.75rem; padding:3px 8px;" id="ps-toggle-${c.ticker}" onclick="togglePennystockDetail('${c.ticker}')">Analyze</button></td>
