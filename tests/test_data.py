@@ -56,6 +56,32 @@ def test_get_price_history_returns_empty_list_on_exception(monkeypatch):
     assert data_mod.get_price_history("AAPL") == []
 
 
+def test_get_price_history_drops_nan_close_bars(monkeypatch):
+    """A NaN close (yfinance occasionally returns one, e.g. a halted or
+    partial session) must never reach jsonify(): Python's json module
+    emits a literal `NaN` token for float('nan'), which isn't valid JSON
+    and breaks JSON.parse() in the browser."""
+    idx = pd.DatetimeIndex(
+        [
+            datetime(2026, 9, 11, 8, 30, tzinfo=timezone.utc),
+            datetime(2026, 9, 11, 8, 35, tzinfo=timezone.utc),
+        ]
+    )
+    df = pd.DataFrame({"Close": [100.0, float("nan")]}, index=idx)
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def history(self, period=None, interval=None):
+            return df
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    result = data_mod.get_price_history("AAPL")
+    assert len(result) == 1
+    assert result[0]["close"] == 100.0
+
+
 def test_get_daily_price_history_returns_date_and_close(monkeypatch):
     idx = pd.DatetimeIndex([datetime(2026, 1, 1), datetime(2026, 1, 2)])
     df = pd.DataFrame({"Close": [100.0, 105.0]}, index=idx)
@@ -86,6 +112,22 @@ def test_get_daily_price_history_returns_empty_list_on_failure(monkeypatch):
     assert data_mod.get_daily_price_history("AAPL") == []
 
 
+def test_get_daily_price_history_drops_nan_close_bars(monkeypatch):
+    idx = pd.DatetimeIndex([datetime(2026, 1, 1), datetime(2026, 1, 2), datetime(2026, 1, 3)])
+    df = pd.DataFrame({"Close": [100.0, float("nan"), 105.0]}, index=idx)
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def history(self, period=None, interval=None):
+            return df
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    result = data_mod.get_daily_price_history("AAPL")
+    assert result == [{"date": "2026-01-01", "close": 100.0}, {"date": "2026-01-03", "close": 105.0}]
+
+
 def test_get_analyst_price_target_snapshot_returns_normalized_shape(monkeypatch):
     class FakeTicker:
         def __init__(self, ticker):
@@ -113,6 +155,34 @@ def test_get_analyst_price_target_snapshot_returns_none_when_no_mean(monkeypatch
 
     monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
     assert data_mod.get_analyst_price_target_snapshot("ZZZZ") is None
+
+
+def test_get_analyst_price_target_snapshot_treats_nan_mean_as_missing(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def get_analyst_price_targets(self):
+            return {"low": 245.0, "high": 400.0, "mean": float("nan"), "median": 360.0}
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    assert data_mod.get_analyst_price_target_snapshot("AAPL") is None
+
+
+def test_get_analyst_price_target_snapshot_cleans_nan_secondary_fields(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def get_analyst_price_targets(self):
+            return {"low": float("nan"), "high": 400.0, "mean": 339.35, "median": float("nan")}
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    snapshot = data_mod.get_analyst_price_target_snapshot("AAPL")
+    assert snapshot["target_mean"] == 339.35
+    assert snapshot["target_low"] is None
+    assert snapshot["target_median"] is None
+    assert snapshot["target_high"] == 400.0
 
 
 def test_get_analyst_price_target_snapshot_returns_none_on_failure(monkeypatch):

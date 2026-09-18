@@ -2199,6 +2199,21 @@ function toggleSentimentWindowVisibility(scopeId) {
   if (row) row.style.display = (checkbox && checkbox.checked) ? "block" : "none";
 }
 
+// Merges a newly-run batch of persona cards into whatever was already run
+// for this ticker -- re-running a persona replaces its old card in place,
+// running a previously-unpicked persona adds a new one. Keeps the agent
+// picker usable for "run a few more" after an initial run, rather than
+// wiping out earlier results every time.
+function mergePanelResults(existing, incoming) {
+  const merged = [...(existing || [])];
+  (incoming || []).forEach(card => {
+    const idx = merged.findIndex(c => c.persona === card.persona);
+    if (idx === -1) merged.push(card);
+    else merged[idx] = card;
+  });
+  return merged;
+}
+
 // ---------- Rating chart (shared: Near 52W Low + Stock Analysis) ----------
 // Daily price line with a marker at each real analyst rating-change date
 // (yfinance, free, no API key) -- lets a human see when each rating was
@@ -2432,17 +2447,16 @@ function renderNearlowDetail(ticker) {
   if (!expert) return;
   const [label, color] = nearlowVerdictLabel(expert.verdict);
   const panel = nearlowPanel[ticker];
-  const panelHtml = panel
-    ? panel.map(renderNearlowPanelCard).join("")
-    : agentPickerHtml(`nl-${ticker}`, `loadNearlowPanel('${ticker}')`);
+  const cardsHtml = panel ? panel.map(renderNearlowPanelCard).join("") : "";
 
   container.innerHTML = `
     <div style="padding:10px 0 14px; max-width:720px;">
       <span style="display:inline-block; padding:2px 8px; border-radius:10px; background:${color}22; color:${color}; font-size:0.75rem; font-weight:600;">${escapeHtml(label)}</span>
       <div style="margin-top:6px;">${escapeHtml(expert.analysis || "n/a")}</div>
       <div class="disclaimer" style="margin-top:6px;">${escapeHtml(expert.disclaimer || "This is not investment advice.")}</div>
+      <div id="nl-panel-cards-${ticker}" style="margin-top:10px;">${cardsHtml}</div>
       <div id="nl-panel-status-${ticker}" class="muted" style="margin-top:8px;"></div>
-      <div id="nl-panel-cards-${ticker}" style="margin-top:6px;">${panelHtml}</div>
+      <div style="margin-top:8px;">${agentPickerHtml(`nl-${ticker}`, `loadNearlowPanel('${ticker}')`)}</div>
     </div>`;
 }
 
@@ -2451,10 +2465,8 @@ async function loadNearlowPanel(ticker) {
   const personas = collectSelectedPersonas(scopeId);
   const socialSentimentWindow = collectSentimentWindow(scopeId);
   const statusEl = document.getElementById(`nl-panel-status-${ticker}`);
-  const cardsEl = document.getElementById(`nl-panel-cards-${ticker}`);
   if (personas.length === 0) { statusEl.textContent = "Pick at least one agent to run."; return; }
   statusEl.innerHTML = `<span class="spinner"></span> Running ${personas.length} agent(s)\\u2014this makes ${personas.length} AI call(s) and can take a bit.`;
-  cardsEl.innerHTML = "";
   try {
     const res = await fetch("/api/nearlow/panel", {
       method: "POST",
@@ -2463,7 +2475,7 @@ async function loadNearlowPanel(ticker) {
     });
     const resData = await res.json();
     if (!res.ok) { statusEl.textContent = "Error: " + resData.error; return; }
-    nearlowPanel[ticker] = resData.panel;
+    nearlowPanel[ticker] = mergePanelResults(nearlowPanel[ticker], resData.panel);
     statusEl.textContent = "";
     renderNearlowDetail(ticker);
   } catch (err) {
@@ -2527,11 +2539,13 @@ function renderStockAnalysisResult() {
       <div class="disclaimer" style="margin-top:6px;">${escapeHtml(saExpert.disclaimer || "This is not investment advice.")}</div>`;
   }
 
-  let panelHtml = "";
+  let panelSectionHtml = "";
   if (saExpert) {
-    panelHtml = saPanel
-      ? saPanel.map(renderNearlowPanelCard).join("")
-      : agentPickerHtml("sa", "runStockAnalysisPanel()");
+    const cardsHtml = saPanel ? saPanel.map(renderNearlowPanelCard).join("") : "";
+    panelSectionHtml = `
+      <div id="sa-panel-cards" style="margin-top:10px;">${cardsHtml}</div>
+      <div id="sa-panel-status" class="muted" style="margin-top:8px;"></div>
+      <div style="margin-top:8px;">${agentPickerHtml("sa", "runStockAnalysisPanel()")}</div>`;
   }
 
   resultEl.innerHTML = `
@@ -2542,8 +2556,7 @@ function renderStockAnalysisResult() {
         &middot; Target: ${fmtMoney(c.target_mean)} (${upsideStr}) &middot; Mkt cap: ${fmtCap(c.market_cap)}
       </div>
       <div id="sa-expert" style="margin-top:10px;">${expertHtml}</div>
-      <div id="sa-panel-status" class="muted" style="margin-top:8px;"></div>
-      <div id="sa-panel-cards" style="margin-top:6px;">${panelHtml}</div>
+      ${panelSectionHtml}
     </div>`;
   resultEl.style.display = "block";
 }
@@ -2570,10 +2583,8 @@ async function runStockAnalysisPanel() {
   const personas = collectSelectedPersonas("sa");
   const socialSentimentWindow = collectSentimentWindow("sa");
   const statusEl = document.getElementById("sa-panel-status");
-  const cardsEl = document.getElementById("sa-panel-cards");
   if (personas.length === 0) { statusEl.textContent = "Pick at least one agent to run."; return; }
   statusEl.innerHTML = `<span class="spinner"></span> Running ${personas.length} agent(s)\\u2014this makes ${personas.length} AI call(s) and can take a bit.`;
-  cardsEl.innerHTML = "";
   try {
     const res = await fetch("/api/stock-analysis/panel", {
       method: "POST",
@@ -2582,7 +2593,7 @@ async function runStockAnalysisPanel() {
     });
     const resData = await res.json();
     if (!res.ok) { statusEl.textContent = "Error: " + resData.error; return; }
-    saPanel = resData.panel;
+    saPanel = mergePanelResults(saPanel, resData.panel);
     statusEl.textContent = "";
     renderStockAnalysisResult();
   } catch (err) {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import numbers
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -42,7 +43,13 @@ def get_price_history(ticker: str, period: str = "60d", interval: str = "5m") ->
         return []
     if hist.empty:
         return []
-    return [{"time": idx.isoformat(), "close": float(row["Close"])} for idx, row in hist.iterrows()]
+    bars = []
+    for idx, row in hist.iterrows():
+        close = float(row["Close"])
+        if math.isnan(close):
+            continue
+        bars.append({"time": idx.isoformat(), "close": close})
+    return bars
 
 
 def get_daily_price_history(ticker: str, period: str = "1y") -> list[dict]:
@@ -53,7 +60,11 @@ def get_daily_price_history(ticker: str, period: str = "1y") -> list[dict]:
     or the price on the day a given rating was issued -- rather than for
     charting, so daily granularity over a year is what's needed, not
     intraday bars. Returns [] rather than raising on an empty/failed pull,
-    same convention as get_price_history."""
+    same convention as get_price_history. Bars with a NaN close (yfinance
+    occasionally returns one, e.g. a halted or partial session) are
+    dropped rather than passed through -- Python's json module emits a
+    literal `NaN` token for float('nan'), which isn't valid JSON and
+    breaks JSON.parse() in the browser once this reaches jsonify()."""
     t = yf.Ticker(ticker)
     try:
         hist = t.history(period=period, interval="1d")
@@ -61,7 +72,13 @@ def get_daily_price_history(ticker: str, period: str = "1y") -> list[dict]:
         return []
     if hist.empty:
         return []
-    return [{"date": idx.strftime("%Y-%m-%d"), "close": float(row["Close"])} for idx, row in hist.iterrows()]
+    bars = []
+    for idx, row in hist.iterrows():
+        close = float(row["Close"])
+        if math.isnan(close):
+            continue
+        bars.append({"date": idx.strftime("%Y-%m-%d"), "close": close})
+    return bars
 
 
 def get_analyst_price_target_snapshot(ticker: str) -> Optional[dict]:
@@ -79,14 +96,21 @@ def get_analyst_price_target_snapshot(ticker: str) -> Optional[dict]:
         pt = yf.Ticker(ticker).get_analyst_price_targets() or {}
     except Exception:
         return None
-    mean = pt.get("mean")
+
+    def clean(value):
+        if value is None:
+            return None
+        value = float(value)
+        return None if math.isnan(value) else value
+
+    mean = clean(pt.get("mean"))
     if mean is None:
         return None
     return {
-        "target_high": pt.get("high"),
-        "target_low": pt.get("low"),
+        "target_high": clean(pt.get("high")),
+        "target_low": clean(pt.get("low")),
         "target_mean": mean,
-        "target_median": pt.get("median"),
+        "target_median": clean(pt.get("median")),
         "target_date": (datetime.now(timezone.utc) + timedelta(days=365)).date().isoformat(),
     }
 
