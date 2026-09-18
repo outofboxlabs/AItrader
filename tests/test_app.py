@@ -459,6 +459,98 @@ def test_run_pennystock_now_handles_screener_failure(client, monkeypatch):
     assert "error" in res.get_json()
 
 
+# --- watchlist / Potential Portfolio ---------------------------------------
+
+
+def test_get_watchlist_empty_when_nothing_added(client):
+    res = client.get("/api/watchlist")
+    assert res.status_code == 200
+    assert res.get_json() == {"candidates": []}
+
+
+def test_add_to_watchlist_requires_ticker(client):
+    res = client.post("/api/watchlist/add", data=json.dumps({}), content_type="application/json")
+    assert res.status_code == 400
+
+
+def test_add_and_get_watchlist_returns_live_snapshot(client, monkeypatch):
+    monkeypatch.setattr(
+        app_mod.data,
+        "get_stock_snapshot",
+        lambda ticker: {"ticker": ticker, "price": 42.0, "year_low": 40.0, "year_high": 90.0, "market_cap": 5e9},
+    )
+    res = client.post(
+        "/api/watchlist/add",
+        data=json.dumps({"ticker": "acme", "name": "Acme Corp", "source": "near_52w_low"}),
+        content_type="application/json",
+    )
+    assert res.status_code == 200
+
+    res2 = client.get("/api/watchlist")
+    data2 = res2.get_json()
+    assert len(data2["candidates"]) == 1
+    entry = data2["candidates"][0]
+    assert entry["ticker"] == "ACME"
+    assert entry["name"] == "Acme Corp"
+    assert entry["source"] == "near_52w_low"
+    assert entry["price"] == 42.0  # merged in live, not stored at add-time
+
+
+def test_add_to_watchlist_is_idempotent(client, monkeypatch):
+    """Re-adding the same ticker shouldn't duplicate it or error --
+    same "first add wins, no-op after that" behavior a shopping bag
+    would have."""
+    monkeypatch.setattr(app_mod.data, "get_stock_snapshot", lambda ticker: {"ticker": ticker, "price": 1.0})
+    for _ in range(2):
+        res = client.post("/api/watchlist/add", data=json.dumps({"ticker": "ACME"}), content_type="application/json")
+        assert res.status_code == 200
+    res2 = client.get("/api/watchlist")
+    assert len(res2.get_json()["candidates"]) == 1
+
+
+def test_watchlist_entry_shows_error_when_snapshot_fetch_fails(client, monkeypatch):
+    monkeypatch.setattr(app_mod.data, "get_stock_snapshot", lambda ticker: None)
+    client.post("/api/watchlist/add", data=json.dumps({"ticker": "DELISTED"}), content_type="application/json")
+    res = client.get("/api/watchlist")
+    entry = res.get_json()["candidates"][0]
+    assert entry["ticker"] == "DELISTED"
+    assert "error" in entry
+
+
+def test_remove_from_watchlist(client, monkeypatch):
+    monkeypatch.setattr(app_mod.data, "get_stock_snapshot", lambda ticker: {"ticker": ticker, "price": 1.0})
+    client.post("/api/watchlist/add", data=json.dumps({"ticker": "ACME"}), content_type="application/json")
+    res = client.post("/api/watchlist/remove", data=json.dumps({"ticker": "acme"}), content_type="application/json")
+    assert res.status_code == 200
+    res2 = client.get("/api/watchlist")
+    assert res2.get_json()["candidates"] == []
+
+
+def test_remove_from_watchlist_requires_ticker(client):
+    res = client.post("/api/watchlist/remove", data=json.dumps({}), content_type="application/json")
+    assert res.status_code == 400
+
+
+def test_get_watchlist_tickers_empty_when_nothing_added(client):
+    res = client.get("/api/watchlist/tickers")
+    assert res.status_code == 200
+    assert res.get_json() == {"tickers": []}
+
+
+def test_get_watchlist_tickers_returns_saved_tickers_without_live_fetch(client, monkeypatch):
+    """Unlike /api/watchlist, this route must never touch data.get_stock_snapshot --
+    it exists specifically so button-state checks on every page load stay cheap."""
+
+    def _boom(ticker):
+        raise AssertionError("get_watchlist_tickers must not fetch live snapshots")
+
+    monkeypatch.setattr(app_mod.data, "get_stock_snapshot", _boom)
+    client.post("/api/watchlist/add", data=json.dumps({"ticker": "acme"}), content_type="application/json")
+    res = client.get("/api/watchlist/tickers")
+    assert res.status_code == 200
+    assert res.get_json() == {"tickers": ["ACME"]}
+
+
 # --- forex calendar -------------------------------------------------------
 
 

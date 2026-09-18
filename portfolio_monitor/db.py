@@ -219,6 +219,13 @@ CREATE TABLE IF NOT EXISTS forex_calendar_events (
     fetched_at TEXT NOT NULL,
     PRIMARY KEY (event_date, country, title)
 );
+
+CREATE TABLE IF NOT EXISTS watchlist (
+    ticker TEXT NOT NULL PRIMARY KEY,
+    name TEXT,
+    source TEXT,
+    added_at TEXT NOT NULL
+);
 """
 
 
@@ -665,6 +672,25 @@ def get_latest_pennystock_candidates_date(conn, threshold: str) -> Optional[str]
         "SELECT MAX(asof_date) AS d FROM pennystock_candidates WHERE threshold=?", (threshold,)
     ).fetchone()
     return row["d"] if row else None
+
+
+def add_to_watchlist(conn, ticker: str, name: Optional[str], source: Optional[str], added_at: str) -> None:
+    """INSERT OR IGNORE -- re-adding a ticker already in the bag is a
+    no-op rather than resetting its added_at/source, same "first add
+    wins" behavior a shopping bag would have."""
+    conn.execute(
+        "INSERT OR IGNORE INTO watchlist (ticker, name, source, added_at) VALUES (?,?,?,?)",
+        (ticker, name, source, added_at),
+    )
+
+
+def remove_from_watchlist(conn, ticker: str) -> None:
+    conn.execute("DELETE FROM watchlist WHERE ticker=?", (ticker,))
+
+
+def get_watchlist(conn) -> list[dict]:
+    rows = conn.execute("SELECT * FROM watchlist ORDER BY added_at DESC").fetchall()
+    return [dict(r) for r in rows]
 
 
 def save_forex_calendar_events(conn, events: list[dict], fetched_at: str) -> None:

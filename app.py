@@ -394,6 +394,69 @@ def run_pennystock_now():
     return jsonify({"asof_date": date.today().isoformat(), "threshold": threshold_key, "candidates": candidates})
 
 
+# --- Potential Portfolio (watchlist bundle, built from any screen) -----
+
+
+@app.route("/api/watchlist", methods=["GET"])
+def get_watchlist():
+    """Live snapshot (price, 52-week range, analyst ratings/target) for
+    every ticker in the bag -- fetched fresh each time, same as the
+    Stock Analysis tab, rather than showing whatever stale numbers were
+    true at add-time. A ticker that fails to fetch (delisted, bad
+    symbol) still shows up with an error rather than silently vanishing
+    from the bag."""
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        entries = db_mod.get_watchlist(conn)
+
+    candidates = []
+    for entry in entries:
+        snapshot = data.get_stock_snapshot(entry["ticker"])
+        if snapshot is None:
+            candidates.append({**entry, "error": "Could not fetch live data for this ticker."})
+            continue
+        candidates.append({**entry, **snapshot})
+    return jsonify({"candidates": candidates})
+
+
+@app.route("/api/watchlist/tickers", methods=["GET"])
+def get_watchlist_tickers():
+    """Just the saved ticker symbols, no live fetch -- cheap enough to call
+    on every page load so the "+ Add"/"In Bag" buttons everywhere else
+    (Near 52W Low, Penny Stocks, Stock Analysis) show correct state right
+    away, without paying for a live yfinance round-trip per saved ticker
+    the way the full /api/watchlist (used by the Potential Portfolio tab
+    itself) does."""
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        entries = db_mod.get_watchlist(conn)
+    return jsonify({"tickers": [entry["ticker"] for entry in entries]})
+
+
+@app.route("/api/watchlist/add", methods=["POST"])
+def add_to_watchlist():
+    body = request.get_json(force=True)
+    ticker = (body.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker required"}), 400
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        db_mod.add_to_watchlist(conn, ticker, body.get("name"), body.get("source"), datetime.now(timezone.utc).isoformat())
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/watchlist/remove", methods=["POST"])
+def remove_from_watchlist():
+    body = request.get_json(force=True)
+    ticker = (body.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker required"}), 400
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        db_mod.remove_from_watchlist(conn, ticker)
+    return jsonify({"status": "ok"})
+
+
 def _load_nearlow_candidate(ticker: str) -> Optional[dict]:
     """One ticker's row from the most recent Near 52W Low screen -- reuses
     the price/range/ratings data already fetched by that scan instead of
@@ -1189,6 +1252,7 @@ PAGE_TEMPLATE = """<!doctype html>
   <button class="tab-btn" data-tab="nearlow">Near 52W Low</button>
   <button class="tab-btn" data-tab="pennystock">Penny Stocks</button>
   <button class="tab-btn" data-tab="stock-analysis">Stock Analysis</button>
+  <button class="tab-btn" data-tab="watchlist">Potential Portfolio</button>
   <button class="tab-btn" data-tab="forex">Forex Calendar</button>
   <button class="tab-btn" data-tab="positions">Positions</button>
   <button class="tab-btn" data-tab="settings">Settings</button>
@@ -1402,6 +1466,35 @@ PAGE_TEMPLATE = """<!doctype html>
     <div id="sa-chart" style="max-width:720px;"></div>
   </div>
 
+  <!-- ===================== POTENTIAL PORTFOLIO TAB ===================== -->
+  <div class="tab-panel" id="tab-watchlist">
+    <div class="controls">
+      <button class="action" id="wl-refresh-btn" onclick="loadWatchlist()">Refresh</button>
+    </div>
+    <p class="muted" style="max-width:640px;">
+      Your own bundle of tickers, added with the "+ Add" button on any screen in this app (Near 52W Low,
+      Penny Stocks, Stock Analysis) -- like a shopping bag you build up while browsing, then review here.
+      Price, 52-week range, and ratings are refreshed live each time you open this tab, not cached from
+      when you added them. Click "Analyze" on any of them for the same ~200-word expert take and 8-agent
+      panel available everywhere else in this app. This is not investment advice.
+    </p>
+    <div id="wl-status"></div>
+    <table>
+      <thead><tr id="wl-head">
+        <th class="sortable" data-sort="ticker">Ticker<span class="arrow"></span></th>
+        <th class="sortable" data-sort="price">Price<span class="arrow"></span></th>
+        <th class="sortable" data-sort="pct_from_52w_low">From 52w Low<span class="arrow"></span></th>
+        <th class="sortable" data-sort="pct_from_52w_high">From 52w High<span class="arrow"></span></th>
+        <th class="sortable" data-sort="buy_ratio_pct">Buy Ratio %<span class="arrow"></span></th>
+        <th class="sortable" data-sort="target_upside_pct">Target Upside<span class="arrow"></span></th>
+        <th class="sortable" data-sort="market_cap">Market Cap<span class="arrow"></span></th>
+        <th class="sortable" data-sort="source">Added From<span class="arrow"></span></th>
+        <th>Analysis</th>
+      </tr></thead>
+      <tbody id="wl-body"></tbody>
+    </table>
+  </div>
+
   <!-- ===================== FOREX CALENDAR TAB ===================== -->
   <div class="tab-panel" id="tab-forex">
     <div class="controls">
@@ -1491,12 +1584,17 @@ PAGE_TEMPLATE = """<!doctype html>
 
 <script>
 // ---------- Tab switching ----------
+let watchlistTabLoaded = false;
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
     document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
     btn.classList.add("active");
     document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
+    if (btn.dataset.tab === "watchlist" && !watchlistTabLoaded) {
+      watchlistTabLoaded = true;
+      loadWatchlist();
+    }
   });
 });
 
@@ -2251,7 +2349,10 @@ function renderNearlowTable() {
       <td>${buyRatioCell}</td>
       <td>${upsideCell}</td>
       <td>${fmtCap(c.market_cap)}</td>
-      <td><button class="secondary" style="font-size:0.75rem; padding:3px 8px;" id="nl-toggle-${c.ticker}" onclick="toggleNearlowDetail('${c.ticker}')">Analyze</button></td>
+      <td>
+        <button class="secondary" style="font-size:0.75rem; padding:3px 8px;" id="nl-toggle-${c.ticker}" onclick="toggleNearlowDetail('${c.ticker}')">Analyze</button>
+        ${watchlistButtonHtml(c.ticker, c.name, "near_52w_low")}
+      </td>
     </tr>
     <tr id="nl-detail-row-${c.ticker}" style="display:none;">
       <td colspan="8" style="border-top:none;">
@@ -2369,7 +2470,10 @@ function renderPennystockTable() {
       <td>${lowCell}</td>
       <td>${buyRatioCell}</td>
       <td>${fmtCap(c.market_cap)}</td>
-      <td><button class="secondary" style="font-size:0.75rem; padding:3px 8px;" id="ps-toggle-${c.ticker}" onclick="togglePennystockDetail('${c.ticker}')">Analyze</button></td>
+      <td>
+        <button class="secondary" style="font-size:0.75rem; padding:3px 8px;" id="ps-toggle-${c.ticker}" onclick="togglePennystockDetail('${c.ticker}')">Analyze</button>
+        ${watchlistButtonHtml(c.ticker, c.name, "penny_stocks")}
+      </td>
     </tr>
     <tr id="ps-detail-row-${c.ticker}" style="display:none;">
       <td colspan="8" style="border-top:none;">
@@ -2539,6 +2643,249 @@ function mergePanelResults(existing, incoming) {
     else merged[idx] = card;
   });
   return merged;
+}
+
+// ---------- Potential Portfolio "shopping bag" (shared across every screen) ----------
+// A ticker can be added from any table (Near 52W Low, Penny Stocks,
+// Stock Analysis) via a small "+ Add" button; watchlistTickers mirrors
+// what's actually saved server-side so every screen's buttons agree on
+// whether a given ticker is already in the bag.
+let watchlistTickers = new Set();
+
+async function loadWatchlistTickers() {
+  try {
+    const res = await fetch("/api/watchlist/tickers");
+    const data = await res.json();
+    watchlistTickers = new Set(data.tickers || []);
+  } catch (err) {
+    return;
+  }
+  refreshWatchlistButtonsEverywhere();
+}
+
+// Every screen with a "+ Add"/"In Bag" button for a ticker needs to agree on
+// whether it's in the bag, so any add/remove -- from any tab -- re-renders
+// all of them rather than leaving stale button state on tabs the user isn't
+// currently looking at.
+function refreshWatchlistButtonsEverywhere() {
+  if (nearlowRows.length) renderNearlowTable();
+  if (pennystockRows.length) renderPennystockTable();
+  if (saCurrent) renderStockAnalysisResult();
+}
+
+function watchlistButtonHtml(ticker, name, source) {
+  const inBag = watchlistTickers.has(ticker);
+  const label = inBag ? "\\u2713 In Bag" : "+ Add";
+  return `<button class="secondary" style="font-size:0.75rem; padding:3px 8px;" onclick="toggleWatchlistButton(this, '${escapeHtml(ticker)}', '${escapeHtml(name || "")}', '${escapeHtml(source)}')">${label}</button>`;
+}
+
+async function toggleWatchlistButton(btn, ticker, name, source) {
+  const inBag = watchlistTickers.has(ticker);
+  btn.disabled = true;
+  try {
+    if (inBag) {
+      await fetch("/api/watchlist/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ticker }) });
+      watchlistTickers.delete(ticker);
+      // If we're looking at the Potential Portfolio tab itself, drop the
+      // row immediately rather than waiting for a manual Refresh.
+      watchlistRows = watchlistRows.filter(c => c.ticker !== ticker);
+      if (document.getElementById("tab-watchlist").classList.contains("active")) renderWatchlistTable();
+    } else {
+      await fetch("/api/watchlist/add", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ticker, name, source }) });
+      watchlistTickers.add(ticker);
+    }
+    refreshWatchlistButtonsEverywhere();
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---------- POTENTIAL PORTFOLIO TAB ----------
+let watchlistRows = [];
+let watchlistSort = { field: "ticker", dir: 1 };
+const watchlistExpert = {};
+const watchlistPanel = {};
+
+async function loadWatchlist() {
+  const statusEl = document.getElementById("wl-status");
+  statusEl.innerHTML = '<span class="spinner"></span> Loading live data for your bag...';
+  try {
+    const res = await fetch("/api/watchlist");
+    const data = await res.json();
+    watchlistRows = data.candidates || [];
+    watchlistTickers = new Set(watchlistRows.map(c => c.ticker));
+    statusEl.textContent = "";
+    renderWatchlistTable();
+  } catch (err) {
+    statusEl.textContent = "Error: " + err;
+  }
+}
+
+function sortWatchlist(field) {
+  if (watchlistSort.field === field) {
+    watchlistSort.dir *= -1;
+  } else {
+    watchlistSort.field = field;
+    watchlistSort.dir = field === "ticker" ? 1 : -1;
+  }
+  renderWatchlistTable();
+}
+
+function renderWatchlistTable() {
+  const body = document.getElementById("wl-body");
+  const { field, dir } = watchlistSort;
+
+  document.querySelectorAll("#wl-head th.sortable").forEach(th => {
+    const arrow = th.querySelector(".arrow");
+    arrow.textContent = th.dataset.sort === field ? (dir === 1 ? "\\u25b2" : "\\u25bc") : "";
+  });
+
+  if (watchlistRows.length === 0) {
+    body.innerHTML = '<tr><td colspan="9" class="muted">Nothing in your bag yet -- click "+ Add" on a ticker anywhere in this app.</td></tr>';
+    return;
+  }
+
+  const sorted = [...watchlistRows].sort((a, b) => {
+    let av = a[field], bv = b[field];
+    if (av === null || av === undefined) return 1;
+    if (bv === null || bv === undefined) return -1;
+    if (typeof av === "string") { av = av.toLowerCase(); bv = bv.toLowerCase(); }
+    if (av < bv) return -1 * dir;
+    if (av > bv) return 1 * dir;
+    return 0;
+  });
+
+  body.innerHTML = sorted.map(c => {
+    if (c.error) {
+      return `<tr>
+        <td><a class="ticker-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(c.ticker)}" target="_blank" rel="noopener">${c.ticker}</a>${c.name ? ` <span class="muted">(${c.name})</span>` : ""}</td>
+        <td colspan="7" class="muted">${escapeHtml(c.error)}</td>
+        <td>${watchlistButtonHtml(c.ticker, c.name, c.source)}</td>
+      </tr>`;
+    }
+    const ratings = c.analyst_ratings || {};
+    const ratingsStr = Object.keys(ratings).length
+      ? Object.entries(ratings).map(([k, v]) => `${k}: ${v}`).join(", ")
+      : "n/a";
+    const buyRatioCell = c.buy_ratio_pct !== null && c.buy_ratio_pct !== undefined
+      ? `${fmtNum(c.buy_ratio_pct, 0)}% <span class="muted">(${ratingsStr})</span>`
+      : `<span class="muted">no coverage</span>`;
+    const pctStr = (v) => v !== null && v !== undefined ? `${v >= 0 ? "+" : ""}${fmtNum(v, 1)}%` : "n/a";
+    const upsideCell = c.target_upside_pct !== null && c.target_upside_pct !== undefined
+      ? `${c.target_upside_pct >= 0 ? "+" : ""}${fmtNum(c.target_upside_pct, 1)}%` : "n/a";
+    return `<tr>
+      <td><a class="ticker-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(c.ticker)}" target="_blank" rel="noopener">${c.ticker}</a>${c.name ? ` <span class="muted">(${c.name})</span>` : ""}</td>
+      <td>${fmtMoney(c.price)}</td>
+      <td>${pctStr(c.pct_from_52w_low)}</td>
+      <td>${pctStr(c.pct_from_52w_high)}</td>
+      <td>${buyRatioCell}</td>
+      <td>${upsideCell}</td>
+      <td>${fmtCap(c.market_cap)}</td>
+      <td class="muted">${escapeHtml(c.source || "n/a")}</td>
+      <td>
+        <button class="secondary" style="font-size:0.75rem; padding:3px 8px;" id="wl-toggle-${c.ticker}" onclick="toggleWatchlistDetail('${c.ticker}')">Analyze</button>
+        ${watchlistButtonHtml(c.ticker, c.name, c.source)}
+      </td>
+    </tr>
+    <tr id="wl-detail-row-${c.ticker}" style="display:none;">
+      <td colspan="9" style="border-top:none;">
+        <div id="wl-detail-${c.ticker}"></div>
+        <div id="wl-chart-${c.ticker}" style="max-width:720px;"></div>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+document.getElementById("wl-head").addEventListener("click", (e) => {
+  const th = e.target.closest("th.sortable");
+  if (th) sortWatchlist(th.dataset.sort);
+});
+
+function watchlistCandidate(ticker) {
+  return watchlistRows.find(c => c.ticker === ticker);
+}
+
+function toggleWatchlistDetail(ticker) {
+  const row = document.getElementById(`wl-detail-row-${ticker}`);
+  const btn = document.getElementById(`wl-toggle-${ticker}`);
+  const isOpen = row.style.display !== "none";
+  if (isOpen) {
+    row.style.display = "none";
+    btn.textContent = "Analyze";
+    return;
+  }
+  row.style.display = "table-row";
+  btn.textContent = "Hide";
+  if (!watchlistExpert[ticker]) {
+    loadWatchlistExpert(ticker);
+  }
+  const chartEl = document.getElementById(`wl-chart-${ticker}`);
+  if (chartEl && !chartEl.innerHTML) {
+    chartEl.innerHTML = ratingChartHtml(`wl-${ticker}`, ticker);
+  }
+}
+
+async function loadWatchlistExpert(ticker) {
+  const container = document.getElementById(`wl-detail-${ticker}`);
+  container.innerHTML = '<div class="muted" style="padding:8px 0;"><span class="spinner"></span> Loading expert take...</div>';
+  try {
+    const res = await fetch("/api/stock-analysis/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker, candidate: watchlistCandidate(ticker) }),
+    });
+    const resData = await res.json();
+    if (!res.ok) {
+      container.innerHTML = `<div class="muted" style="padding:8px 0;">Error: ${escapeHtml(resData.error)}</div>`;
+      return;
+    }
+    watchlistExpert[ticker] = resData;
+    renderWatchlistDetail(ticker);
+  } catch (err) {
+    container.innerHTML = `<div class="muted" style="padding:8px 0;">Error: ${escapeHtml(String(err))}</div>`;
+  }
+}
+
+function renderWatchlistDetail(ticker) {
+  const container = document.getElementById(`wl-detail-${ticker}`);
+  const expert = watchlistExpert[ticker];
+  if (!expert) return;
+  const [label, color] = nearlowVerdictLabel(expert.verdict);
+  const panel = watchlistPanel[ticker];
+  const cardsHtml = panel ? panel.map(renderNearlowPanelCard).join("") : "";
+
+  container.innerHTML = `
+    <div style="padding:10px 0 14px; max-width:720px;">
+      <span style="display:inline-block; padding:2px 8px; border-radius:10px; background:${color}22; color:${color}; font-size:0.75rem; font-weight:600;">${escapeHtml(label)}</span>
+      <div style="margin-top:6px;">${escapeHtml(expert.analysis || "n/a")}</div>
+      <div class="disclaimer" style="margin-top:6px;">${escapeHtml(expert.disclaimer || "This is not investment advice.")}</div>
+      <div id="wl-panel-cards-${ticker}" style="margin-top:10px;">${cardsHtml}</div>
+      <div id="wl-panel-status-${ticker}" class="muted" style="margin-top:8px;"></div>
+      <div style="margin-top:8px;">${agentPickerHtml(`wl-${ticker}`, `loadWatchlistPanel('${ticker}')`)}</div>
+    </div>`;
+}
+
+async function loadWatchlistPanel(ticker) {
+  const scopeId = `wl-${ticker}`;
+  const personas = collectSelectedPersonas(scopeId);
+  const socialSentimentWindow = collectSentimentWindow(scopeId);
+  const statusEl = document.getElementById(`wl-panel-status-${ticker}`);
+  if (personas.length === 0) { statusEl.textContent = "Pick at least one agent to run."; return; }
+  statusEl.innerHTML = `<span class="spinner"></span> Running ${personas.length} agent(s)\\u2014this makes ${personas.length} AI call(s) and can take a bit.`;
+  try {
+    const res = await fetch("/api/stock-analysis/panel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker, candidate: watchlistCandidate(ticker), personas, social_sentiment_window: socialSentimentWindow }),
+    });
+    const resData = await res.json();
+    if (!res.ok) { statusEl.textContent = "Error: " + resData.error; return; }
+    watchlistPanel[ticker] = mergePanelResults(watchlistPanel[ticker], resData.panel);
+    statusEl.textContent = "";
+    renderWatchlistDetail(ticker);
+  } catch (err) {
+    statusEl.textContent = "Error: " + err;
+  }
 }
 
 // ---------- Rating chart (shared: Near 52W Low + Stock Analysis) ----------
@@ -2878,6 +3225,7 @@ function renderStockAnalysisResult() {
   resultEl.innerHTML = `
     <div class="news-card">
       <span class="ticker">${escapeHtml(saCurrent.ticker)}</span> <span class="muted">${escapeHtml(saCurrent.name || "")}</span>
+      <span style="margin-left:8px;">${watchlistButtonHtml(saCurrent.ticker, saCurrent.name, "stock_analysis")}</span>
       <div style="margin-top:4px;">
         Price: ${fmtMoney(c.price)} &middot; 52w range: ${fmtMoney(c.year_low)}\\u2013${fmtMoney(c.year_high)}
         &middot; Target: ${fmtMoney(c.target_mean)} (${upsideStr}) &middot; Mkt cap: ${fmtCap(c.market_cap)}
@@ -3271,6 +3619,7 @@ loadMovers();
 loadGrowth();
 loadNearlow();
 loadPennystock();
+loadWatchlistTickers();
 loadForex();
 loadSchedulerStatus();
 loadSettings();
