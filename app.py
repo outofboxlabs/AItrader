@@ -1345,6 +1345,7 @@ PAGE_TEMPLATE = """<!doctype html>
         <th class="sortable" data-sort="ticker">Ticker<span class="arrow"></span></th>
         <th class="sortable" data-sort="price">Price<span class="arrow"></span></th>
         <th class="sortable" data-sort="volume">Volume<span class="arrow"></span></th>
+        <th class="sortable" data-sort="year_high">52w High<span class="arrow"></span></th>
         <th class="sortable" data-sort="pct_from_52w_high">From 52w High<span class="arrow"></span></th>
         <th class="sortable" data-sort="buy_ratio_pct">Buy Ratio %<span class="arrow"></span></th>
         <th class="sortable" data-sort="market_cap">Market Cap<span class="arrow"></span></th>
@@ -2304,7 +2305,7 @@ function renderPennystockTable() {
   });
 
   if (pennystockRows.length === 0) {
-    body.innerHTML = '<tr><td colspan="7" class="muted">No candidates found. Click "Run Now" to screen today\\'s market.</td></tr>';
+    body.innerHTML = '<tr><td colspan="8" class="muted">No candidates found. Click "Run Now" to screen today\\'s market.</td></tr>';
     return;
   }
 
@@ -2332,13 +2333,14 @@ function renderPennystockTable() {
       <td><a class="ticker-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(c.ticker)}" target="_blank" rel="noopener">${c.ticker}</a>${c.name ? ` <span class="muted">(${c.name})</span>` : ""}</td>
       <td>${fmtMoney(c.price)}</td>
       <td>${c.volume !== null && c.volume !== undefined ? Number(c.volume).toLocaleString() : "n/a"}</td>
+      <td>${fmtMoney(c.year_high)}</td>
       <td>${fromHighCell}</td>
       <td>${buyRatioCell}</td>
       <td>${fmtCap(c.market_cap)}</td>
       <td><button class="secondary" style="font-size:0.75rem; padding:3px 8px;" id="ps-toggle-${c.ticker}" onclick="togglePennystockDetail('${c.ticker}')">Analyze</button></td>
     </tr>
     <tr id="ps-detail-row-${c.ticker}" style="display:none;">
-      <td colspan="7" style="border-top:none;">
+      <td colspan="8" style="border-top:none;">
         <div id="ps-detail-${c.ticker}"></div>
         <div id="ps-chart-${c.ticker}" style="max-width:720px;"></div>
       </td>
