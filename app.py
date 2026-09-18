@@ -3029,6 +3029,12 @@ async function toggleRatingChart(scopeId, ticker) {
         pointBorderWidth: 2,
         rotation: 0,
         order: 0,
+        // The star sits at the very last x-index, right against the
+        // right-hand y-axis -- without room to its right and with default
+        // clipping to the chart area, half the star gets cut off by the
+        // axis and it reads as "missing". clip:false plus right padding
+        // (below) gives it room to draw in full.
+        clip: false,
       });
     }
 
@@ -3038,6 +3044,7 @@ async function toggleRatingChart(scopeId, ticker) {
       data: { labels, datasets },
       options: {
         animation: false,
+        layout: { padding: { right: targetStar ? 16 : 0 } },
         scales: {
           x: { ticks: { maxTicksLimit: 10, autoSkip: true } },
           y: { position: "right" },
