@@ -1080,6 +1080,20 @@ PAGE_TEMPLATE = """<!doctype html>
   :root {
     --bg: #0f1115; --card: #1a1e27; --border: #2a2f3a; --text: #e6e6e6; --muted: #9fb4c7;
     --accent: #2d6cdf; --green: #4caf7d; --red: #d9615b; --amber: #d9a63a;
+    --track-bg: #11141b;
+    --badge-bull-bg: #1f3a2c; --badge-bear-bg: #3a2323; --badge-neutral-bg: #2a2f3a; --badge-amber-bg: #3a3220;
+    --danger-bg: #4a2323; --danger-fg: #f0b0ac;
+    --status-ok-bg: #1f3a24; --status-ok-fg: #8fe0a0;
+    --status-err-bg: #3a1f1f; --status-err-fg: #e08f8f;
+  }
+  :root[data-theme="light"] {
+    --bg: #f5f6f8; --card: #ffffff; --border: #d8dce3; --text: #1a1e27; --muted: #5b6472;
+    --accent: #2d6cdf; --green: #1e8a56; --red: #c23b32; --amber: #a8791a;
+    --track-bg: #e8eaee;
+    --badge-bull-bg: #e3f5ea; --badge-bear-bg: #fbe4e2; --badge-neutral-bg: #eef0f3; --badge-amber-bg: #faf1dc;
+    --danger-bg: #fbe4e2; --danger-fg: #a3352c;
+    --status-ok-bg: #e3f5ea; --status-ok-fg: #1e8a56;
+    --status-err-bg: #fbe4e2; --status-err-fg: #a3352c;
   }
   * { box-sizing: border-box; }
   body { font-family: -apple-system, "Segoe UI", Arial, sans-serif; margin: 0; background: var(--bg); color: var(--text); }
@@ -1100,7 +1114,7 @@ PAGE_TEMPLATE = """<!doctype html>
   button.action { background: var(--accent); color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 0.88rem; }
   button.action:disabled { opacity: 0.6; cursor: default; }
   button.secondary { background: var(--card); color: var(--text); border: 1px solid var(--border); padding: 8px 14px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
-  button.danger { background: #4a2323; color: #f0b0ac; border: none; padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 0.78rem; }
+  button.danger { background: var(--danger-bg); color: var(--danger-fg); border: none; padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 0.78rem; }
   .cards-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 1.25rem; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; min-width: 150px; flex: 1; }
   .card .label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
@@ -1116,17 +1130,17 @@ PAGE_TEMPLATE = """<!doctype html>
   th.sortable .arrow { display: inline-block; width: 1em; opacity: 0.6; }
   .bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 0.82rem; }
   .bar-label { width: 90px; flex-shrink: 0; color: var(--muted); }
-  .bar-track { flex: 1; background: #11141b; border-radius: 3px; height: 14px; overflow: hidden; }
+  .bar-track { flex: 1; background: var(--track-bg); border-radius: 3px; height: 14px; overflow: hidden; }
   .bar-fill { height: 100%; background: var(--accent); }
   .bar-fill.flagged { background: var(--amber); }
   .bar-pct { width: 48px; text-align: right; flex-shrink: 0; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.72rem; font-weight: 600; }
-  .badge.bullish, .badge.positive { background: #1f3a2c; color: var(--green); }
-  .badge.bearish, .badge.negative { background: #3a2323; color: var(--red); }
-  .badge.neutral, .badge.no.data { background: #2a2f3a; color: var(--muted); }
-  .badge.impact-high { background: #3a2323; color: var(--red); }
-  .badge.impact-medium { background: #3a3220; color: var(--amber); }
-  .badge.impact-low, .badge.impact-holiday { background: #2a2f3a; color: var(--muted); }
+  .badge.bullish, .badge.positive { background: var(--badge-bull-bg); color: var(--green); }
+  .badge.bearish, .badge.negative { background: var(--badge-bear-bg); color: var(--red); }
+  .badge.neutral, .badge.no.data { background: var(--badge-neutral-bg); color: var(--muted); }
+  .badge.impact-high { background: var(--badge-bear-bg); color: var(--red); }
+  .badge.impact-medium { background: var(--badge-amber-bg); color: var(--amber); }
+  .badge.impact-low, .badge.impact-holiday { background: var(--badge-neutral-bg); color: var(--muted); }
   .actual-better { color: var(--green); font-weight: 600; }
   .actual-worse { color: var(--red); font-weight: 600; }
   .news-card, .mover-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
@@ -1138,9 +1152,9 @@ PAGE_TEMPLATE = """<!doctype html>
   .mover-card .rebound h4 { margin: 8px 0 3px; font-size: 0.78rem; color: var(--muted); text-transform: uppercase; }
   .disclaimer { font-style: italic; color: var(--muted); font-size: 0.75rem; margin-top: 8px; }
   #status { margin: 10px 0; padding: 8px 12px; border-radius: 4px; display: none; font-size: 0.85rem; }
-  #status.ok { background: #1f3a24; color: #8fe0a0; display: block; }
-  #status.err { background: #3a1f1f; color: #e08f8f; display: block; }
-  .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; margin-right: 6px; vertical-align: -2px; }
+  #status.ok { background: var(--status-ok-bg); color: var(--status-ok-fg); display: block; }
+  #status.err { background: var(--status-err-bg); color: var(--status-err-fg); display: block; }
+  .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid var(--border); border-top-color: var(--text); border-radius: 50%; animation: spin 0.7s linear infinite; margin-right: 6px; vertical-align: -2px; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .muted { color: var(--muted); }
   .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
@@ -1148,11 +1162,26 @@ PAGE_TEMPLATE = """<!doctype html>
   .source-tag { font-size: 0.7rem; color: var(--muted); }
   .col-actions { width: 36px; }
 </style>
+<script>
+  // Applied before first paint, ahead of the theme-toggle button's own
+  // script at the end of <body>, so a saved "light" choice doesn't
+  // flash dark for a moment first.
+  (function () {
+    try {
+      if (localStorage.getItem("theme") === "light") {
+        document.documentElement.setAttribute("data-theme", "light");
+      }
+    } catch (e) {}
+  })();
+</script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
-<header><h1>Portfolio Dashboard</h1></header>
+<header style="display:flex; align-items:center; justify-content:space-between;">
+  <h1>Portfolio Dashboard</h1>
+  <button id="theme-toggle-btn" class="secondary" style="font-size:0.75rem; padding:5px 12px;" onclick="toggleTheme()">Light mode</button>
+</header>
 <nav>
   <button class="tab-btn active" data-tab="portfolio">Portfolio</button>
   <button class="tab-btn" data-tab="movers">Top Movers</button>
@@ -3217,6 +3246,21 @@ async function saveKey(provider) {
     document.getElementById(`key-status-${provider}`).textContent = "Error: " + data.error;
   }
 }
+
+// ---------- theme ----------
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  try { localStorage.setItem("theme", theme); } catch (e) {}
+  const btn = document.getElementById("theme-toggle-btn");
+  if (btn) btn.textContent = theme === "light" ? "Dark mode" : "Light mode";
+}
+function toggleTheme() {
+  const current = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+  applyTheme(current === "light" ? "dark" : "light");
+}
+// Sync the button label with whichever theme the early <head> script
+// (or a lack of a saved choice) already put in effect.
+applyTheme(document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark");
 
 // ---------- init ----------
 loadPositions();
