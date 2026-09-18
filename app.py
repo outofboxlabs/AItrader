@@ -1384,12 +1384,21 @@ PAGE_TEMPLATE = """<!doctype html>
   <div class="tab-panel" id="tab-nearlow">
     <div class="controls">
       <button class="action" id="nl-run-btn" onclick="runNearlowNow()">Run Now</button>
+      <div><label>Min analysts</label><br>
+        <select id="nl-min-analysts" onchange="renderNearlowTable()">
+          <option value="3" selected>3 or more</option>
+          <option value="5">5 or more</option>
+          <option value="7">7 or more</option>
+        </select>
+      </div>
     </div>
     <p class="muted" style="max-width:640px;">
       Beaten-down stocks the analyst consensus still likes: within {{ nearlow_max_pct_from_low }}% of the
       52-week low, with at least {{ nearlow_min_ratings_count }} analyst ratings of which
       {{ nearlow_min_buy_ratio_pct }}% or more are "buy" or "strong buy". Both conditions are required --
-      this is not investment advice, just a starting point for further research. Click "Analyze" on a
+      this is not investment advice, just a starting point for further research. The "Min analysts"
+      filter narrows the table further, client-side, since every candidate already has at least
+      {{ nearlow_min_ratings_count }}. Click "Analyze" on a
       candidate for a ~200-word expert take (with a buy-opportunity verdict), then pick which of 8
       independent agents to run (technical / fundamental / news / analyst-ratings-timing / macro /
       SEC filings / social sentiment / price targets) for their own take on it.
@@ -1420,13 +1429,22 @@ PAGE_TEMPLATE = """<!doctype html>
           <option value="1">Under $1</option>
         </select>
       </div>
+      <div><label>Min analysts</label><br>
+        <select id="ps-min-analysts" onchange="renderPennystockTable()">
+          <option value="0" selected>Any (incl. no coverage)</option>
+          <option value="3">3 or more</option>
+          <option value="5">5 or more</option>
+          <option value="7">7 or more</option>
+        </select>
+      </div>
       <button class="action" id="ps-run-btn" onclick="runPennystockNow()">Run Now</button>
     </div>
     <p class="muted" style="max-width:640px;">
       Cheap, liquid US stocks under the selected price threshold. Unlike Near 52W Low, no single
       quality filter is imposed here -- most penny stocks have no analyst coverage at all -- so every
       candidate carries three independent columns to judge by instead: analyst buy ratio (when there
-      is any), momentum (% from its own 52-week high), and trading volume. This is not investment
+      is any), momentum (% from its own 52-week high), and trading volume. Use "Min analysts" to
+      narrow down to more-covered names, client-side. This is not investment
       advice, just a starting point for further research. Click "Analyze" on a candidate for a
       ~200-word expert take (with a buy-opportunity verdict), then pick which of 8 independent agents
       to run for their own take on it.
@@ -2306,6 +2324,11 @@ function sortNearlow(field) {
   renderNearlowTable();
 }
 
+function analystRatingsCount(c) {
+  const ratings = c.analyst_ratings || {};
+  return Object.values(ratings).reduce((sum, n) => sum + (Number(n) || 0), 0);
+}
+
 function renderNearlowTable() {
   const body = document.getElementById("nl-body");
   const { field, dir } = nearlowSort;
@@ -2320,7 +2343,14 @@ function renderNearlowTable() {
     return;
   }
 
-  const sorted = [...nearlowRows].sort((a, b) => {
+  const minAnalysts = Number(document.getElementById("nl-min-analysts").value);
+  const filtered = nearlowRows.filter(c => analystRatingsCount(c) >= minAnalysts);
+  if (filtered.length === 0) {
+    body.innerHTML = `<tr><td colspan="8" class="muted">No candidates with ${minAnalysts}+ analyst ratings. Try a lower "Min analysts" filter.</td></tr>`;
+    return;
+  }
+
+  const sorted = [...filtered].sort((a, b) => {
     let av = a[field], bv = b[field];
     if (av === null || av === undefined) return 1;
     if (bv === null || bv === undefined) return -1;
@@ -2439,7 +2469,14 @@ function renderPennystockTable() {
     return;
   }
 
-  const sorted = [...pennystockRows].sort((a, b) => {
+  const minAnalysts = Number(document.getElementById("ps-min-analysts").value);
+  const filtered = pennystockRows.filter(c => (c.ratings_count || 0) >= minAnalysts);
+  if (filtered.length === 0) {
+    body.innerHTML = `<tr><td colspan="8" class="muted">No candidates with ${minAnalysts}+ analyst ratings. Try a lower "Min analysts" filter.</td></tr>`;
+    return;
+  }
+
+  const sorted = [...filtered].sort((a, b) => {
     let av = a[field], bv = b[field];
     if (av === null || av === undefined) return 1;
     if (bv === null || bv === undefined) return -1;
