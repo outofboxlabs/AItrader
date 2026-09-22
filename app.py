@@ -585,11 +585,12 @@ def nearlow_expert_panel():
 @app.route("/api/rating-chart", methods=["GET"])
 def get_rating_chart():
     """Daily price history (past year) for one ticker plus its real
-    analyst rating-change history and current analyst price-target
-    snapshot -- both via yfinance, free, no API key, and no per-symbol
-    coverage restriction -- shared by the Near 52W Low and Stock
-    Analysis tabs so a human can see exactly when each rating was
-    issued, and where analysts currently see the price headed, relative
+    analyst rating-change history, current analyst price-target snapshot,
+    and top institutional/hedge-fund holder activity (13F-derived, via
+    yfinance) -- all free, no API key, and no per-symbol coverage
+    restriction -- shared by the Near 52W Low and Stock Analysis tabs so
+    a human can see exactly when each rating (or fund's position change)
+    happened, and where analysts currently see the price headed, relative
     to the price action, not just read about it in an AI-generated
     paragraph."""
     ticker = (request.args.get("ticker") or "").strip().upper()
@@ -599,6 +600,7 @@ def get_rating_chart():
     history = data.get_daily_price_history(ticker)
     rating_timeline = nearlow_analysis.get_rating_timeline(ticker, daily_history=history)
     price_target_snapshot = data.get_analyst_price_target_snapshot(ticker)
+    institutional_activity = nearlow_analysis.get_institutional_activity(ticker, daily_history=history)
     return jsonify(
         {
             "ticker": ticker,
@@ -606,6 +608,7 @@ def get_rating_chart():
             "rating_actions": rating_timeline.get("actions") or [],
             "week_52_low": rating_timeline.get("week_52_low"),
             "price_target_snapshot": price_target_snapshot,
+            "institutional_holders": institutional_activity.get("holders") or [],
         }
     )
 
@@ -1880,6 +1883,24 @@ function ratingActionLabel(action) {
   return RATING_ACTION_LABELS[a] || (action || "n/a");
 }
 
+// Institutional/hedge-fund 13F holder direction -- "increased"/"decreased"
+// map onto the same green/red/blue palette as analyst ratings so both
+// marker types read the same way on the rating chart.
+const INSTITUTIONAL_DIRECTION_LABELS = {
+  increased: "Increased position",
+  decreased: "Decreased position",
+  new: "New position",
+  unchanged: "Unchanged",
+};
+function institutionalDirectionKey(direction) {
+  if (direction === "increased") return "better";
+  if (direction === "decreased") return "worse";
+  return "neutral";
+}
+function institutionalDirectionLabel(direction) {
+  return INSTITUTIONAL_DIRECTION_LABELS[direction] || (direction || "n/a");
+}
+
 // Draws "1", "2", ... above each marked bar in the "High-impact event"
 // dataset, matching the numbers in the legend built alongside the chart --
 // Chart.js has no built-in per-bar text label, so this is a small custom
@@ -3060,6 +3081,25 @@ async function toggleRatingChart(scopeId, ticker) {
       return a ? directionColors(ratingActionDirection(a.action)).bar : "transparent";
     });
 
+    const holders = [...(data.institutional_holders || [])].sort((a, b) => a.date.localeCompare(b.date));
+    const institutionalMarkers = new Array(data.history.length).fill(null);
+    const institutionalColors = new Array(data.history.length).fill("transparent");
+    const institutionalByIndex = {};
+    holders.forEach(h => {
+      let idx = data.history.findIndex(hi => hi.date >= h.date);
+      if (idx === -1) idx = data.history.length - 1;
+      institutionalMarkers[idx] = closes[idx];
+      if (!institutionalByIndex[idx]) institutionalByIndex[idx] = [];
+      institutionalByIndex[idx].push(h);
+    });
+    Object.keys(institutionalByIndex).forEach(idx => {
+      const group = institutionalByIndex[idx];
+      const allIncreased = group.every(h => h.direction === "increased");
+      const allDecreased = group.every(h => h.direction === "decreased");
+      const key = allIncreased ? "better" : allDecreased ? "worse" : "neutral";
+      institutionalColors[idx] = directionColors(key).dot;
+    });
+
     const snapshot = data.price_target_snapshot;
     let targetStar = null;
     let targetStatusNote = "";
@@ -3093,6 +3133,22 @@ async function toggleRatingChart(scopeId, ticker) {
         order: 1,
       },
     ];
+    if (holders.length > 0) {
+      datasets.push({
+        type: "line",
+        label: "Institutional / hedge fund 13F activity",
+        data: institutionalMarkers,
+        showLine: false,
+        pointStyle: "rectRot",
+        pointRadius: 8,
+        pointHoverRadius: 11,
+        pointBackgroundColor: institutionalColors,
+        pointBorderColor: "#fff",
+        pointBorderWidth: 1.5,
+        order: 0,
+        clip: false,
+      });
+    }
     if (targetStar) {
       datasets.push({
         type: "line",
@@ -3134,14 +3190,29 @@ async function toggleRatingChart(scopeId, ticker) {
                 // The marker bar's own height is just maxClose (drawn tall
                 // so it's visible), not real data -- suppress it here since
                 // the actual rating details are added below via afterBody.
+                // Same for the institutional marker (it just sits on the
+                // price line at that date).
                 if (item.dataset.label === "Analyst rating change") return null;
+                if (item.dataset.label === "Institutional / hedge fund 13F activity") return null;
                 return `${item.dataset.label}: $${item.formattedValue}`;
               },
               afterBody: (items) => {
-                const a = markerByIndex[items[0].dataIndex];
-                if (!a) return [];
-                const priceThen = a.price_at_rating != null ? `$${a.price_at_rating.toFixed(2)}` : "n/a";
-                return [`${a.firm || "Unknown firm"}: ${a.from_grade || "?"} → ${a.to_grade || "?"} (${ratingActionLabel(a.action)})`, `Price then: ${priceThen}`];
+                const idx = items[0].dataIndex;
+                const lines = [];
+                const a = markerByIndex[idx];
+                if (a) {
+                  const priceThen = a.price_at_rating != null ? `$${a.price_at_rating.toFixed(2)}` : "n/a";
+                  lines.push(`${a.firm || "Unknown firm"}: ${a.from_grade || "?"} → ${a.to_grade || "?"} (${ratingActionLabel(a.action)})`, `Price then: ${priceThen}`);
+                }
+                const group = institutionalByIndex[idx];
+                if (group) {
+                  if (lines.length) lines.push("");
+                  group.forEach(h => {
+                    const pct = h.pct_change != null ? ` (${h.pct_change >= 0 ? "+" : ""}${(h.pct_change * 100).toFixed(1)}%)` : "";
+                    lines.push(`${h.holder || "Unknown holder"}: ${institutionalDirectionLabel(h.direction)}${pct}`);
+                  });
+                }
+                return lines;
               },
             },
           },
@@ -3160,7 +3231,23 @@ async function toggleRatingChart(scopeId, ticker) {
         }).join("");
     document.getElementById(`${scopeId}-rating-chart-legend`).innerHTML = legendHtml;
 
-    statusEl.textContent = `${data.history.length} daily bars (past year). Bar color: green = upgrade, red = downgrade, blue = maintained/initiated -- hover for details.${targetStatusNote}`;
+    const holdersHeading = '<div class="muted" style="margin-top:10px; font-weight:600;">Institutional / hedge fund holders (most recent 13F):</div>';
+    const holdersHtml = holders.length === 0
+      ? holdersHeading + '<span class="muted">No institutional-holder data found for this ticker.</span>'
+      : holdersHeading + holders.slice().reverse().map(h => {
+          const dot = directionColors(institutionalDirectionKey(h.direction)).dot;
+          const pct = h.pct_change != null ? ` (${h.pct_change >= 0 ? "+" : ""}${(h.pct_change * 100).toFixed(1)}%)` : "";
+          const shares = h.shares != null ? Number(h.shares).toLocaleString() : "n/a";
+          return `<div style="margin-top:2px;">
+            <span style="display:inline-block; width:9px; height:9px; border-radius:2px; background:${dot}; margin-right:4px;"></span>
+            [${escapeHtml(h.date)}] ${escapeHtml(h.holder || "Unknown holder")}: ${escapeHtml(institutionalDirectionLabel(h.direction))}${pct} -- ${shares} shares</div>`;
+        }).join("");
+    document.getElementById(`${scopeId}-rating-chart-legend`).innerHTML += holdersHtml;
+
+    const holdersNote = holders.length > 0
+      ? ` Diamond markers: institutional/hedge fund 13F position changes (green = increased, red = decreased, blue = new/mixed) -- filed quarterly with a ~45-day lag, so most cluster around the same recent date.`
+      : "";
+    statusEl.textContent = `${data.history.length} daily bars (past year). Bar color: green = upgrade, red = downgrade, blue = maintained/initiated -- hover for details.${targetStatusNote}${holdersNote}`;
   } catch (err) {
     statusEl.textContent = "Error: " + err;
   }

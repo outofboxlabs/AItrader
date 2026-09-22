@@ -138,6 +138,98 @@ def test_get_rating_timeline_caps_to_10_most_recent_actions(monkeypatch):
     assert result["actions"][0]["date"] == "2026-01-15"  # most recent kept
 
 
+# --- get_institutional_activity ------------------------------------------
+
+
+def test_get_institutional_activity_classifies_direction_and_annotates_price(monkeypatch):
+    daily = [
+        {"date": "2026-01-01", "close": 100.0},
+        {"date": "2026-02-01", "close": 40.0},
+        {"date": "2026-02-15", "close": 55.0},
+    ]
+    monkeypatch.setattr(nla.data_mod, "get_daily_price_history", lambda ticker, **kw: daily)
+
+    holders_df = pd.DataFrame(
+        {
+            "Date Reported": pd.to_datetime(["2026-02-01", "2026-02-01", "2026-02-01"]),
+            "Holder": ["Big Fund LP", "Shrinking Fund LP", "New Fund LP"],
+            "Shares": [1_000_000, 200_000, 50_000],
+            "Value": [55_000_000, 11_000_000, 2_750_000],
+            "pctHeld": [0.05, 0.01, 0.002],
+            "pctChange": [0.12, -0.08, float("nan")],
+        }
+    )
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def get_institutional_holders(self, as_dict=False):
+            return holders_df
+
+    monkeypatch.setattr(nla.yf, "Ticker", FakeTicker)
+
+    result = nla.get_institutional_activity("ACME")
+    holders = {h["holder"]: h for h in result["holders"]}
+
+    assert holders["Big Fund LP"]["direction"] == "increased"
+    assert holders["Big Fund LP"]["pct_change"] == pytest.approx(0.12)
+    assert holders["Big Fund LP"]["price_at_report"] == 40.0  # closest bar on/before 2026-02-01
+
+    assert holders["Shrinking Fund LP"]["direction"] == "decreased"
+    assert holders["New Fund LP"]["direction"] == "new"  # NaN pctChange -> treated as a new position
+    assert holders["New Fund LP"]["pct_change"] is None
+
+
+def test_get_institutional_activity_reuses_passed_in_daily_history(monkeypatch):
+    calls = []
+    monkeypatch.setattr(nla.data_mod, "get_daily_price_history", lambda ticker, **kw: calls.append(ticker) or [])
+    monkeypatch.setattr(
+        nla.yf, "Ticker", lambda ticker: type("T", (), {"get_institutional_holders": lambda self, as_dict=False: None})()
+    )
+
+    result = nla.get_institutional_activity("ACME", daily_history=[{"date": "2026-01-01", "close": 40.0}])
+    assert calls == []
+    assert result == {"holders": []}
+
+
+def test_get_institutional_activity_handles_no_holder_data(monkeypatch):
+    monkeypatch.setattr(nla.data_mod, "get_daily_price_history", lambda ticker, **kw: [])
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def get_institutional_holders(self, as_dict=False):
+            raise RuntimeError("No holders found")
+
+    monkeypatch.setattr(nla.yf, "Ticker", FakeTicker)
+
+    result = nla.get_institutional_activity("ACME")
+    assert result == {"holders": []}
+
+
+def test_get_institutional_activity_sorts_most_recent_first(monkeypatch):
+    monkeypatch.setattr(nla.data_mod, "get_daily_price_history", lambda ticker, **kw: [])
+    holders_df = pd.DataFrame(
+        {
+            "Date Reported": pd.to_datetime(["2026-01-01", "2026-03-01"]),
+            "Holder": ["Older Fund", "Newer Fund"],
+            "Shares": [100, 200],
+            "Value": [1000, 2000],
+            "pctHeld": [0.01, 0.02],
+            "pctChange": [0.0, 0.0],
+        }
+    )
+    monkeypatch.setattr(
+        nla.yf, "Ticker", lambda ticker: type("T", (), {"get_institutional_holders": lambda self, as_dict=False: holders_df})()
+    )
+
+    result = nla.get_institutional_activity("ACME")
+    assert [h["holder"] for h in result["holders"]] == ["Newer Fund", "Older Fund"]
+    assert result["holders"][0]["direction"] == "unchanged"
+
+
 # --- build_context_user_message -----------------------------------------
 
 

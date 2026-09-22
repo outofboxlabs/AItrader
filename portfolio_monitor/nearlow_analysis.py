@@ -23,6 +23,7 @@ import json
 import re
 from typing import Optional
 
+import pandas as pd
 import yfinance as yf
 
 from . import ai_client
@@ -99,6 +100,62 @@ def get_rating_timeline(ticker: str, daily_history: Optional[list[dict]] = None)
     # prompt for names with a long analyst history.
     actions = actions[:10]
     return json.loads(json.dumps({"week_52_low": week_52_low, "actions": actions}, default=str))
+
+
+def get_institutional_activity(ticker: str, daily_history: Optional[list[dict]] = None) -> dict:
+    """Top institutional holders (yfinance's own institutional-holders
+    data, sourced from 13F filings) and whether each added to, trimmed, or
+    newly opened their position -- the closest free equivalent to "hedge
+    fund decisions". Unlike analyst ratings, 13F filings are quarterly
+    with a ~45-day reporting lag, so most rows here share the same recent
+    report date rather than being spread across the year the way rating
+    changes are; still annotated with the stock's own price on that date
+    so it can plot alongside the rating timeline. Also note "institutional
+    holders" is Yahoo's own broader category (asset managers, pensions,
+    banks, etc, alongside hedge funds proper) -- there's no free source
+    that isolates hedge funds specifically. Never raises -- a failed pull
+    just means an empty list."""
+    if daily_history is None:
+        daily_history = data_mod.get_daily_price_history(ticker)
+    daily_history = sorted(daily_history, key=lambda d: d["date"])
+
+    try:
+        df = yf.Ticker(ticker).get_institutional_holders(as_dict=False)
+    except Exception:
+        df = None
+
+    holders = []
+    if df is not None and not df.empty:
+        for _, row in df.iterrows():
+            date_reported = row.get("Date Reported")
+            date_str = date_reported.strftime("%Y-%m-%d") if hasattr(date_reported, "strftime") else str(date_reported)
+            pct_change = row.get("pctChange")
+            if pd.isna(pct_change):
+                pct_change = None
+            if pct_change is None:
+                direction = "new"
+            elif pct_change > 0:
+                direction = "increased"
+            elif pct_change < 0:
+                direction = "decreased"
+            else:
+                direction = "unchanged"
+            holder = {
+                "date": date_str,
+                "holder": row.get("Holder"),
+                "shares": row.get("Shares"),
+                "value": row.get("Value"),
+                "pct_held": row.get("pctHeld"),
+                "pct_change": pct_change,
+                "direction": direction,
+            }
+            price_then = _closest_daily_close_on_or_before(daily_history, date_str)
+            if price_then:
+                holder["price_at_report"] = price_then["close"]
+            holders.append(holder)
+
+    holders.sort(key=lambda h: h["date"], reverse=True)
+    return json.loads(json.dumps({"holders": holders}, default=str))
 
 
 def _timing_label(action: dict) -> str:

@@ -986,6 +986,7 @@ def test_get_rating_chart_returns_history_and_rating_actions(client, monkeypatch
     daily = [{"date": "2026-08-01", "close": 40.0}, {"date": "2026-09-14", "close": 25.74}]
     monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: daily)
     monkeypatch.setattr(app_mod.data, "get_analyst_price_target_snapshot", lambda ticker: None)
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_institutional_activity", lambda ticker, **kw: {"holders": []})
 
     timeline = {
         "week_52_low": {"date": "2026-09-14", "close": 25.74},
@@ -1008,6 +1009,7 @@ def test_get_rating_chart_returns_history_and_rating_actions(client, monkeypatch
     assert data["rating_actions"] == timeline["actions"]
     assert data["week_52_low"] == timeline["week_52_low"]
     assert data["price_target_snapshot"] is None
+    assert data["institutional_holders"] == []
     assert captured["ticker"] == "BBW"
     assert captured["daily_history"] == daily  # reused, not fetched twice
 
@@ -1016,6 +1018,7 @@ def test_get_rating_chart_handles_empty_history_and_no_actions(client, monkeypat
     monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: [])
     monkeypatch.setattr(app_mod.data, "get_analyst_price_target_snapshot", lambda ticker: None)
     monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker, **kw: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_institutional_activity", lambda ticker, **kw: {"holders": []})
 
     res = client.get("/api/rating-chart?ticker=ZZZZ")
     assert res.status_code == 200
@@ -1024,11 +1027,13 @@ def test_get_rating_chart_handles_empty_history_and_no_actions(client, monkeypat
     assert data["rating_actions"] == []
     assert data["week_52_low"] is None
     assert data["price_target_snapshot"] is None
+    assert data["institutional_holders"] == []
 
 
 def test_get_rating_chart_includes_price_target_snapshot_when_available(client, monkeypatch):
     monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: [])
     monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker, **kw: {"week_52_low": None, "actions": []})
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_institutional_activity", lambda ticker, **kw: {"holders": []})
 
     captured = {}
 
@@ -1042,6 +1047,28 @@ def test_get_rating_chart_includes_price_target_snapshot_when_available(client, 
     assert res.status_code == 200
     data = res.get_json()
     assert data["price_target_snapshot"]["target_mean"] == 60.0
+    assert captured["ticker"] == "ACME"
+
+
+def test_get_rating_chart_includes_institutional_holders_when_available(client, monkeypatch):
+    monkeypatch.setattr(app_mod.data, "get_daily_price_history", lambda ticker, **kw: [])
+    monkeypatch.setattr(app_mod.data, "get_analyst_price_target_snapshot", lambda ticker: None)
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_rating_timeline", lambda ticker, **kw: {"week_52_low": None, "actions": []})
+
+    captured = {}
+    holders = [{"date": "2026-08-14", "holder": "Big Fund LP", "shares": 1000000, "value": 55000000, "pct_held": 0.05, "pct_change": 0.12, "direction": "increased"}]
+
+    def fake_get_institutional_activity(ticker, daily_history=None):
+        captured["ticker"] = ticker
+        captured["daily_history"] = daily_history
+        return {"holders": holders}
+
+    monkeypatch.setattr(app_mod.nearlow_analysis, "get_institutional_activity", fake_get_institutional_activity)
+
+    res = client.get("/api/rating-chart?ticker=ACME")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["institutional_holders"] == holders
     assert captured["ticker"] == "ACME"
 
 
