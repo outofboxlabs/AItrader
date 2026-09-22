@@ -181,6 +181,31 @@ def test_get_institutional_activity_classifies_direction_and_annotates_price(mon
     assert holders["New Fund LP"]["pct_change"] is None
 
 
+def test_get_institutional_activity_strips_trailing_whitespace_from_holder_name(monkeypatch):
+    """Yahoo's own institutional-holders data has inconsistent trailing
+    whitespace on some organization names (observed live: "Nvidia Corp "
+    with a trailing space, alongside clean names like "Blackrock Inc.")
+    -- it should be stripped so it doesn't show up as a stray space
+    before the colon in the legend."""
+    monkeypatch.setattr(nla.data_mod, "get_daily_price_history", lambda ticker, **kw: [])
+    holders_df = pd.DataFrame(
+        {
+            "Date Reported": pd.to_datetime(["2026-06-30"]),
+            "Holder": ["Nvidia Corp "],
+            "Shares": [47_213_353],
+            "Value": [1_000_000],
+            "pctHeld": [0.01],
+            "pctChange": [0.0],
+        }
+    )
+    monkeypatch.setattr(
+        nla.yf, "Ticker", lambda ticker: type("T", (), {"get_institutional_holders": lambda self, as_dict=False: holders_df})()
+    )
+
+    result = nla.get_institutional_activity("ACME")
+    assert result["holders"][0]["holder"] == "Nvidia Corp"
+
+
 def test_get_institutional_activity_reuses_passed_in_daily_history(monkeypatch):
     calls = []
     monkeypatch.setattr(nla.data_mod, "get_daily_price_history", lambda ticker, **kw: calls.append(ticker) or [])

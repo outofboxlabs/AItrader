@@ -3030,12 +3030,17 @@ async function loadWatchlistPanel(ticker) {
 // issued relative to the price action, not just read about it in text.
 
 const ratingCharts = {};
+const ratingChartData = {};  // { ticker, data } cache per scopeId, so toggling the checkboxes below re-renders instantly instead of re-fetching.
 
 function ratingChartHtml(scopeId, ticker) {
   return `
     <div style="margin-top:10px;">
       <button class="secondary" style="font-size:0.75rem; padding:4px 10px;" id="${scopeId}-rating-chart-btn" onclick="toggleRatingChart('${scopeId}', '${escapeHtml(ticker)}')">Show Rating Chart</button>
       <div id="${scopeId}-rating-chart-wrap" style="display:none; margin-top:8px;">
+        <div class="controls" style="margin-bottom:0;">
+          <label><input type="checkbox" id="${scopeId}-show-analysts" checked onchange="renderRatingChart('${scopeId}')"> Show analysts</label>
+          <label><input type="checkbox" id="${scopeId}-show-hedgefunds" checked onchange="renderRatingChart('${scopeId}')"> Show hedge funds</label>
+        </div>
         <canvas id="${scopeId}-rating-chart-canvas" height="180"></canvas>
         <div id="${scopeId}-rating-chart-status" class="muted" style="margin-top:4px; font-size:0.75rem;"></div>
         <div id="${scopeId}-rating-chart-legend" style="margin-top:6px; font-size:0.75rem;"></div>
@@ -3053,7 +3058,7 @@ async function toggleRatingChart(scopeId, ticker) {
   }
   wrap.style.display = "block";
   btn.textContent = "Hide Rating Chart";
-  if (ratingCharts[scopeId]) return;  // already loaded once
+  if (ratingChartData[scopeId]) return;  // already fetched once
 
   const statusEl = document.getElementById(`${scopeId}-rating-chart-status`);
   statusEl.textContent = "Loading...";
@@ -3062,175 +3067,205 @@ async function toggleRatingChart(scopeId, ticker) {
     const data = await res.json();
     if (!res.ok) { statusEl.textContent = "Error: " + data.error; return; }
     if (!data.history || data.history.length === 0) { statusEl.textContent = "No price history available for this ticker."; return; }
+    ratingChartData[scopeId] = { ticker, data };
+    renderRatingChart(scopeId);
+  } catch (err) {
+    statusEl.textContent = "Error: " + err;
+  }
+}
 
-    const labels = data.history.map(h => h.date);
-    const closes = data.history.map(h => h.close);
-    const maxClose = Math.max(...closes);
+// Rebuilds the chart + legend from the cached fetch, filtered by whichever
+// of the "Show analysts" / "Show hedge funds" checkboxes are ticked --
+// called on first load and again whenever either checkbox changes, with
+// no re-fetch needed since the full dataset is already in hand.
+function renderRatingChart(scopeId) {
+  const cached = ratingChartData[scopeId];
+  if (!cached) return;
+  const { ticker, data } = cached;
+  const statusEl = document.getElementById(`${scopeId}-rating-chart-status`);
+  const showAnalysts = document.getElementById(`${scopeId}-show-analysts`).checked;
+  const showHedgeFunds = document.getElementById(`${scopeId}-show-hedgefunds`).checked;
 
-    const actions = [...(data.rating_actions || [])].sort((a, b) => a.date.localeCompare(b.date));
-    const markerBars = new Array(data.history.length).fill(null);
-    const markerByIndex = {};
-    actions.forEach(a => {
-      let idx = data.history.findIndex(h => h.date >= a.date);
-      if (idx === -1) idx = data.history.length - 1;
-      markerBars[idx] = maxClose;
-      markerByIndex[idx] = a;
+  const labels = data.history.map(h => h.date);
+  const closes = data.history.map(h => h.close);
+  const maxClose = Math.max(...closes);
+
+  const actions = showAnalysts ? [...(data.rating_actions || [])].sort((a, b) => a.date.localeCompare(b.date)) : [];
+  const markerBars = new Array(data.history.length).fill(null);
+  const markerByIndex = {};
+  actions.forEach(a => {
+    let idx = data.history.findIndex(h => h.date >= a.date);
+    if (idx === -1) idx = data.history.length - 1;
+    markerBars[idx] = maxClose;
+    markerByIndex[idx] = a;
+  });
+  const markerColors = data.history.map((h, i) => {
+    const a = markerByIndex[i];
+    return a ? directionColors(ratingActionDirection(a.action)).bar : "transparent";
+  });
+
+  const holders = showHedgeFunds ? [...(data.institutional_holders || [])].sort((a, b) => a.date.localeCompare(b.date)) : [];
+  const institutionalMarkers = new Array(data.history.length).fill(null);
+  const institutionalColors = new Array(data.history.length).fill("transparent");
+  const institutionalByIndex = {};
+  holders.forEach(h => {
+    let idx = data.history.findIndex(hi => hi.date >= h.date);
+    if (idx === -1) idx = data.history.length - 1;
+    institutionalMarkers[idx] = closes[idx];
+    if (!institutionalByIndex[idx]) institutionalByIndex[idx] = [];
+    institutionalByIndex[idx].push(h);
+  });
+  Object.keys(institutionalByIndex).forEach(idx => {
+    // Multiple funds often report on the same date -- color by which
+    // direction dominates rather than requiring unanimity, so e.g. 8
+    // funds adding and 1 trimming still reads as "mostly increased"
+    // (green) instead of washing out to neutral blue.
+    const group = institutionalByIndex[idx];
+    const increasedCount = group.filter(h => h.direction === "increased").length;
+    const decreasedCount = group.filter(h => h.direction === "decreased").length;
+    let key = "neutral";
+    if (increasedCount > decreasedCount) key = "better";
+    else if (decreasedCount > increasedCount) key = "worse";
+    institutionalColors[idx] = directionColors(key).dot;
+  });
+
+  const snapshot = data.price_target_snapshot;
+  let targetStar = null;
+  let targetStatusNote = "";
+  if (!showAnalysts) {
+    // The price target is itself an analyst-sourced figure, so it hides
+    // along with the rating markers when that box is unchecked.
+  } else if (snapshot && snapshot.target_mean != null && closes.length > 0) {
+    targetStar = new Array(labels.length).fill(null);
+    targetStar[closes.length - 1] = snapshot.target_mean;
+    targetStatusNote = ` ★ = $${snapshot.target_mean} mean analyst 12-month target (as of today).`;
+  } else {
+    targetStatusNote = " No analyst price target available for this ticker.";
+  }
+
+  const datasets = [
+    {
+      type: "bar",
+      label: "Analyst rating change",
+      data: markerBars,
+      backgroundColor: markerColors,
+      barPercentage: 1.0,
+      categoryPercentage: 1.0,
+      order: 2,
+    },
+    {
+      type: "line",
+      label: ticker + " price",
+      data: closes,
+      borderColor: "#2d6cdf",
+      backgroundColor: "transparent",
+      pointRadius: 0,
+      borderWidth: 1.5,
+      tension: 0.1,
+      order: 1,
+    },
+  ];
+  if (holders.length > 0) {
+    datasets.push({
+      type: "line",
+      label: "Institutional / hedge fund 13F activity",
+      data: institutionalMarkers,
+      showLine: false,
+      pointStyle: "rectRot",
+      pointRadius: 8,
+      pointHoverRadius: 11,
+      pointBackgroundColor: institutionalColors,
+      pointBorderColor: "#fff",
+      pointBorderWidth: 1.5,
+      order: 0,
+      clip: false,
     });
-    const markerColors = data.history.map((h, i) => {
-      const a = markerByIndex[i];
-      return a ? directionColors(ratingActionDirection(a.action)).bar : "transparent";
+  }
+  if (targetStar) {
+    datasets.push({
+      type: "line",
+      label: "12-month mean analyst target",
+      data: targetStar,
+      showLine: false,
+      pointStyle: "star",
+      pointRadius: 11,
+      pointHoverRadius: 14,
+      pointBackgroundColor: "#ffc94d",
+      pointBorderColor: "#fff6e0",
+      pointBorderWidth: 2,
+      rotation: 0,
+      order: 0,
+      // The star sits at the very last x-index, right against the
+      // right-hand y-axis -- without room to its right and with default
+      // clipping to the chart area, half the star gets cut off by the
+      // axis and it reads as "missing". clip:false plus right padding
+      // (below) gives it room to draw in full.
+      clip: false,
     });
+  }
 
-    const holders = [...(data.institutional_holders || [])].sort((a, b) => a.date.localeCompare(b.date));
-    const institutionalMarkers = new Array(data.history.length).fill(null);
-    const institutionalColors = new Array(data.history.length).fill("transparent");
-    const institutionalByIndex = {};
-    holders.forEach(h => {
-      let idx = data.history.findIndex(hi => hi.date >= h.date);
-      if (idx === -1) idx = data.history.length - 1;
-      institutionalMarkers[idx] = closes[idx];
-      if (!institutionalByIndex[idx]) institutionalByIndex[idx] = [];
-      institutionalByIndex[idx].push(h);
-    });
-    Object.keys(institutionalByIndex).forEach(idx => {
-      const group = institutionalByIndex[idx];
-      const allIncreased = group.every(h => h.direction === "increased");
-      const allDecreased = group.every(h => h.direction === "decreased");
-      const key = allIncreased ? "better" : allDecreased ? "worse" : "neutral";
-      institutionalColors[idx] = directionColors(key).dot;
-    });
-
-    const snapshot = data.price_target_snapshot;
-    let targetStar = null;
-    let targetStatusNote = "";
-    if (snapshot && snapshot.target_mean != null && closes.length > 0) {
-      targetStar = new Array(labels.length).fill(null);
-      targetStar[closes.length - 1] = snapshot.target_mean;
-      targetStatusNote = ` ★ = $${snapshot.target_mean} mean analyst 12-month target (as of today).`;
-    } else {
-      targetStatusNote = " No analyst price target available for this ticker.";
-    }
-
-    const datasets = [
-      {
-        type: "bar",
-        label: "Analyst rating change",
-        data: markerBars,
-        backgroundColor: markerColors,
-        barPercentage: 1.0,
-        categoryPercentage: 1.0,
-        order: 2,
+  const ctx = document.getElementById(`${scopeId}-rating-chart-canvas`).getContext("2d");
+  if (ratingCharts[scopeId]) ratingCharts[scopeId].destroy();
+  ratingCharts[scopeId] = new Chart(ctx, {
+    data: { labels, datasets },
+    options: {
+      animation: false,
+      layout: { padding: { right: targetStar ? 16 : 0 } },
+      scales: {
+        x: { ticks: { maxTicksLimit: 10, autoSkip: true } },
+        y: { position: "right" },
       },
-      {
-        type: "line",
-        label: ticker + " price",
-        data: closes,
-        borderColor: "#2d6cdf",
-        backgroundColor: "transparent",
-        pointRadius: 0,
-        borderWidth: 1.5,
-        tension: 0.1,
-        order: 1,
-      },
-    ];
-    if (holders.length > 0) {
-      datasets.push({
-        type: "line",
-        label: "Institutional / hedge fund 13F activity",
-        data: institutionalMarkers,
-        showLine: false,
-        pointStyle: "rectRot",
-        pointRadius: 8,
-        pointHoverRadius: 11,
-        pointBackgroundColor: institutionalColors,
-        pointBorderColor: "#fff",
-        pointBorderWidth: 1.5,
-        order: 0,
-        clip: false,
-      });
-    }
-    if (targetStar) {
-      datasets.push({
-        type: "line",
-        label: "12-month mean analyst target",
-        data: targetStar,
-        showLine: false,
-        pointStyle: "star",
-        pointRadius: 11,
-        pointHoverRadius: 14,
-        pointBackgroundColor: "#ffc94d",
-        pointBorderColor: "#fff6e0",
-        pointBorderWidth: 2,
-        rotation: 0,
-        order: 0,
-        // The star sits at the very last x-index, right against the
-        // right-hand y-axis -- without room to its right and with default
-        // clipping to the chart area, half the star gets cut off by the
-        // axis and it reads as "missing". clip:false plus right padding
-        // (below) gives it room to draw in full.
-        clip: false,
-      });
-    }
-
-    const ctx = document.getElementById(`${scopeId}-rating-chart-canvas`).getContext("2d");
-    if (ratingCharts[scopeId]) ratingCharts[scopeId].destroy();
-    ratingCharts[scopeId] = new Chart(ctx, {
-      data: { labels, datasets },
-      options: {
-        animation: false,
-        layout: { padding: { right: targetStar ? 16 : 0 } },
-        scales: {
-          x: { ticks: { maxTicksLimit: 10, autoSkip: true } },
-          y: { position: "right" },
-        },
-        plugins: {
-          tooltip: {
-            callbacks: {
-              label: (item) => {
-                // The marker bar's own height is just maxClose (drawn tall
-                // so it's visible), not real data -- suppress it here since
-                // the actual rating details are added below via afterBody.
-                // Same for the institutional marker (it just sits on the
-                // price line at that date).
-                if (item.dataset.label === "Analyst rating change") return null;
-                if (item.dataset.label === "Institutional / hedge fund 13F activity") return null;
-                return `${item.dataset.label}: $${item.formattedValue}`;
-              },
-              afterBody: (items) => {
-                const idx = items[0].dataIndex;
-                const lines = [];
-                const a = markerByIndex[idx];
-                if (a) {
-                  const priceThen = a.price_at_rating != null ? `$${a.price_at_rating.toFixed(2)}` : "n/a";
-                  lines.push(`${a.firm || "Unknown firm"}: ${a.from_grade || "?"} → ${a.to_grade || "?"} (${ratingActionLabel(a.action)})`, `Price then: ${priceThen}`);
-                }
-                const group = institutionalByIndex[idx];
-                if (group) {
-                  if (lines.length) lines.push("");
-                  group.forEach(h => {
-                    const pct = h.pct_change != null ? ` (${h.pct_change >= 0 ? "+" : ""}${(h.pct_change * 100).toFixed(1)}%)` : "";
-                    lines.push(`${h.holder || "Unknown holder"}: ${institutionalDirectionLabel(h.direction)}${pct}`);
-                  });
-                }
-                return lines;
-              },
+      plugins: {
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              // The marker bar's own height is just maxClose (drawn tall
+              // so it's visible), not real data -- suppress it here since
+              // the actual rating details are added below via afterBody.
+              // Same for the institutional marker (it just sits on the
+              // price line at that date).
+              if (item.dataset.label === "Analyst rating change") return null;
+              if (item.dataset.label === "Institutional / hedge fund 13F activity") return null;
+              return `${item.dataset.label}: $${item.formattedValue}`;
+            },
+            afterBody: (items) => {
+              const idx = items[0].dataIndex;
+              const lines = [];
+              const a = markerByIndex[idx];
+              if (a) {
+                const priceThen = a.price_at_rating != null ? `$${a.price_at_rating.toFixed(2)}` : "n/a";
+                lines.push(`${a.firm || "Unknown firm"}: ${a.from_grade || "?"} → ${a.to_grade || "?"} (${ratingActionLabel(a.action)})`, `Price then: ${priceThen}`);
+              }
+              const group = institutionalByIndex[idx];
+              if (group) {
+                if (lines.length) lines.push("");
+                group.forEach(h => {
+                  const pct = h.pct_change != null ? ` (${h.pct_change >= 0 ? "+" : ""}${(h.pct_change * 100).toFixed(1)}%)` : "";
+                  lines.push(`${h.holder || "Unknown holder"}: ${institutionalDirectionLabel(h.direction)}${pct}`);
+                });
+              }
+              return lines;
             },
           },
         },
       },
-    });
+    },
+  });
 
-    const legendHtml = actions.length === 0
-      ? '<span class="muted">No analyst rating changes found for this ticker.</span>'
-      : actions.slice().reverse().map((a, i) => {
-          const priceThen = a.price_at_rating != null ? `$${a.price_at_rating.toFixed(2)}` : "n/a";
-          const dot = directionColors(ratingActionDirection(a.action)).dot;
-          return `<div style="margin-top:2px;">
-            <span style="display:inline-block; width:9px; height:9px; border-radius:50%; background:${dot}; margin-right:4px;"></span>
-            ${actions.length - i}. [${escapeHtml(a.date)}] ${escapeHtml(a.firm || "Unknown firm")}: ${escapeHtml(a.from_grade || "?")} → ${escapeHtml(a.to_grade || "?")} (${escapeHtml(ratingActionLabel(a.action))}, price: ${priceThen})</div>`;
-        }).join("");
-    document.getElementById(`${scopeId}-rating-chart-legend`).innerHTML = legendHtml;
+  const legendHtml = !showAnalysts
+    ? ""
+    : actions.length === 0
+    ? '<span class="muted">No analyst rating changes found for this ticker.</span>'
+    : actions.slice().reverse().map((a, i) => {
+        const priceThen = a.price_at_rating != null ? `$${a.price_at_rating.toFixed(2)}` : "n/a";
+        const dot = directionColors(ratingActionDirection(a.action)).dot;
+        return `<div style="margin-top:2px;">
+          <span style="display:inline-block; width:9px; height:9px; border-radius:50%; background:${dot}; margin-right:4px;"></span>
+          ${actions.length - i}. [${escapeHtml(a.date)}] ${escapeHtml(a.firm || "Unknown firm")}: ${escapeHtml(a.from_grade || "?")} → ${escapeHtml(a.to_grade || "?")} (${escapeHtml(ratingActionLabel(a.action))}, price: ${priceThen})</div>`;
+      }).join("");
+  document.getElementById(`${scopeId}-rating-chart-legend`).innerHTML = legendHtml;
 
+  if (showHedgeFunds) {
     const holdersHeading = '<div class="muted" style="margin-top:10px; font-weight:600;">Institutional / hedge fund holders (most recent 13F):</div>';
     const holdersHtml = holders.length === 0
       ? holdersHeading + '<span class="muted">No institutional-holder data found for this ticker.</span>'
@@ -3243,14 +3278,13 @@ async function toggleRatingChart(scopeId, ticker) {
             [${escapeHtml(h.date)}] ${escapeHtml(h.holder || "Unknown holder")}: ${escapeHtml(institutionalDirectionLabel(h.direction))}${pct} -- ${shares} shares</div>`;
         }).join("");
     document.getElementById(`${scopeId}-rating-chart-legend`).innerHTML += holdersHtml;
-
-    const holdersNote = holders.length > 0
-      ? ` Diamond markers: institutional/hedge fund 13F position changes (green = increased, red = decreased, blue = new/mixed) -- filed quarterly with a ~45-day lag, so most cluster around the same recent date.`
-      : "";
-    statusEl.textContent = `${data.history.length} daily bars (past year). Bar color: green = upgrade, red = downgrade, blue = maintained/initiated -- hover for details.${targetStatusNote}${holdersNote}`;
-  } catch (err) {
-    statusEl.textContent = "Error: " + err;
   }
+
+  const targetNote = showAnalysts ? targetStatusNote : "";
+  const holdersNote = showHedgeFunds && holders.length > 0
+    ? ` Diamond markers: institutional/hedge fund 13F position changes (green = increased, red = decreased, blue = new/mixed) -- filed quarterly with a ~45-day lag, so most cluster around the same recent date.`
+    : "";
+  statusEl.textContent = `${data.history.length} daily bars (past year). Bar color: green = upgrade, red = downgrade, blue = maintained/initiated -- hover for details.${targetNote}${holdersNote}`;
 }
 
 // ---------- NEAR 52W LOW: per-stock expert take + selectable-agent panel ----------

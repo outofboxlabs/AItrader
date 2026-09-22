@@ -140,9 +140,17 @@ def get_institutional_activity(ticker: str, daily_history: Optional[list[dict]] 
                 direction = "decreased"
             else:
                 direction = "unchanged"
+            holder_name = row.get("Holder")
+            if isinstance(holder_name, str):
+                # Yahoo's own institutional-holders data has inconsistent
+                # trailing whitespace on some organization names (e.g.
+                # "Nvidia Corp " vs "Alyeska Investment Group, L.p.") --
+                # strip it so it doesn't show up as a stray space before
+                # the colon in the legend.
+                holder_name = holder_name.strip()
             holder = {
                 "date": date_str,
-                "holder": row.get("Holder"),
+                "holder": holder_name,
                 "shares": row.get("Shares"),
                 "value": row.get("Value"),
                 "pct_held": row.get("pctHeld"),
