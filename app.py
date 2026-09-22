@@ -1148,12 +1148,13 @@ PAGE_TEMPLATE = """<!doctype html>
     --danger-bg: #4a2323; --danger-fg: #f0b0ac;
     --status-ok-bg: #1f3a24; --status-ok-fg: #8fe0a0;
     --status-err-bg: #3a1f1f; --status-err-fg: #e08f8f;
-    /* Glass preview (Portfolio tab only, for now) -- translucent panel over
-       the mesh backdrop below, with a faint top highlight to read as a
-       lifted pane of glass rather than a flat tinted rectangle. */
-    --glass-bg: rgba(26, 30, 39, 0.55); --glass-border: rgba(255, 255, 255, 0.09);
-    --glass-highlight: rgba(255, 255, 255, 0.07); --glass-shadow: rgba(0, 0, 0, 0.35);
-    --mesh-1: rgba(45, 108, 223, 0.20); --mesh-2: rgba(76, 175, 125, 0.14); --mesh-3: rgba(217, 166, 58, 0.10);
+    /* 3D-elevation preview (Portfolio tab only, for now): a lit gradient
+       surface + inset bevel (light edge on top, dark edge on bottom) +
+       a soft drop shadow reads as an actual raised panel, not just a
+       tinted rectangle -- unlike the flatter glass-blur pass this replaces. */
+    --card-top: #262c3d; --card-bot: #12151c;
+    --bevel-hi: rgba(255, 255, 255, 0.12); --bevel-lo: rgba(0, 0, 0, 0.5);
+    --elev-1: rgba(0, 0, 0, 0.6); --elev-2: rgba(0, 0, 0, 0.4);
   }
   :root[data-theme="light"] {
     --bg: #f5f6f8; --card: #ffffff; --border: #d8dce3; --text: #1a1e27; --muted: #5b6472;
@@ -1163,42 +1164,71 @@ PAGE_TEMPLATE = """<!doctype html>
     --danger-bg: #fbe4e2; --danger-fg: #a3352c;
     --status-ok-bg: #e3f5ea; --status-ok-fg: #1e8a56;
     --status-err-bg: #fbe4e2; --status-err-fg: #a3352c;
-    --glass-bg: rgba(255, 255, 255, 0.55); --glass-border: rgba(255, 255, 255, 0.7);
-    --glass-highlight: rgba(255, 255, 255, 0.9); --glass-shadow: rgba(15, 23, 42, 0.10);
-    --mesh-1: rgba(45, 108, 223, 0.12); --mesh-2: rgba(30, 138, 86, 0.10); --mesh-3: rgba(168, 121, 26, 0.08);
+    --card-top: #ffffff; --card-bot: #e8ecf2;
+    --bevel-hi: rgba(255, 255, 255, 0.9); --bevel-lo: rgba(15, 23, 42, 0.10);
+    --elev-1: rgba(15, 23, 42, 0.16); --elev-2: rgba(15, 23, 42, 0.09);
   }
   * { box-sizing: border-box; }
   body {
     font-family: -apple-system, "Segoe UI", Arial, sans-serif; margin: 0; color: var(--text);
     background: var(--bg);
-    background-image:
-      radial-gradient(700px circle at 8% 0%, var(--mesh-1), transparent 60%),
-      radial-gradient(600px circle at 92% 15%, var(--mesh-2), transparent 55%),
-      radial-gradient(800px circle at 50% 100%, var(--mesh-3), transparent 60%);
+    background-image: radial-gradient(1400px 700px at 50% -12%, var(--elev-2), transparent 60%);
     background-attachment: fixed;
   }
-  /* ---- Glass preview: Portfolio tab only, ahead of a wider rollout ---- */
+  /* ---- 3D-elevation preview: Portfolio tab only, ahead of a wider rollout.
+     A lit gradient surface (lighter top-left "catching the light", darker
+     bottom-right) + an inset bevel line on the top and bottom edges + a
+     real drop shadow reads as a raised, extruded panel. The hover tilt
+     (perspective + rotateX) makes it unmistakably 3D rather than just
+     "a card with a shadow". ---- */
   #tab-portfolio .card, #tab-portfolio section.block {
-    background: var(--glass-bg);
-    border: 1px solid var(--glass-border);
+    background: linear-gradient(155deg, var(--card-top) 0%, var(--card-bot) 100%);
+    border: 1px solid var(--border);
     border-radius: 14px;
-    backdrop-filter: blur(14px) saturate(140%);
-    -webkit-backdrop-filter: blur(14px) saturate(140%);
-    box-shadow: 0 1px 0 0 var(--glass-highlight) inset, 0 10px 30px -12px var(--glass-shadow);
+    box-shadow:
+      inset 0 1px 0 0 var(--bevel-hi),
+      inset 0 -1px 0 0 var(--bevel-lo),
+      0 2px 4px 0 var(--elev-2),
+      0 16px 30px -14px var(--elev-1);
+    transform: perspective(900px) rotateX(0deg) translateZ(0);
+    transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.3, 1.1), box-shadow 0.25s ease;
+    will-change: transform;
   }
-  #tab-portfolio .card { transition: transform 0.15s ease, box-shadow 0.15s ease; }
   #tab-portfolio .card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 1px 0 0 var(--glass-highlight) inset, 0 16px 34px -14px var(--glass-shadow);
+    transform: perspective(900px) rotateX(5deg) translateY(-4px) translateZ(0);
+    box-shadow:
+      inset 0 1px 0 0 var(--bevel-hi),
+      inset 0 -1px 0 0 var(--bevel-lo),
+      0 4px 8px 0 var(--elev-2),
+      0 30px 46px -16px var(--elev-1);
   }
   header { padding: 1rem 1.5rem 0; }
   h1 { font-size: 1.3rem; margin: 0 0 0.75rem; }
-  nav { display: flex; gap: 4px; border-bottom: 1px solid var(--border); padding: 0 1.5rem; }
-  nav button {
-    background: none; border: none; color: var(--muted); padding: 10px 16px; font-size: 0.92rem;
-    cursor: pointer; border-bottom: 2px solid transparent;
+  /* ---- Animated 3D tab bar: a floating pill slides behind the active
+     tab (JS-driven, see moveNavIndicator) and each button lifts toward
+     the viewer on hover -- a Robinhood-style tactile nav instead of a
+     flat underline. Applies to every tab, not just the Portfolio preview,
+     since it's just the switcher chrome. ---- */
+  nav {
+    position: relative; display: flex; gap: 4px; padding: 10px 1.5rem 12px;
+    border-bottom: 1px solid var(--border); perspective: 800px;
   }
-  nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+  .nav-indicator {
+    position: absolute; top: 0; left: 0; border-radius: 10px;
+    background: linear-gradient(155deg, color-mix(in srgb, var(--accent) 88%, white 12%), var(--accent));
+    box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.25) inset, 0 8px 16px -6px color-mix(in srgb, var(--accent) 70%, transparent);
+    transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1.15), width 0.35s cubic-bezier(0.2, 0.8, 0.2, 1.15), height 0.35s ease;
+    z-index: 0; pointer-events: none;
+  }
+  nav button {
+    position: relative; z-index: 1; background: none; border: none; color: var(--muted); padding: 8px 16px;
+    font-size: 0.92rem; cursor: pointer; border-radius: 10px;
+    transform: perspective(600px) rotateX(0deg) translateY(0);
+    transition: transform 0.18s ease, color 0.18s ease;
+  }
+  nav button:hover { transform: perspective(600px) rotateX(8deg) translateY(-2px); color: var(--text); }
+  nav button.active { color: #fff; }
+  nav button.active:hover { transform: perspective(600px) rotateX(4deg) translateY(-1px); }
   main { padding: 1.25rem 1.5rem 3rem; max-width: 1100px; margin: 0 auto; }
   .tab-panel { display: none; }
   .tab-panel.active { display: block; }
@@ -1277,6 +1307,7 @@ PAGE_TEMPLATE = """<!doctype html>
   <button id="theme-toggle-btn" class="secondary" style="font-size:0.75rem; padding:5px 12px;" onclick="toggleTheme()">Light mode</button>
 </header>
 <nav>
+  <div class="nav-indicator" id="nav-indicator"></div>
   <button class="tab-btn active" data-tab="portfolio">Portfolio</button>
   <button class="tab-btn" data-tab="movers">Top Movers</button>
   <button class="tab-btn" data-tab="growth">Top Growth</button>
@@ -1634,18 +1665,34 @@ PAGE_TEMPLATE = """<!doctype html>
 <script>
 // ---------- Tab switching ----------
 let watchlistTabLoaded = false;
+
+function moveNavIndicator(btn) {
+  const nav = document.querySelector("nav");
+  const indicator = document.getElementById("nav-indicator");
+  const navRect = nav.getBoundingClientRect();
+  const btnRect = btn.getBoundingClientRect();
+  indicator.style.transform = `translate(${btnRect.left - navRect.left}px, ${btnRect.top - navRect.top}px)`;
+  indicator.style.width = `${btnRect.width}px`;
+  indicator.style.height = `${btnRect.height}px`;
+}
+
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
     document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
     btn.classList.add("active");
     document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
+    moveNavIndicator(btn);
     if (btn.dataset.tab === "watchlist" && !watchlistTabLoaded) {
       watchlistTabLoaded = true;
       loadWatchlist();
     }
   });
 });
+// Position the indicator behind the default active tab once layout has
+// settled (fonts/webfont metrics can shift button widths after first paint).
+window.addEventListener("load", () => moveNavIndicator(document.querySelector(".tab-btn.active")));
+window.addEventListener("resize", () => moveNavIndicator(document.querySelector(".tab-btn.active")));
 
 function showStatus(elId, message, ok) {
   const el = document.getElementById(elId);
