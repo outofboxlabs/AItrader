@@ -1148,6 +1148,12 @@ PAGE_TEMPLATE = """<!doctype html>
     --danger-bg: #4a2323; --danger-fg: #f0b0ac;
     --status-ok-bg: #1f3a24; --status-ok-fg: #8fe0a0;
     --status-err-bg: #3a1f1f; --status-err-fg: #e08f8f;
+    /* Glass preview (Portfolio tab only, for now) -- translucent panel over
+       the mesh backdrop below, with a faint top highlight to read as a
+       lifted pane of glass rather than a flat tinted rectangle. */
+    --glass-bg: rgba(26, 30, 39, 0.55); --glass-border: rgba(255, 255, 255, 0.09);
+    --glass-highlight: rgba(255, 255, 255, 0.07); --glass-shadow: rgba(0, 0, 0, 0.35);
+    --mesh-1: rgba(45, 108, 223, 0.20); --mesh-2: rgba(76, 175, 125, 0.14); --mesh-3: rgba(217, 166, 58, 0.10);
   }
   :root[data-theme="light"] {
     --bg: #f5f6f8; --card: #ffffff; --border: #d8dce3; --text: #1a1e27; --muted: #5b6472;
@@ -1157,9 +1163,34 @@ PAGE_TEMPLATE = """<!doctype html>
     --danger-bg: #fbe4e2; --danger-fg: #a3352c;
     --status-ok-bg: #e3f5ea; --status-ok-fg: #1e8a56;
     --status-err-bg: #fbe4e2; --status-err-fg: #a3352c;
+    --glass-bg: rgba(255, 255, 255, 0.55); --glass-border: rgba(255, 255, 255, 0.7);
+    --glass-highlight: rgba(255, 255, 255, 0.9); --glass-shadow: rgba(15, 23, 42, 0.10);
+    --mesh-1: rgba(45, 108, 223, 0.12); --mesh-2: rgba(30, 138, 86, 0.10); --mesh-3: rgba(168, 121, 26, 0.08);
   }
   * { box-sizing: border-box; }
-  body { font-family: -apple-system, "Segoe UI", Arial, sans-serif; margin: 0; background: var(--bg); color: var(--text); }
+  body {
+    font-family: -apple-system, "Segoe UI", Arial, sans-serif; margin: 0; color: var(--text);
+    background: var(--bg);
+    background-image:
+      radial-gradient(700px circle at 8% 0%, var(--mesh-1), transparent 60%),
+      radial-gradient(600px circle at 92% 15%, var(--mesh-2), transparent 55%),
+      radial-gradient(800px circle at 50% 100%, var(--mesh-3), transparent 60%);
+    background-attachment: fixed;
+  }
+  /* ---- Glass preview: Portfolio tab only, ahead of a wider rollout ---- */
+  #tab-portfolio .card, #tab-portfolio section.block {
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: 14px;
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    box-shadow: 0 1px 0 0 var(--glass-highlight) inset, 0 10px 30px -12px var(--glass-shadow);
+  }
+  #tab-portfolio .card { transition: transform 0.15s ease, box-shadow 0.15s ease; }
+  #tab-portfolio .card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 1px 0 0 var(--glass-highlight) inset, 0 16px 34px -14px var(--glass-shadow);
+  }
   header { padding: 1rem 1.5rem 0; }
   h1 { font-size: 1.3rem; margin: 0 0 0.75rem; }
   nav { display: flex; gap: 4px; border-bottom: 1px solid var(--border); padding: 0 1.5rem; }
