@@ -3282,7 +3282,7 @@ function renderRatingChart(scopeId) {
 
   const targetNote = showAnalysts ? targetStatusNote : "";
   const holdersNote = showHedgeFunds && holders.length > 0
-    ? ` Diamond markers: institutional/hedge fund 13F position changes (green = increased, red = decreased, blue = new/mixed) -- filed quarterly with a ~45-day lag, so most cluster around the same recent date.`
+    ? ` Diamond markers: institutional/hedge fund 13F position changes (green = increased, red = decreased, blue = new/mixed). "Date Reported" is the quarter-end each fund's 13F covers, not when they actually filed (which trails by up to 45 days) -- so every holder from the same quarter shares the exact same date; this is one point-in-time snapshot, not a spread-out timeline like analyst ratings, and only advances once the next quarter's 13Fs are published.`
     : "";
   statusEl.textContent = `${data.history.length} daily bars (past year). Bar color: green = upgrade, red = downgrade, blue = maintained/initiated -- hover for details.${targetNote}${holdersNote}`;
 }
