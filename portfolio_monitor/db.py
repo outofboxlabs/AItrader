@@ -6,6 +6,7 @@ overwrite each other's history.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -691,6 +692,41 @@ def remove_from_watchlist(conn, ticker: str) -> None:
 def get_watchlist(conn) -> list[dict]:
     rows = conn.execute("SELECT * FROM watchlist ORDER BY added_at DESC").fetchall()
     return [dict(r) for r in rows]
+
+
+def export_watchlist_to_json(conn, path: str) -> None:
+    """Mirrors the watchlist table to a git-trackable JSON file. The
+    sqlite db itself is gitignored (it's runtime data, and most of it --
+    screener results, chain snapshots -- is cheap to re-derive by
+    re-running a scan) but a hand-curated watchlist has no "re-run"
+    equivalent, and this app is often run from a fresh checkout of the
+    repo (a new container, a fresh clone) where the old db simply isn't
+    there. Committing this file is what makes the watchlist survive
+    that -- see import_watchlist_from_json, called on every watchlist
+    request to seed a fresh/empty table from it."""
+    entries = get_watchlist(conn)
+    with open(path, "w") as f:
+        json.dump(entries, f, indent=2)
+
+
+def import_watchlist_from_json(conn, path: str) -> None:
+    """Seeds the watchlist table from the JSON file committed to git, if
+    present. INSERT OR IGNORE (via add_to_watchlist) means this is safe
+    to call on every request: entries already in the table are untouched,
+    and a ticker the user has since removed (and which export_watchlist_
+    to_json will have already dropped from the file) never comes back."""
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path) as f:
+            entries = json.load(f)
+    except (OSError, ValueError):
+        return
+    for entry in entries:
+        ticker = entry.get("ticker")
+        if not ticker:
+            continue
+        add_to_watchlist(conn, ticker, entry.get("name"), entry.get("source"), entry.get("added_at") or "")
 
 
 def save_forex_calendar_events(conn, events: list[dict], fetched_at: str) -> None:

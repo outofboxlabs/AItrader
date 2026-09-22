@@ -175,3 +175,9 @@ DB_PATH = _here("portfolio.db")
 SNAPSHOTS_DIR = _here("snapshots")
 POSITIONS_PATH = _here("positions.json")
 EXPORTS_DIR = _here("exports")  # timestamped CSVs from Top Movers / Top Growth scans
+# Unlike DB_PATH, this one is NOT gitignored -- it's the durable copy of the
+# watchlist ("Potential Portfolio" bag), kept in sync with the db on every
+# add/remove (see db.export_watchlist_to_json) so it survives a fresh
+# checkout/container where portfolio.db itself won't exist yet, as long as
+# it's been committed since the last change.
+WATCHLIST_JSON_PATH = _here("watchlist.json")

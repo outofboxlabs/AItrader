@@ -20,6 +20,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod.config, "DB_PATH", str(tmp_path / "test.db"))
     monkeypatch.setattr(app_mod.config, "SNAPSHOTS_DIR", str(tmp_path / "snapshots"))
     monkeypatch.setattr(app_mod.config, "EXPORTS_DIR", str(tmp_path / "exports"))
+    monkeypatch.setattr(app_mod.config, "WATCHLIST_JSON_PATH", str(tmp_path / "watchlist.json"))
 
     # _fetch_month_events live-scrapes every day of the month the JSON
     # feed doesn't cover (up to ~30 real HTTP calls) -- default that to
@@ -546,6 +547,54 @@ def test_get_watchlist_tickers_returns_saved_tickers_without_live_fetch(client, 
 
     monkeypatch.setattr(app_mod.data, "get_stock_snapshot", _boom)
     client.post("/api/watchlist/add", data=json.dumps({"ticker": "acme"}), content_type="application/json")
+    res = client.get("/api/watchlist/tickers")
+    assert res.status_code == 200
+    assert res.get_json() == {"tickers": ["ACME"]}
+
+
+def test_add_to_watchlist_writes_a_git_trackable_json_mirror(client):
+    """portfolio.db is gitignored -- a fresh checkout (new container, a
+    re-clone) starts with no db at all, which would otherwise silently
+    lose a hand-curated watchlist. watchlist.json is NOT gitignored, so
+    committing it is what makes the bag survive that."""
+    client.post(
+        "/api/watchlist/add",
+        data=json.dumps({"ticker": "acme", "name": "Acme Corp", "source": "near_52w_low"}),
+        content_type="application/json",
+    )
+    with open(app_mod.config.WATCHLIST_JSON_PATH) as f:
+        mirrored = json.load(f)
+    assert len(mirrored) == 1
+    assert mirrored[0]["ticker"] == "ACME"
+    assert mirrored[0]["name"] == "Acme Corp"
+    assert mirrored[0]["source"] == "near_52w_low"
+
+
+def test_remove_from_watchlist_updates_the_json_mirror(client):
+    client.post("/api/watchlist/add", data=json.dumps({"ticker": "ACME"}), content_type="application/json")
+    client.post("/api/watchlist/remove", data=json.dumps({"ticker": "acme"}), content_type="application/json")
+    with open(app_mod.config.WATCHLIST_JSON_PATH) as f:
+        mirrored = json.load(f)
+    assert mirrored == []
+
+
+def test_watchlist_seeds_from_json_mirror_on_a_fresh_db(client, monkeypatch, tmp_path):
+    """The scenario this whole mirror exists for: portfolio.db doesn't
+    exist yet (a fresh container/checkout) but watchlist.json -- committed
+    to git on a previous run -- does. The very first watchlist request
+    should restore the bag from it rather than showing empty."""
+    import portfolio_monitor.db as db_mod
+
+    with open(app_mod.config.WATCHLIST_JSON_PATH, "w") as f:
+        json.dump(
+            [{"ticker": "ACME", "name": "Acme Corp", "source": "near_52w_low", "added_at": "2026-01-01T00:00:00+00:00"}],
+            f,
+        )
+
+    # A completely fresh db path -- nothing has touched it yet.
+    monkeypatch.setattr(app_mod.config, "DB_PATH", str(tmp_path / "brand_new.db"))
+    assert not db_mod.os.path.exists(app_mod.config.DB_PATH)
+
     res = client.get("/api/watchlist/tickers")
     assert res.status_code == 200
     assert res.get_json() == {"tickers": ["ACME"]}

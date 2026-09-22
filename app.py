@@ -407,6 +407,7 @@ def get_watchlist():
     from the bag."""
     db_mod.init_db(config.DB_PATH)
     with db_mod.connect(config.DB_PATH) as conn:
+        db_mod.import_watchlist_from_json(conn, config.WATCHLIST_JSON_PATH)
         entries = db_mod.get_watchlist(conn)
 
     candidates = []
@@ -429,6 +430,7 @@ def get_watchlist_tickers():
     itself) does."""
     db_mod.init_db(config.DB_PATH)
     with db_mod.connect(config.DB_PATH) as conn:
+        db_mod.import_watchlist_from_json(conn, config.WATCHLIST_JSON_PATH)
         entries = db_mod.get_watchlist(conn)
     return jsonify({"tickers": [entry["ticker"] for entry in entries]})
 
@@ -441,7 +443,9 @@ def add_to_watchlist():
         return jsonify({"error": "ticker required"}), 400
     db_mod.init_db(config.DB_PATH)
     with db_mod.connect(config.DB_PATH) as conn:
+        db_mod.import_watchlist_from_json(conn, config.WATCHLIST_JSON_PATH)
         db_mod.add_to_watchlist(conn, ticker, body.get("name"), body.get("source"), datetime.now(timezone.utc).isoformat())
+        db_mod.export_watchlist_to_json(conn, config.WATCHLIST_JSON_PATH)
     return jsonify({"status": "ok"})
 
 
@@ -453,7 +457,9 @@ def remove_from_watchlist():
         return jsonify({"error": "ticker required"}), 400
     db_mod.init_db(config.DB_PATH)
     with db_mod.connect(config.DB_PATH) as conn:
+        db_mod.import_watchlist_from_json(conn, config.WATCHLIST_JSON_PATH)
         db_mod.remove_from_watchlist(conn, ticker)
+        db_mod.export_watchlist_to_json(conn, config.WATCHLIST_JSON_PATH)
     return jsonify({"status": "ok"})
 
 
