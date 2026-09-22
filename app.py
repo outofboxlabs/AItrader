@@ -2480,6 +2480,7 @@ function renderNearlowTable() {
       <td>${fmtCap(c.market_cap)}</td>
       <td>
         <button class="secondary" style="font-size:0.75rem; padding:3px 8px;" id="nl-toggle-${c.ticker}" onclick="toggleNearlowDetail('${c.ticker}')">Analyze</button>
+        <button class="secondary" style="font-size:0.75rem; padding:3px 8px;" onclick="showRatingChartFor('nl', '${c.ticker}')">Chart</button>
         ${watchlistButtonHtml(c.ticker, c.name, "near_52w_low")}
       </td>
     </tr>
@@ -2608,6 +2609,7 @@ function renderPennystockTable() {
       <td>${fmtCap(c.market_cap)}</td>
       <td>
         <button class="secondary" style="font-size:0.75rem; padding:3px 8px;" id="ps-toggle-${c.ticker}" onclick="togglePennystockDetail('${c.ticker}')">Analyze</button>
+        <button class="secondary" style="font-size:0.75rem; padding:3px 8px;" onclick="showRatingChartFor('ps', '${c.ticker}')">Chart</button>
         ${watchlistButtonHtml(c.ticker, c.name, "penny_stocks")}
       </td>
     </tr>
@@ -2920,6 +2922,7 @@ function renderWatchlistTable() {
       <td class="muted">${escapeHtml(c.source || "n/a")}</td>
       <td>
         <button class="secondary" style="font-size:0.75rem; padding:3px 8px;" id="wl-toggle-${c.ticker}" onclick="toggleWatchlistDetail('${c.ticker}')">Analyze</button>
+        <button class="secondary" style="font-size:0.75rem; padding:3px 8px;" onclick="showRatingChartFor('wl', '${c.ticker}')">Chart</button>
         ${watchlistButtonHtml(c.ticker, c.name, c.source)}
       </td>
     </tr>
@@ -3031,6 +3034,24 @@ async function loadWatchlistPanel(ticker) {
 
 const ratingCharts = {};
 const ratingChartData = {};  // { ticker, data } cache per scopeId, so toggling the checkboxes below re-renders instantly instead of re-fetching.
+
+// A standalone "Chart" button next to "Analyze" on Near 52W Low / Penny
+// Stocks / Potential Portfolio rows -- opens the shared detail row (if not
+// already open) and jumps straight to the rating chart, without also
+// kicking off the AI expert-take call the way clicking "Analyze" does.
+function showRatingChartFor(prefix, ticker) {
+  const row = document.getElementById(`${prefix}-detail-row-${ticker}`);
+  if (row && row.style.display === "none") {
+    row.style.display = "table-row";
+    const toggleBtn = document.getElementById(`${prefix}-toggle-${ticker}`);
+    if (toggleBtn) toggleBtn.textContent = "Hide";
+  }
+  const chartEl = document.getElementById(`${prefix}-chart-${ticker}`);
+  if (chartEl && !chartEl.innerHTML) {
+    chartEl.innerHTML = ratingChartHtml(`${prefix}-${ticker}`, ticker);
+  }
+  toggleRatingChart(`${prefix}-${ticker}`, ticker);
+}
 
 function ratingChartHtml(scopeId, ticker) {
   return `
@@ -3416,6 +3437,7 @@ async function lookupStockAnalysis() {
   resultEl.style.display = "none";
   chartEl.innerHTML = "";
   delete ratingCharts["sa"];
+  delete ratingChartData["sa"];  // otherwise a new ticker's chart would silently reuse the previous ticker's cached fetch
   saCurrent = null;
   saExpert = null;
   saPanel = null;
@@ -3447,7 +3469,8 @@ function renderStockAnalysisResult() {
     ? `${c.target_upside_pct >= 0 ? "+" : ""}${fmtNum(c.target_upside_pct, 1)}%`
     : "n/a";
 
-  let expertHtml = '<button class="secondary" style="font-size:0.75rem; padding:4px 10px;" onclick="analyzeStockAnalysisTicker()">Analyze</button>';
+  let expertHtml = `<button class="secondary" style="font-size:0.75rem; padding:4px 10px;" onclick="analyzeStockAnalysisTicker()">Analyze</button>
+    <button class="secondary" style="font-size:0.75rem; padding:4px 10px;" onclick="toggleRatingChart('sa', '${escapeHtml(saCurrent.ticker)}')">Chart</button>`;
   if (saExpert) {
     const [label, color] = nearlowVerdictLabel(saExpert.verdict);
     expertHtml = `
