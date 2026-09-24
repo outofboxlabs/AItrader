@@ -553,16 +553,25 @@ def _bigdrop_threshold_key(raw: Optional[str]) -> Optional[str]:
     return key if key in config.BIGDROP_THRESHOLDS else None
 
 
-def _run_bigdrop_screen(threshold_key: str, asof_date: Optional[date] = None) -> list[dict]:
+def _bigdrop_rank_by_key(raw: Optional[str]) -> Optional[str]:
+    key = (raw or "1d").strip()
+    return key if key in bigdrop_screener._RANK_BY_FIELD else None
+
+
+def _run_bigdrop_screen(threshold_key: str, rank_by: str = "1d", asof_date: Optional[date] = None) -> list[dict]:
     """Same as Near 52W Low/Penny Stocks: the screen itself needs no API
     key/provider and never blocks on one being missing, but
     opportunistically spends a gen-AI call per candidate whose P/E
     doesn't already disprove pre-revenue on its own, if a key is already
-    saved -- see _auto_classify_pre_revenue."""
+    saved -- see _auto_classify_pre_revenue. `rank_by` ("1d"/"1w"/"1m")
+    decides both which drop window the candidate pool is sourced by and
+    which the results are sorted by -- see bigdrop_screener for why
+    those aren't the same thing as just re-sorting client-side."""
     asof_date = asof_date or date.today()
     db_mod.init_db(config.DB_PATH)
     candidates = bigdrop_screener.find_bigdrop_candidates(
         min_market_cap=config.BIGDROP_THRESHOLDS[threshold_key],
+        rank_by=rank_by,
         candidate_pool_size=config.BIGDROP_CANDIDATE_POOL_SIZE,
         min_volume=config.BIGDROP_MIN_VOLUME,
         max_results=config.BIGDROP_MAX_RESULTS,
@@ -595,12 +604,15 @@ def run_bigdrop_now():
     threshold_key = _bigdrop_threshold_key(body.get("threshold"))
     if threshold_key is None:
         return jsonify({"error": f"threshold must be one of {sorted(config.BIGDROP_THRESHOLDS)}"}), 400
+    rank_by = _bigdrop_rank_by_key(body.get("rank_by"))
+    if rank_by is None:
+        return jsonify({"error": f"rank_by must be one of {sorted(bigdrop_screener._RANK_BY_FIELD)}"}), 400
     try:
-        candidates = _run_bigdrop_screen(threshold_key)
+        candidates = _run_bigdrop_screen(threshold_key, rank_by=rank_by)
     except Exception as exc:
         traceback.print_exc()
         return jsonify({"error": str(exc)}), 502
-    return jsonify({"asof_date": date.today().isoformat(), "threshold": threshold_key, "candidates": candidates})
+    return jsonify({"asof_date": date.today().isoformat(), "threshold": threshold_key, "rank_by": rank_by, "candidates": candidates})
 
 
 @app.route("/api/bigdrop/check-pre-revenue", methods=["POST"])
@@ -1823,6 +1835,13 @@ PAGE_TEMPLATE = """<!doctype html>
           <option value="10B">$10B+</option>
         </select>
       </div>
+      <div><label>Rank by</label><br>
+        <select id="bd-rank-by">
+          <option value="1d" selected>Biggest 1-day drop</option>
+          <option value="1w">Biggest 1-week drop</option>
+          <option value="1m">Biggest 1-month drop</option>
+        </select>
+      </div>
       <div><label>Min analysts</label><br>
         <select id="bd-min-analysts" onchange="renderBigdropTable()">
           <option value="0" selected>Any (incl. no coverage)</option>
@@ -1845,10 +1864,15 @@ PAGE_TEMPLATE = """<!doctype html>
     <p class="muted" style="max-width:640px;">
       Large-cap US stocks at or above the selected market cap, ranked by how hard they've been hit --
       1-day, 1-week, and 1-month price drop side by side (yfinance has no native weekly/monthly change
-      field, so those two are computed from daily closes). Unlike Near 52W Low, no single quality filter
-      is imposed here either -- the point is to surface any big-cap hit, not just ones the Street still
-      likes -- so every candidate carries the same rich column set (52-week range, buy ratio, target
-      upside) to judge by. "Pre-revenue" behaves exactly as on Near 52W Low/Penny Stocks: defaults to
+      field, so those two are computed from daily closes). "Rank by" controls which of the three
+      "Run Now" actually searches for: since Yahoo has no native weekly/monthly sort either, ranking by
+      1-week/1-month sources the candidate pool from the worst 52-week performers instead of today's
+      movers, so it can find names that dropped hard over the past week/month even if they didn't move
+      much today -- the table itself stays sortable by any of the three columns regardless of which was
+      used to run the screen. Unlike Near 52W Low, no single quality filter is imposed here either --
+      the point is to surface any big-cap hit, not just ones the Street still likes -- so every candidate
+      carries the same rich column set (52-week range, buy ratio, target upside) to judge by.
+      "Pre-revenue" behaves exactly as on Near 52W Low/Penny Stocks: defaults to
       yfinance's own revenue figure, automatically double-checked with AI as part of "Run Now" for
       anything P/E can't already rule out (needs an API key saved in Settings), and "Check pre-revenue
       (AI)" any time re-classifies every current candidate regardless of what it already answered. This
@@ -3195,8 +3219,12 @@ async function loadBigdrop() {
   renderBigdrop(data);
 }
 
+const BIGDROP_RANK_BY_FIELD = { "1d": "pct_change_1d", "1w": "pct_change_1w", "1m": "pct_change_1m" };
+const BIGDROP_RANK_BY_LABEL = { "1d": "1-day", "1w": "1-week", "1m": "1-month" };
+
 async function runBigdropNow() {
   const threshold = document.getElementById("bd-threshold").value;
+  const rankBy = document.getElementById("bd-rank-by").value;
   const btn = document.getElementById("bd-run-btn");
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span>Screening...';
@@ -3205,12 +3233,17 @@ async function runBigdropNow() {
     const res = await fetch("/api/bigdrop/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ threshold }),
+      body: JSON.stringify({ threshold, rank_by: rankBy }),
     });
     const data = await res.json();
     if (!res.ok) { showStatus("bd-status", "Error: " + data.error, false); return; }
+    // Default the table's sort to whichever window was just searched for,
+    // so "Rank by" actually changes what's on top, not just what the pool
+    // was sourced by -- the columns stay independently clickable/sortable
+    // afterward regardless.
+    bigdropSort = { field: BIGDROP_RANK_BY_FIELD[rankBy] || "pct_change_1d", dir: 1 };
     renderBigdrop(data);
-    showStatus("bd-status", `Found ${data.candidates.length} candidate(s) at or above ${threshold}.`, true);
+    showStatus("bd-status", `Found ${data.candidates.length} candidate(s) at or above ${threshold}, ranked by biggest ${BIGDROP_RANK_BY_LABEL[rankBy] || "1-day"} drop.`, true);
   } catch (err) {
     showStatus("bd-status", "Error: " + err, false);
   } finally {

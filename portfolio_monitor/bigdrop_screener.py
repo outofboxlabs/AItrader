@@ -16,6 +16,13 @@ EQUITY_SCREENER_FIELDS), so those two are computed here from ~3 months
 of daily closes per candidate, anchored to the same live current price
 used everywhere else in this app (current_price vs. a close N trading
 days back), rather than sourced from any single opaque quote field.
+
+find_bigdrop_candidates' `rank_by` ("1d"/"1w"/"1m") controls both which
+of the three drop windows the final results are sorted by AND which
+native Yahoo sort field is used to source the candidate pool to begin
+with (see _RANK_BY_FIELD/_RANK_BY_SCREEN_SORT) -- since a pool sourced
+by today's movers can under-represent names that dropped hard over a
+week/month but not today.
 """
 
 from __future__ import annotations
@@ -197,24 +204,41 @@ def _enrich_candidate(q: dict) -> tuple[Optional[dict], str]:
     return json.loads(json.dumps(candidate, default=str)), "included"
 
 
+# Which candidate field the final results are ranked by, and which native
+# Yahoo screener sort field is used to source the candidate POOL in the
+# first place -- these are deliberately different concerns. Yahoo's
+# screener has no native weekly/monthly percent-change field (see the
+# module docstring), so for "1w"/"1m" the pool itself is sourced by the
+# worst 52-week performers instead (a broader proxy for "structurally
+# hurting" names, more likely to also show real recent damage than a
+# pool sourced by today's movers alone would be) -- the exact 1-week/
+# 1-month figures are still computed per candidate either way, this only
+# affects which ~150 candidates make it into the pool to begin with.
+_RANK_BY_FIELD = {"1d": "pct_change_1d", "1w": "pct_change_1w", "1m": "pct_change_1m"}
+_RANK_BY_SCREEN_SORT = {"1d": "percentchange", "1w": "fiftytwowkpercentchange", "1m": "fiftytwowkpercentchange"}
+
+
 def find_bigdrop_candidates(
     min_market_cap: float,
+    rank_by: str = "1d",
     candidate_pool_size: int = 150,
     min_volume: int = 100_000,
     max_results: int = 100,
     max_workers: int = 20,
 ) -> list[dict]:
     """Screen a liquid US candidate pool at or above `min_market_cap`,
-    sorted by today's % change ascending (biggest 1-day losers first,
-    the closest native Yahoo sort available) to bias the pool toward
-    genuinely-dropping names, then enrich each with 52-week range,
-    analyst data, and the computed 1-day/1-week/1-month drop. Returns up
-    to max_results sorted by 1-day drop (most negative first) -- the UI
-    itself can re-sort by 1-week/1-month instead.
+    sourced and ranked by `rank_by` ("1d", "1w", or "1m" -- see
+    _RANK_BY_FIELD/_RANK_BY_SCREEN_SORT for what each actually does),
+    then enrich each with 52-week range, analyst data, and the computed
+    1-day/1-week/1-month drop regardless of which was used to rank.
+    Returns up to max_results sorted by the ranked field (most negative
+    first) -- the UI itself can still re-sort by any of the three.
 
     Enrichment runs on a thread pool for the same reason as the other
     screeners: each candidate needs its own yfinance round trip (here,
     a history() call as well as fast_info/analyst data)."""
+    if rank_by not in _RANK_BY_FIELD:
+        rank_by = "1d"
     query = EquityQuery(
         "AND",
         [
@@ -223,7 +247,7 @@ def find_bigdrop_candidates(
             EquityQuery("GT", ["dayvolume", min_volume]),
         ],
     )
-    response = yf.screen(query, sortField="percentchange", sortAsc=True, size=candidate_pool_size)
+    response = yf.screen(query, sortField=_RANK_BY_SCREEN_SORT[rank_by], sortAsc=True, size=candidate_pool_size)
     quotes = response.get("quotes", []) if response else []
 
     candidates = []
@@ -237,7 +261,8 @@ def find_bigdrop_candidates(
                 candidates.append(result)
 
     breakdown = ", ".join(f"{reason}={count}" for reason, count in reasons.most_common())
-    print(f"[bigdrop_screener] min_market_cap={min_market_cap} pool={len(quotes)} included={len(candidates)} -- {breakdown or 'no candidates in pool'}")
+    print(f"[bigdrop_screener] min_market_cap={min_market_cap} rank_by={rank_by} pool={len(quotes)} included={len(candidates)} -- {breakdown or 'no candidates in pool'}")
 
-    candidates.sort(key=lambda c: c.get("pct_change_1d") if c.get("pct_change_1d") is not None else 0.0)
+    rank_field = _RANK_BY_FIELD[rank_by]
+    candidates.sort(key=lambda c: c.get(rank_field) if c.get(rank_field) is not None else 0.0)
     return candidates[:max_results]

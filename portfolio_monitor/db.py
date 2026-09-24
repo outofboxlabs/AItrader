@@ -740,6 +740,13 @@ def get_latest_pennystock_candidates_date(conn, threshold: str) -> Optional[str]
 
 
 def save_bigdrop_candidates(conn, asof_date: str, threshold: str, candidates: list[dict]) -> None:
+    """Deletes this (asof_date, threshold)'s existing rows first, unlike
+    the other screeners' save_* functions -- bigdrop's candidate pool can
+    genuinely differ between two runs on the same day (a "Rank by"
+    change sources the pool differently, see bigdrop_screener.rank_by),
+    so a plain INSERT OR REPLACE would leave stale tickers from an
+    earlier run mixed into "today's" results instead of replacing them."""
+    conn.execute("DELETE FROM bigdrop_candidates WHERE asof_date=? AND threshold=?", (asof_date, threshold))
     conn.executemany(
         """INSERT OR REPLACE INTO bigdrop_candidates
            (asof_date, threshold, ticker, name, price, year_low, year_high, pct_from_52w_low,

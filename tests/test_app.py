@@ -805,6 +805,8 @@ def test_run_bigdrop_now_returns_and_persists_results(client, monkeypatch, tmp_p
     assert data["candidates"][0]["ticker"] == "HITHARD"
     assert data["asof_date"] == date.today().isoformat()
     assert captured["min_market_cap"] == 5_000_000_000
+    assert captured["rank_by"] == "1d"  # default when not specified
+    assert data["rank_by"] == "1d"
 
     # Persisted -- a fresh GET for the same threshold reads it back.
     res2 = client.get("/api/bigdrop?threshold=5B")
@@ -825,6 +827,26 @@ def test_run_bigdrop_now_returns_and_persists_results(client, monkeypatch, tmp_p
 def test_run_bigdrop_now_rejects_unknown_threshold(client):
     res = client.post("/api/bigdrop/run", data=json.dumps({"threshold": "3B"}), content_type="application/json")
     assert res.status_code == 400
+
+
+def test_run_bigdrop_now_rejects_unknown_rank_by(client):
+    res = client.post("/api/bigdrop/run", data=json.dumps({"threshold": "1B", "rank_by": "1y"}), content_type="application/json")
+    assert res.status_code == 400
+    assert "rank_by" in res.get_json()["error"]
+
+
+def test_run_bigdrop_now_passes_rank_by_through_to_the_screener(client, monkeypatch):
+    captured = {}
+
+    def fake_find(**kw):
+        captured.update(kw)
+        return []
+
+    monkeypatch.setattr(app_mod.bigdrop_screener, "find_bigdrop_candidates", fake_find)
+    res = client.post("/api/bigdrop/run", data=json.dumps({"threshold": "1B", "rank_by": "1m"}), content_type="application/json")
+    assert res.status_code == 200
+    assert res.get_json()["rank_by"] == "1m"
+    assert captured["rank_by"] == "1m"
 
 
 def test_run_bigdrop_now_handles_screener_failure(client, monkeypatch):

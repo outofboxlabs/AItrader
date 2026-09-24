@@ -82,3 +82,23 @@ def test_migrate_columns_reraises_other_operational_errors(tmp_path):
                 assert "duplicate column name" not in str(exc)
     finally:
         db_mod._ADDED_COLUMNS = original_added_columns
+
+
+def test_save_bigdrop_candidates_replaces_stale_tickers_from_an_earlier_run(tmp_path):
+    """Unlike the other screeners, bigdrop's candidate pool can genuinely
+    differ between two runs the same day (a "Rank by" change sources the
+    pool differently -- see bigdrop_screener.rank_by), so a second Run
+    Now for the same (date, threshold) must fully replace the first run's
+    tickers, not just merge INSERT OR REPLACE on top of them -- otherwise
+    a ticker that dropped out of the second run's pool would linger in
+    the results as stale data from the first."""
+    db_path = str(tmp_path / "test.db")
+    db_mod.init_db(db_path)
+    with db_mod.connect(db_path) as conn:
+        db_mod.save_bigdrop_candidates(conn, "2026-01-01", "1B", [{"ticker": "FIRSTRUN"}, {"ticker": "SHARED"}])
+    with db_mod.connect(db_path) as conn:
+        db_mod.save_bigdrop_candidates(conn, "2026-01-01", "1B", [{"ticker": "SECONDRUN"}, {"ticker": "SHARED"}])
+
+    with db_mod.connect(db_path) as conn:
+        tickers = {r["ticker"] for r in db_mod.get_bigdrop_candidates(conn, "2026-01-01", "1B")}
+    assert tickers == {"SECONDRUN", "SHARED"}  # FIRSTRUN is gone, not lingering as stale data

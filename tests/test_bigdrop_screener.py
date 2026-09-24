@@ -163,6 +163,72 @@ def test_find_bigdrop_candidates_sorts_by_1day_drop_ascending(monkeypatch):
     assert [r["ticker"] for r in results] == ["BIGDROP", "SMALLDROP"]
 
 
+def test_find_bigdrop_candidates_rank_by_sorts_by_the_chosen_window(monkeypatch):
+    """"Rank by" must actually change which candidate ends up on top --
+    a stock barely down today but hammered over the past month should
+    rank first when rank_by="1m", not "1d"."""
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        return {
+            "quotes": [
+                {"symbol": "TODAYDROP", "shortName": "Today Drop Co", "regularMarketPrice": 70.0, "marketCap": 2e9},
+                {"symbol": "MONTHDROP", "shortName": "Month Drop Co", "regularMarketPrice": 97.0, "marketCap": 2e9},
+            ]
+        }
+
+    # TODAYDROP: flat for the past month (closes[-22]=70.0), crashed only
+    # today: pct_change_1d = (70-100)/100 = -30%, pct_change_1m = 0%.
+    # MONTHDROP: flat for the past 21 trading days (closes[-1]=97.0),
+    # already well below where it was a month ago (closes[-22]=140.0):
+    # pct_change_1d = 0%, pct_change_1m = (97-140)/140 = -30.7%.
+    data = {
+        "TODAYDROP": {"closes": [70.0] * 29 + [100.0], "year_high": 120.0, "year_low": 60.0, "recommendations": {}},
+        "MONTHDROP": {"closes": [140.0] * 9 + [97.0] * 21, "year_high": 150.0, "year_low": 90.0, "recommendations": {}},
+    }
+
+    monkeypatch.setattr(bd.yf, "screen", fake_screen)
+    monkeypatch.setattr(bd.yf, "Ticker", _fake_ticker_factory(data))
+
+    results = bd.find_bigdrop_candidates(min_market_cap=1e9, rank_by="1m")
+    assert [r["ticker"] for r in results] == ["MONTHDROP", "TODAYDROP"]
+
+
+def test_find_bigdrop_candidates_rank_by_controls_screen_sort_field(monkeypatch):
+    captured = {}
+
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        captured["sortField"] = sortField
+        return {"quotes": []}
+
+    monkeypatch.setattr(bd.yf, "screen", fake_screen)
+    monkeypatch.setattr(bd.yf, "Ticker", _fake_ticker_factory({}))
+
+    bd.find_bigdrop_candidates(min_market_cap=1e9, rank_by="1d")
+    assert captured["sortField"] == "percentchange"
+
+    bd.find_bigdrop_candidates(min_market_cap=1e9, rank_by="1w")
+    assert captured["sortField"] == "fiftytwowkpercentchange"
+
+    bd.find_bigdrop_candidates(min_market_cap=1e9, rank_by="1m")
+    assert captured["sortField"] == "fiftytwowkpercentchange"
+
+
+def test_find_bigdrop_candidates_rejects_unknown_rank_by(monkeypatch):
+    """An unrecognized rank_by degrades to the "1d" default rather than
+    raising -- callers validate this at the API boundary, this is just a
+    safety net."""
+    captured = {}
+
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        captured["sortField"] = sortField
+        return {"quotes": []}
+
+    monkeypatch.setattr(bd.yf, "screen", fake_screen)
+    monkeypatch.setattr(bd.yf, "Ticker", _fake_ticker_factory({}))
+
+    bd.find_bigdrop_candidates(min_market_cap=1e9, rank_by="bogus")
+    assert captured["sortField"] == "percentchange"
+
+
 def test_find_bigdrop_candidates_survives_numpy_typed_data_end_to_end(monkeypatch):
     """Same regression class as the other screeners: numpy-typed data
     must survive the full pipeline and come out JSON-serializable."""
