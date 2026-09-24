@@ -376,6 +376,73 @@ def test_run_nearlow_now_handles_screener_failure(client, monkeypatch):
     assert "error" in res.get_json()
 
 
+def test_run_nearlow_now_leaves_undetermined_pre_revenue_when_no_key_saved(client, monkeypatch):
+    """No API key saved anywhere -- Run Now must still succeed and just
+    leave the heuristic's undetermined result as-is, never demanding a
+    key or failing because one is missing."""
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: None)
+    monkeypatch.setattr(
+        app_mod.nearlow_screener,
+        "find_nearlow_candidates",
+        lambda **kw: [{"ticker": "UNCLEAR", "name": "Unclear Co", "is_pre_revenue": None}],
+    )
+    res = client.post("/api/nearlow/run")
+    assert res.status_code == 200
+    assert res.get_json()["candidates"][0]["is_pre_revenue"] is None
+
+
+def test_run_nearlow_now_auto_classifies_undetermined_pre_revenue_when_key_saved(client, monkeypatch):
+    """A saved API key lets Run Now resolve what the heuristic couldn't,
+    automatically -- no separate "Check pre-revenue (AI)" click needed."""
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
+    monkeypatch.setattr(
+        app_mod.nearlow_screener,
+        "find_nearlow_candidates",
+        lambda **kw: [{"ticker": "UNCLEAR", "name": "Unclear Co", "is_pre_revenue": None}],
+    )
+    monkeypatch.setattr(
+        app_mod.nearlow_analysis,
+        "classify_pre_revenue",
+        lambda ticker, name, financials, provider, model, api_key=None: {"is_pre_revenue": True, "reason": "clinical-stage, no commercial revenue"},
+    )
+    res = client.post("/api/nearlow/run")
+    assert res.status_code == 200
+    data = res.get_json()["candidates"][0]
+    assert data["is_pre_revenue"] is True
+    assert data["is_pre_revenue_reason"] == "clinical-stage, no commercial revenue"
+
+    # Persisted, not just in the immediate response.
+    res2 = client.get("/api/nearlow")
+    assert res2.get_json()["candidates"][0]["is_pre_revenue"] is True
+
+
+def test_run_nearlow_now_skips_ai_for_candidates_the_heuristic_already_answered(client, monkeypatch):
+    """Even with a key saved, Run Now must not spend an AI call on a
+    candidate the yfinance heuristic already gave a definite answer for
+    -- only genuinely undetermined ones are worth the automatic call."""
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(
+        app_mod.nearlow_screener,
+        "find_nearlow_candidates",
+        lambda **kw: [
+            {"ticker": "DEFREVENUE", "name": "Definite Revenue Co", "is_pre_revenue": False},
+            {"ticker": "DEFPRE", "name": "Definite Pre-revenue Co", "is_pre_revenue": True},
+        ],
+    )
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("classify_pre_revenue should not be called for a definite heuristic result")
+
+    monkeypatch.setattr(app_mod.nearlow_analysis, "classify_pre_revenue", fail_if_called)
+
+    res = client.post("/api/nearlow/run")
+    assert res.status_code == 200
+    by_ticker = {c["ticker"]: c for c in res.get_json()["candidates"]}
+    assert by_ticker["DEFREVENUE"]["is_pre_revenue"] is False
+    assert by_ticker["DEFPRE"]["is_pre_revenue"] is True
+
+
 def _seed_nearlow_run(candidates):
     app_mod.db_mod.init_db(app_mod.config.DB_PATH)
     with app_mod.db_mod.connect(app_mod.config.DB_PATH) as conn:
@@ -556,6 +623,25 @@ def test_run_pennystock_now_handles_screener_failure(client, monkeypatch):
     res = client.post("/api/pennystock/run", data=json.dumps({"threshold": "5"}), content_type="application/json")
     assert res.status_code == 502
     assert "error" in res.get_json()
+
+
+def test_run_pennystock_now_auto_classifies_undetermined_pre_revenue_when_key_saved(client, monkeypatch):
+    """Same automatic AI-fallback behavior as Near 52W Low's Run Now."""
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
+    monkeypatch.setattr(
+        app_mod.pennystock_screener,
+        "find_pennystock_candidates",
+        lambda **kw: [{"ticker": "UNCLEAR", "name": "Unclear Co", "is_pre_revenue": None}],
+    )
+    monkeypatch.setattr(
+        app_mod.nearlow_analysis,
+        "classify_pre_revenue",
+        lambda ticker, name, financials, provider, model, api_key=None: {"is_pre_revenue": True, "reason": "no commercial revenue yet"},
+    )
+    res = client.post("/api/pennystock/run", data=json.dumps({"threshold": "5"}), content_type="application/json")
+    assert res.status_code == 200
+    assert res.get_json()["candidates"][0]["is_pre_revenue"] is True
 
 
 def _seed_pennystock_run(threshold, candidates):

@@ -298,8 +298,11 @@ def run_growth_now():
 
 
 def _run_nearlow_screen(asof_date: Optional[date] = None) -> list[dict]:
-    """No news/AI call here -- this is a pure data screen (screener +
-    52-week range + analyst ratings), so it needs no API key/provider."""
+    """The screener itself (52-week range + analyst ratings + the
+    yfinance-only pre-revenue heuristic) needs no API key/provider, so
+    this never fails or blocks on one being missing. It does opportunistically
+    spend a gen-AI call per candidate the heuristic left undetermined, but
+    only if a key is already saved -- see _resolve_undetermined_pre_revenue."""
     asof_date = asof_date or date.today()
     db_mod.init_db(config.DB_PATH)
     candidates = nearlow_screener.find_nearlow_candidates(
@@ -313,6 +316,7 @@ def _run_nearlow_screen(asof_date: Optional[date] = None) -> list[dict]:
         max_results=config.NEARLOW_MAX_RESULTS,
         max_workers=config.NEARLOW_MAX_WORKERS,
     )
+    _resolve_undetermined_pre_revenue(candidates)
     with db_mod.connect(config.DB_PATH) as conn:
         db_mod.save_nearlow_candidates(conn, asof_date.isoformat(), candidates)
     exports.export_to_csv(candidates, "near_52w_low", "near_52w_low", export_root=config.EXPORTS_DIR)
@@ -358,6 +362,46 @@ def _pre_revenue_pe_prefilter(c: dict) -> Optional[dict]:
     return None
 
 
+def _classify_pre_revenue_for_candidate(c: dict, provider: str, model: str, api_key: str) -> None:
+    """Resolve is_pre_revenue/is_pre_revenue_reason for one candidate in
+    place: the free P/E pre-filter first, then a gen-AI call as the
+    tie-breaker for whatever it can't settle. Never raises -- one
+    ticker's AI failure can't take down a parallel batch."""
+    result = _pre_revenue_pe_prefilter(c)
+    if result is None:
+        try:
+            financials = data.get_financial_highlights(c["ticker"])
+            result = nearlow_analysis.classify_pre_revenue(c["ticker"], c.get("name"), financials, provider, model, api_key=api_key)
+        except Exception as exc:
+            result = {"is_pre_revenue": None, "reason": f"AI check failed: {exc}"}
+    c["is_pre_revenue"] = result.get("is_pre_revenue")
+    c["is_pre_revenue_reason"] = result.get("reason")
+
+
+def _resolve_undetermined_pre_revenue(candidates: list[dict]) -> None:
+    """Automatic best-effort pass, run as part of every scan: the
+    yfinance-only heuristic already gives a DEFINITE true/false for most
+    candidates (left untouched here, no AI cost) -- this spends a gen-AI
+    call only on the ones it genuinely couldn't resolve (is_pre_revenue
+    is None), and only if a provider key is already saved in Settings.
+    No key saved -- silently leaves those candidates undetermined, same
+    as before this existed, since a background scan should never demand
+    a key or fail because one is missing. (The separate "Check
+    pre-revenue (AI)" button still exists for re-checking EVERY current
+    candidate with AI, including ones the heuristic already answered --
+    that heuristic has been wrong in both directions live, so a human
+    asking for a full recheck should get one.)"""
+    provider, api_key = _resolve_forex_analysis_provider(None)
+    if not api_key:
+        return
+    model = NEWS_DEFAULT_MODEL[provider]
+    undetermined = [c for c in candidates if c.get("is_pre_revenue") is None]
+    if not undetermined:
+        return
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        list(executor.map(lambda c: _classify_pre_revenue_for_candidate(c, provider, model, api_key), undetermined))
+
+
 @app.route("/api/nearlow/check-pre-revenue", methods=["POST"])
 def check_nearlow_pre_revenue():
     """On-demand AI re-classification of is_pre_revenue for the CURRENT
@@ -383,19 +427,8 @@ def check_nearlow_pre_revenue():
             return jsonify({"error": "No Near 52W Low results yet. Run the screen first."}), 400
         candidates = db_mod.get_nearlow_candidates(conn, latest_date)
 
-    def _classify(c):
-        result = _pre_revenue_pe_prefilter(c)
-        if result is None:
-            try:
-                financials = data.get_financial_highlights(c["ticker"])
-                result = nearlow_analysis.classify_pre_revenue(c["ticker"], c.get("name"), financials, provider, model, api_key=api_key)
-            except Exception as exc:
-                result = {"is_pre_revenue": None, "reason": f"AI check failed: {exc}"}
-        c["is_pre_revenue"] = result.get("is_pre_revenue")
-        c["is_pre_revenue_reason"] = result.get("reason")
-
     with ThreadPoolExecutor(max_workers=10) as executor:
-        list(executor.map(_classify, candidates))
+        list(executor.map(lambda c: _classify_pre_revenue_for_candidate(c, provider, model, api_key), candidates))
 
     with db_mod.connect(config.DB_PATH) as conn:
         db_mod.save_nearlow_candidates(conn, latest_date, candidates)
@@ -412,8 +445,10 @@ def _pennystock_threshold_key(raw: Optional[str]) -> Optional[str]:
 
 
 def _run_pennystock_screen(threshold_key: str, asof_date: Optional[date] = None) -> list[dict]:
-    """No news/AI call here -- this is a pure data screen, same as
-    Near 52W Low and Growth."""
+    """Same as Near 52W Low: the screen itself needs no API key/provider
+    and never blocks on one being missing, but opportunistically spends a
+    gen-AI call per candidate the pre-revenue heuristic left undetermined
+    if a key is already saved -- see _resolve_undetermined_pre_revenue."""
     asof_date = asof_date or date.today()
     db_mod.init_db(config.DB_PATH)
     candidates = pennystock_screener.find_pennystock_candidates(
@@ -424,6 +459,7 @@ def _run_pennystock_screen(threshold_key: str, asof_date: Optional[date] = None)
         max_results=config.PENNYSTOCK_MAX_RESULTS,
         max_workers=config.PENNYSTOCK_MAX_WORKERS,
     )
+    _resolve_undetermined_pre_revenue(candidates)
     with db_mod.connect(config.DB_PATH) as conn:
         db_mod.save_pennystock_candidates(conn, asof_date.isoformat(), threshold_key, candidates)
     exports.export_to_csv(candidates, "penny_stocks", f"penny_stocks_under_{threshold_key}", export_root=config.EXPORTS_DIR)
@@ -482,19 +518,8 @@ def check_pennystock_pre_revenue():
             return jsonify({"error": "No Penny Stocks results yet. Run the screen first."}), 400
         candidates = db_mod.get_pennystock_candidates(conn, latest_date, threshold_key)
 
-    def _classify(c):
-        result = _pre_revenue_pe_prefilter(c)
-        if result is None:
-            try:
-                financials = data.get_financial_highlights(c["ticker"])
-                result = nearlow_analysis.classify_pre_revenue(c["ticker"], c.get("name"), financials, provider, model, api_key=api_key)
-            except Exception as exc:
-                result = {"is_pre_revenue": None, "reason": f"AI check failed: {exc}"}
-        c["is_pre_revenue"] = result.get("is_pre_revenue")
-        c["is_pre_revenue_reason"] = result.get("reason")
-
     with ThreadPoolExecutor(max_workers=10) as executor:
-        list(executor.map(_classify, candidates))
+        list(executor.map(lambda c: _classify_pre_revenue_for_candidate(c, provider, model, api_key), candidates))
 
     with db_mod.connect(config.DB_PATH) as conn:
         db_mod.save_pennystock_candidates(conn, latest_date, threshold_key, candidates)
@@ -1588,10 +1613,11 @@ PAGE_TEMPLATE = """<!doctype html>
       this is not investment advice, just a starting point for further research. The "Min analysts"
       and "Pre-revenue" filters narrow the table further, client-side, since every candidate already has at least
       {{ nearlow_min_ratings_count }}. "Pre-revenue" defaults to each company's latest annual revenue figure
-      (via yfinance), which can be wrong for early-stage or non-standard-industry companies -- click
-      "Check pre-revenue (AI)" to re-classify every current candidate with one small AI call each, using
-      the model's own knowledge of the company alongside whatever revenue data is available (needs an
-      API key set in Settings). Click "Analyze" on a
+      (via yfinance); if that alone doesn't settle it, and an API key is already saved in Settings, one small
+      AI call per undetermined candidate resolves it automatically as part of "Run Now" -- no key saved just
+      leaves those undetermined. Since that heuristic has been wrong in both directions live, click
+      "Check pre-revenue (AI)" any time to re-classify every current candidate with AI, including ones it
+      already answered (needs an API key set in Settings). Click "Analyze" on a
       candidate for a ~200-word expert take (with a buy-opportunity verdict), then pick which of 8
       independent agents to run (technical / fundamental / news / analyst-ratings-timing / macro /
       SEC filings / social sentiment / price targets) for their own take on it.
@@ -1647,9 +1673,12 @@ PAGE_TEMPLATE = """<!doctype html>
       candidate carries three independent columns to judge by instead: analyst buy ratio (when there
       is any), momentum (% from its own 52-week high), and trading volume. Use "Min analysts" to
       narrow down to more-covered names, and "Pre-revenue" to include/exclude/isolate companies with
-      no reported revenue on their latest annual income statement, client-side. That default can be
-      wrong for early-stage or non-standard-industry companies -- click "Check pre-revenue (AI)" to
-      re-classify every current candidate with one small AI call each (needs an API key in Settings).
+      no reported revenue on their latest annual income statement, client-side. If that alone doesn't
+      settle it, and an API key is already saved in Settings, one small AI call per undetermined
+      candidate resolves it automatically as part of "Run Now" -- no key saved just leaves those
+      undetermined. Since that heuristic has been wrong in both directions live, click
+      "Check pre-revenue (AI)" any time to re-classify every current candidate with AI, including ones
+      it already answered (needs an API key in Settings).
       This is not investment
       advice, just a starting point for further research. Click "Analyze" on a candidate for a
       ~200-word expert take (with a buy-opportunity verdict), then pick which of 8 independent agents
