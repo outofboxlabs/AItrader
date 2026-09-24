@@ -1712,6 +1712,7 @@ PAGE_TEMPLATE = """<!doctype html>
         <th class="sortable" data-sort="year_high">52w High<span class="arrow"></span></th>
         <th class="sortable" data-sort="year_low">52w Low<span class="arrow"></span></th>
         <th class="sortable" data-sort="buy_ratio_pct">Buy Ratio %<span class="arrow"></span></th>
+        <th class="sortable" data-sort="target_upside_pct">Target Upside<span class="arrow"></span></th>
         <th class="sortable" data-sort="market_cap">Market Cap<span class="arrow"></span></th>
         <th>Analysis</th>
       </tr></thead>
@@ -2870,7 +2871,7 @@ function renderPennystockTable() {
   });
 
   if (pennystockRows.length === 0) {
-    body.innerHTML = '<tr><td colspan="8" class="muted">No candidates found. Click "Run Now" to screen today\\'s market.</td></tr>';
+    body.innerHTML = '<tr><td colspan="9" class="muted">No candidates found. Click "Run Now" to screen today\\'s market.</td></tr>';
     return;
   }
 
@@ -2878,7 +2879,7 @@ function renderPennystockTable() {
   const preRevenueFilter = document.getElementById("ps-pre-revenue").value;
   const filtered = pennystockRows.filter(c => (c.ratings_count || 0) >= minAnalysts && matchesPreRevenueFilter(c, preRevenueFilter));
   if (filtered.length === 0) {
-    body.innerHTML = `<tr><td colspan="8" class="muted">No candidates match the current "Min analysts"/"Pre-revenue" filters.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="9" class="muted">No candidates match the current "Min analysts"/"Pre-revenue" filters.</td></tr>`;
     return;
   }
 
@@ -2905,6 +2906,9 @@ function renderPennystockTable() {
       ? `${fmtMoney(c.year_high)} <span class="muted">(${pctStr(c.pct_from_52w_high)})</span>` : "n/a";
     const lowCell = c.year_low !== null && c.year_low !== undefined
       ? `${fmtMoney(c.year_low)} <span class="muted">(${pctStr(c.pct_from_52w_low)})</span>` : "n/a";
+    const upsideCell = c.target_upside_pct !== null && c.target_upside_pct !== undefined
+      ? `${c.target_upside_pct >= 0 ? "+" : ""}${fmtNum(c.target_upside_pct, 1)}% <span class="muted">(${fmtMoney(c.target_mean)})</span>`
+      : "n/a";
     return `<tr>
       <td><a class="ticker-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(c.ticker)}" target="_blank" rel="noopener">${c.ticker}</a>${c.name ? ` <span class="muted">(${c.name})</span>` : ""}${preRevenueTag(c)}${negativePeTag(c)}</td>
       <td>${fmtMoney(c.price)}</td>
@@ -2912,6 +2916,7 @@ function renderPennystockTable() {
       <td>${highCell}</td>
       <td>${lowCell}</td>
       <td>${buyRatioCell}</td>
+      <td>${upsideCell}</td>
       <td>${fmtCap(c.market_cap)}</td>
       <td>
         <button class="secondary" style="font-size:0.75rem; padding:3px 8px;" id="ps-toggle-${c.ticker}" onclick="togglePennystockDetail('${c.ticker}')">Analyze</button>
@@ -2920,7 +2925,7 @@ function renderPennystockTable() {
       </td>
     </tr>
     <tr id="ps-detail-row-${c.ticker}" style="display:none;">
-      <td colspan="8" style="border-top:none;">
+      <td colspan="9" style="border-top:none;">
         <div id="ps-detail-${c.ticker}"></div>
         <div id="ps-chart-${c.ticker}" style="max-width:720px;"></div>
       </td>
