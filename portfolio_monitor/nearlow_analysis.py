@@ -353,10 +353,17 @@ actually does/sells, especially when the given data is missing or seems \
 inconsistent with what you know. Don't default to "pre-revenue" just \
 because a number is missing, and don't default to "not pre-revenue" just \
 because a small/incidental figure is present (e.g. interest income, a \
-one-off pilot contract, grant funding) -- decide based on whether there is \
-REAL, ongoing commercial revenue from the company's core business. If you \
-simply don't know the company and no usable revenue figure was given, say \
-so honestly in "reason" and answer your best guess.
+one-off pilot contract, grant funding, a government cost-share/R&D \
+contract, licensing) -- decide based on whether there is REAL, ongoing \
+commercial revenue from the company's core business (what it's actually \
+built to sell at scale), not just any nonzero number on the income \
+statement. When market cap is given, weigh revenue AGAINST it: revenue \
+that's a tiny fraction of market cap (e.g. a few million against a \
+multi-billion-dollar company) is a strong sign it's incidental, not the \
+core business ramping up -- a truly revenue-stage company's market cap is \
+usually a more reasonable multiple of its revenue. If you simply don't \
+know the company and no usable revenue figure was given, say so honestly \
+in "reason" and answer your best guess.
 
 Respond with ONLY a JSON object, no other text: \
 {"is_pre_revenue": true or false, "reason": "one short sentence"}"""
@@ -369,6 +376,7 @@ def classify_pre_revenue(
     provider: str,
     model: str,
     api_key: Optional[str] = None,
+    market_cap: Optional[float] = None,
 ) -> dict:
     """Raises on API failure -- the caller decides how to degrade (and,
     since this typically runs across many candidates at once, isolates
@@ -379,6 +387,10 @@ def classify_pre_revenue(
     else:
         revenue_line = "yfinance has no usable revenue figure on file for this ticker."
     user_message = f"Ticker: {ticker} ({name or 'n/a'})\n{revenue_line}"
+    if isinstance(market_cap, (int, float)) and market_cap:
+        user_message += f"\nMarket cap: {market_cap:,.0f}"
+        if isinstance(revenue, (int, float)) and revenue:
+            user_message += f"\nRevenue is {revenue / market_cap * 100:.2f}% of market cap."
     text = ai_client.call_provider(
         provider, PRE_REVENUE_CLASSIFIER_SYSTEM_PROMPT, user_message, model, api_key=api_key, max_tokens=150
     )

@@ -405,7 +405,7 @@ def test_run_nearlow_now_auto_classifies_pre_revenue_when_key_saved(client, monk
     monkeypatch.setattr(
         app_mod.nearlow_analysis,
         "classify_pre_revenue",
-        lambda ticker, name, financials, provider, model, api_key=None: {"is_pre_revenue": True, "reason": "clinical-stage, no commercial revenue"},
+        lambda ticker, name, financials, provider, model, api_key=None, market_cap=None: {"is_pre_revenue": True, "reason": "clinical-stage, no commercial revenue"},
     )
     res = client.post("/api/nearlow/run")
     assert res.status_code == 200
@@ -416,6 +416,34 @@ def test_run_nearlow_now_auto_classifies_pre_revenue_when_key_saved(client, monk
     # Persisted, not just in the immediate response.
     res2 = client.get("/api/nearlow")
     assert res2.get_json()["candidates"][0]["is_pre_revenue"] is True
+
+
+def test_run_nearlow_now_passes_market_cap_to_ai_classifier(client, monkeypatch):
+    """market_cap must reach classify_pre_revenue -- it's what lets the AI
+    tell a materially-sized revenue figure apart from an incidental one
+    (see nearlow_analysis.classify_pre_revenue's docstring/system prompt
+    for the live case, OKLO's ~$1.21M revenue against a multi-billion
+    market cap, that motivated this)."""
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
+    monkeypatch.setattr(
+        app_mod.nearlow_screener,
+        "find_nearlow_candidates",
+        lambda **kw: [{"ticker": "OKLO", "name": "Oklo Inc.", "is_pre_revenue": False, "trailing_pe": None, "market_cap": 2_500_000_000.0}],
+    )
+
+    captured = {}
+
+    def fake_classify(ticker, name, financials, provider, model, api_key=None, market_cap=None):
+        captured["market_cap"] = market_cap
+        return {"is_pre_revenue": True, "reason": "negligible vs market cap"}
+
+    monkeypatch.setattr(app_mod.nearlow_analysis, "classify_pre_revenue", fake_classify)
+
+    res = client.post("/api/nearlow/run")
+    assert res.status_code == 200
+    assert captured["market_cap"] == 2_500_000_000.0
+    assert res.get_json()["candidates"][0]["is_pre_revenue"] is True
 
 
 def test_run_nearlow_now_skips_ai_only_for_positive_pe_candidates(client, monkeypatch):
@@ -440,7 +468,7 @@ def test_run_nearlow_now_skips_ai_only_for_positive_pe_candidates(client, monkey
 
     calls = []
 
-    def fake_classify(ticker, name, financials, provider, model, api_key=None):
+    def fake_classify(ticker, name, financials, provider, model, api_key=None, market_cap=None):
         calls.append(ticker)
         return {"is_pre_revenue": True, "reason": "actually pre-revenue -- heuristic's totalRevenue was incidental income"}
 
@@ -481,7 +509,7 @@ def test_check_nearlow_pre_revenue_classifies_and_persists(client, monkeypatch):
     monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
     _seed_nearlow_run([{"ticker": "OKLO", "name": "Oklo Inc."}, {"ticker": "ALHC", "name": "Alignment Healthcare"}])
 
-    def fake_classify(ticker, name, financials, provider, model, api_key=None):
+    def fake_classify(ticker, name, financials, provider, model, api_key=None, market_cap=None):
         return {"is_pre_revenue": ticker == "OKLO", "reason": f"reason for {ticker}"}
 
     monkeypatch.setattr(app_mod.nearlow_analysis, "classify_pre_revenue", fake_classify)
@@ -506,7 +534,7 @@ def test_check_nearlow_pre_revenue_isolates_one_ticker_failure(client, monkeypat
     monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
     _seed_nearlow_run([{"ticker": "GOOD", "name": "Good Co"}, {"ticker": "BAD", "name": "Bad Co"}])
 
-    def fake_classify(ticker, name, financials, provider, model, api_key=None):
+    def fake_classify(ticker, name, financials, provider, model, api_key=None, market_cap=None):
         if ticker == "BAD":
             raise RuntimeError("rate limited")
         return {"is_pre_revenue": False, "reason": "has revenue"}
@@ -537,7 +565,7 @@ def test_check_nearlow_pre_revenue_skips_ai_call_for_positive_pe(client, monkeyp
 
     calls = []
 
-    def fake_classify(ticker, name, financials, provider, model, api_key=None):
+    def fake_classify(ticker, name, financials, provider, model, api_key=None, market_cap=None):
         calls.append(ticker)
         return {"is_pre_revenue": True, "reason": "no commercial revenue yet"}
 
@@ -649,7 +677,7 @@ def test_run_pennystock_now_auto_classifies_pre_revenue_when_key_saved(client, m
     monkeypatch.setattr(
         app_mod.nearlow_analysis,
         "classify_pre_revenue",
-        lambda ticker, name, financials, provider, model, api_key=None: {"is_pre_revenue": True, "reason": "no commercial revenue yet"},
+        lambda ticker, name, financials, provider, model, api_key=None, market_cap=None: {"is_pre_revenue": True, "reason": "no commercial revenue yet"},
     )
     res = client.post("/api/pennystock/run", data=json.dumps({"threshold": "5"}), content_type="application/json")
     assert res.status_code == 200
@@ -682,7 +710,7 @@ def test_check_pennystock_pre_revenue_classifies_and_persists(client, monkeypatc
     monkeypatch.setattr(
         app_mod.nearlow_analysis,
         "classify_pre_revenue",
-        lambda ticker, name, financials, provider, model, api_key=None: {"is_pre_revenue": True, "reason": "no commercial revenue yet"},
+        lambda ticker, name, financials, provider, model, api_key=None, market_cap=None: {"is_pre_revenue": True, "reason": "no commercial revenue yet"},
     )
 
     res = client.post("/api/pennystock/check-pre-revenue", data=json.dumps({"threshold": "5"}), content_type="application/json")
@@ -707,7 +735,7 @@ def test_check_pennystock_pre_revenue_skips_ai_call_for_positive_pe(client, monk
 
     calls = []
 
-    def fake_classify(ticker, name, financials, provider, model, api_key=None):
+    def fake_classify(ticker, name, financials, provider, model, api_key=None, market_cap=None):
         calls.append(ticker)
         return {"is_pre_revenue": True, "reason": "no commercial revenue yet"}
 

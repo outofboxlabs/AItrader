@@ -398,6 +398,43 @@ def test_classify_pre_revenue_includes_yfinance_revenue_when_available(monkeypat
     assert "2,700,000,000" in captured["user_message"]
 
 
+def test_classify_pre_revenue_includes_market_cap_and_ratio_for_materiality(monkeypatch):
+    """Live case that motivated this: OKLO reports ~$1.21M revenue against
+    a multi-billion-dollar market cap -- without market cap context, the
+    classifier has no way to tell that figure is almost certainly
+    incidental (a grant, a government cost-share contract) rather than
+    the core business (commercial reactor sales) actually ramping up, and
+    wrongly answers "not pre-revenue" just because the number is
+    nonzero."""
+    captured = {}
+
+    def fake_call_provider(provider, system_prompt, user_message, model, api_key=None, max_tokens=800):
+        captured["user_message"] = user_message
+        return '{"is_pre_revenue": true, "reason": "Revenue is negligible against market cap -- likely a government contract, not core reactor sales."}'
+
+    monkeypatch.setattr(nla.ai_client, "call_provider", fake_call_provider)
+
+    result = nla.classify_pre_revenue(
+        "OKLO", "Oklo Inc.", {"revenue": 1_210_000.0}, "anthropic", "claude-haiku-4-5", api_key="sk-test", market_cap=2_500_000_000.0
+    )
+
+    assert result["is_pre_revenue"] is True
+    assert "Market cap: 2,500,000,000" in captured["user_message"]
+    assert "0.05% of market cap" in captured["user_message"]
+
+
+def test_classify_pre_revenue_omits_market_cap_line_when_not_given(monkeypatch):
+    captured = {}
+
+    def fake_call_provider(provider, system_prompt, user_message, model, api_key=None, max_tokens=800):
+        captured["user_message"] = user_message
+        return '{"is_pre_revenue": false, "reason": "n/a"}'
+
+    monkeypatch.setattr(nla.ai_client, "call_provider", fake_call_provider)
+    nla.classify_pre_revenue("ACME", "Acme Corp", {"revenue": 500_000.0}, "anthropic", "claude-haiku-4-5", api_key="sk-test")
+    assert "Market cap" not in captured["user_message"]
+
+
 def test_classify_pre_revenue_degrades_on_unparseable_response(monkeypatch):
     monkeypatch.setattr(nla.ai_client, "call_provider", lambda *a, **kw: "not valid json")
     result = nla.classify_pre_revenue("ACME", "Acme Corp", None, "anthropic", "claude-haiku-4-5", api_key="sk-test")

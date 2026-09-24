@@ -372,7 +372,9 @@ def _classify_pre_revenue_for_candidate(c: dict, provider: str, model: str, api_
     if result is None:
         try:
             financials = data.get_financial_highlights(c["ticker"])
-            result = nearlow_analysis.classify_pre_revenue(c["ticker"], c.get("name"), financials, provider, model, api_key=api_key)
+            result = nearlow_analysis.classify_pre_revenue(
+                c["ticker"], c.get("name"), financials, provider, model, api_key=api_key, market_cap=c.get("market_cap")
+            )
         except Exception as exc:
             result = {"is_pre_revenue": None, "reason": f"AI check failed: {exc}"}
     c["is_pre_revenue"] = result.get("is_pre_revenue")
