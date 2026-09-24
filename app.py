@@ -28,7 +28,7 @@ from typing import Optional
 from flask import Flask, jsonify, render_template_string, request
 
 import config
-from portfolio_monitor import credentials, data, edgar, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_analysis, nearlow_screener, news, pennystock_screener, pipeline, scheduler, stocktwits_sentiment, technical_indicators, vision
+from portfolio_monitor import bigdrop_screener, credentials, data, edgar, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_analysis, nearlow_screener, news, pennystock_screener, pipeline, scheduler, stocktwits_sentiment, technical_indicators, vision
 from portfolio_monitor import db as db_mod
 from portfolio_monitor.models import Position
 
@@ -541,6 +541,97 @@ def check_pennystock_pre_revenue():
 
     with db_mod.connect(config.DB_PATH) as conn:
         db_mod.save_pennystock_candidates(conn, latest_date, threshold_key, candidates)
+
+    return jsonify({"asof_date": latest_date, "threshold": threshold_key, "candidates": candidates})
+
+
+# --- Biggest drops screener (Big Drops tab) -----------------------------
+
+
+def _bigdrop_threshold_key(raw: Optional[str]) -> Optional[str]:
+    key = (raw or "1B").strip()
+    return key if key in config.BIGDROP_THRESHOLDS else None
+
+
+def _run_bigdrop_screen(threshold_key: str, asof_date: Optional[date] = None) -> list[dict]:
+    """Same as Near 52W Low/Penny Stocks: the screen itself needs no API
+    key/provider and never blocks on one being missing, but
+    opportunistically spends a gen-AI call per candidate whose P/E
+    doesn't already disprove pre-revenue on its own, if a key is already
+    saved -- see _auto_classify_pre_revenue."""
+    asof_date = asof_date or date.today()
+    db_mod.init_db(config.DB_PATH)
+    candidates = bigdrop_screener.find_bigdrop_candidates(
+        min_market_cap=config.BIGDROP_THRESHOLDS[threshold_key],
+        candidate_pool_size=config.BIGDROP_CANDIDATE_POOL_SIZE,
+        min_volume=config.BIGDROP_MIN_VOLUME,
+        max_results=config.BIGDROP_MAX_RESULTS,
+        max_workers=config.BIGDROP_MAX_WORKERS,
+    )
+    _auto_classify_pre_revenue(candidates)
+    with db_mod.connect(config.DB_PATH) as conn:
+        db_mod.save_bigdrop_candidates(conn, asof_date.isoformat(), threshold_key, candidates)
+    exports.export_to_csv(candidates, "big_drops", f"big_drops_{threshold_key}", export_root=config.EXPORTS_DIR)
+    return candidates
+
+
+@app.route("/api/bigdrop", methods=["GET"])
+def get_bigdrop():
+    threshold_key = _bigdrop_threshold_key(request.args.get("threshold"))
+    if threshold_key is None:
+        return jsonify({"error": f"threshold must be one of {sorted(config.BIGDROP_THRESHOLDS)}"}), 400
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        latest_date = db_mod.get_latest_bigdrop_candidates_date(conn, threshold_key)
+        if not latest_date:
+            return jsonify({"asof_date": None, "threshold": threshold_key, "candidates": []})
+        candidates = db_mod.get_bigdrop_candidates(conn, latest_date, threshold_key)
+    return jsonify({"asof_date": latest_date, "threshold": threshold_key, "candidates": candidates})
+
+
+@app.route("/api/bigdrop/run", methods=["POST"])
+def run_bigdrop_now():
+    body = request.get_json(silent=True) or {}
+    threshold_key = _bigdrop_threshold_key(body.get("threshold"))
+    if threshold_key is None:
+        return jsonify({"error": f"threshold must be one of {sorted(config.BIGDROP_THRESHOLDS)}"}), 400
+    try:
+        candidates = _run_bigdrop_screen(threshold_key)
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"error": str(exc)}), 502
+    return jsonify({"asof_date": date.today().isoformat(), "threshold": threshold_key, "candidates": candidates})
+
+
+@app.route("/api/bigdrop/check-pre-revenue", methods=["POST"])
+def check_bigdrop_pre_revenue():
+    """Same as check_pennystock_pre_revenue, for the current Big Drops
+    results at the given threshold."""
+    body = request.get_json(silent=True) or {}
+    threshold_key = _bigdrop_threshold_key(body.get("threshold"))
+    if threshold_key is None:
+        return jsonify({"error": f"threshold must be one of {sorted(config.BIGDROP_THRESHOLDS)}"}), 400
+
+    requested_provider = body.get("provider")
+    if requested_provider and requested_provider not in PROVIDERS:
+        return jsonify({"error": f"unknown provider {requested_provider!r}"}), 400
+    provider, api_key = _resolve_forex_analysis_provider(requested_provider)
+    if not api_key:
+        return jsonify({"error": "No saved API key for any provider. Add one in the Settings tab first."}), 400
+    model = body.get("model") or NEWS_DEFAULT_MODEL[provider]
+
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        latest_date = db_mod.get_latest_bigdrop_candidates_date(conn, threshold_key)
+        if not latest_date:
+            return jsonify({"error": "No Big Drops results yet. Run the screen first."}), 400
+        candidates = db_mod.get_bigdrop_candidates(conn, latest_date, threshold_key)
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        list(executor.map(lambda c: _classify_pre_revenue_for_candidate(c, provider, model, api_key), candidates))
+
+    with db_mod.connect(config.DB_PATH) as conn:
+        db_mod.save_bigdrop_candidates(conn, latest_date, threshold_key, candidates)
 
     return jsonify({"asof_date": latest_date, "threshold": threshold_key, "candidates": candidates})
 
@@ -1474,6 +1565,7 @@ PAGE_TEMPLATE = """<!doctype html>
   <button class="tab-btn" data-tab="growth">Top Growth</button>
   <button class="tab-btn" data-tab="nearlow">Near 52W Low</button>
   <button class="tab-btn" data-tab="pennystock">Penny Stocks</button>
+  <button class="tab-btn" data-tab="bigdrop">Big Drops</button>
   <button class="tab-btn" data-tab="stock-analysis">Stock Analysis</button>
   <button class="tab-btn" data-tab="watchlist">Potential Portfolio</button>
   <button class="tab-btn" data-tab="forex">Forex Calendar</button>
@@ -1717,6 +1809,70 @@ PAGE_TEMPLATE = """<!doctype html>
         <th>Analysis</th>
       </tr></thead>
       <tbody id="ps-body"></tbody>
+    </table>
+  </div>
+
+  <!-- ===================== BIG DROPS TAB ===================== -->
+  <div class="tab-panel" id="tab-bigdrop">
+    <div class="controls">
+      <div><label>Market cap</label><br>
+        <select id="bd-threshold" onchange="loadBigdrop()">
+          <option value="1B" selected>$1B+</option>
+          <option value="2B">$2B+</option>
+          <option value="5B">$5B+</option>
+          <option value="10B">$10B+</option>
+        </select>
+      </div>
+      <div><label>Min analysts</label><br>
+        <select id="bd-min-analysts" onchange="renderBigdropTable()">
+          <option value="0" selected>Any (incl. no coverage)</option>
+          <option value="3">3 or more</option>
+          <option value="5">5 or more</option>
+          <option value="7">7 or more</option>
+        </select>
+      </div>
+      <div><label>Pre-revenue</label><br>
+        <select id="bd-pre-revenue" onchange="renderBigdropTable()">
+          <option value="include" selected>Include</option>
+          <option value="exclude">Exclude</option>
+          <option value="only">Only pre-revenue</option>
+        </select>
+      </div>
+      <button class="action" id="bd-run-btn" onclick="runBigdropNow()">Run Now</button>
+      <button class="secondary" id="bd-check-pre-revenue-btn" onclick="checkBigdropPreRevenue()">Check pre-revenue (AI)</button>
+    </div>
+    <div id="bd-pre-revenue-status" class="muted"></div>
+    <p class="muted" style="max-width:640px;">
+      Large-cap US stocks at or above the selected market cap, ranked by how hard they've been hit --
+      1-day, 1-week, and 1-month price drop side by side (yfinance has no native weekly/monthly change
+      field, so those two are computed from daily closes). Unlike Near 52W Low, no single quality filter
+      is imposed here either -- the point is to surface any big-cap hit, not just ones the Street still
+      likes -- so every candidate carries the same rich column set (52-week range, buy ratio, target
+      upside) to judge by. "Pre-revenue" behaves exactly as on Near 52W Low/Penny Stocks: defaults to
+      yfinance's own revenue figure, automatically double-checked with AI as part of "Run Now" for
+      anything P/E can't already rule out (needs an API key saved in Settings), and "Check pre-revenue
+      (AI)" any time re-classifies every current candidate regardless of what it already answered. This
+      is not investment advice, just a starting point for further research. Click "Analyze" on a
+      candidate for a ~200-word expert take (with a buy-opportunity verdict), then pick which of 8
+      independent agents to run for their own take on it.
+    </p>
+    <div id="bd-status"></div>
+    <div id="bd-as-of" class="muted" style="margin-bottom:8px;"></div>
+    <table>
+      <thead><tr id="bd-head">
+        <th class="sortable" data-sort="ticker">Ticker<span class="arrow"></span></th>
+        <th class="sortable" data-sort="price">Price<span class="arrow"></span></th>
+        <th class="sortable" data-sort="pct_change_1d">1-Day<span class="arrow"></span></th>
+        <th class="sortable" data-sort="pct_change_1w">1-Week<span class="arrow"></span></th>
+        <th class="sortable" data-sort="pct_change_1m">1-Month<span class="arrow"></span></th>
+        <th class="sortable" data-sort="year_high">52w High<span class="arrow"></span></th>
+        <th class="sortable" data-sort="year_low">52w Low<span class="arrow"></span></th>
+        <th class="sortable" data-sort="buy_ratio_pct">Buy Ratio %<span class="arrow"></span></th>
+        <th class="sortable" data-sort="target_upside_pct">Target Upside<span class="arrow"></span></th>
+        <th class="sortable" data-sort="market_cap">Market Cap<span class="arrow"></span></th>
+        <th>Analysis</th>
+      </tr></thead>
+      <tbody id="bd-body"></tbody>
     </table>
   </div>
 
@@ -3025,6 +3181,249 @@ async function loadPennystockPanel(ticker) {
   }
 }
 
+// ---------- Big Drops (large-cap, biggest 1-day/1-week/1-month drop) ----------
+
+let bigdropRows = [];
+let bigdropSort = { field: "pct_change_1d", dir: 1 };
+const bigdropExpert = {};
+const bigdropPanel = {};
+
+async function loadBigdrop() {
+  const threshold = document.getElementById("bd-threshold").value;
+  const res = await fetch(`/api/bigdrop?threshold=${encodeURIComponent(threshold)}`);
+  const data = await res.json();
+  renderBigdrop(data);
+}
+
+async function runBigdropNow() {
+  const threshold = document.getElementById("bd-threshold").value;
+  const btn = document.getElementById("bd-run-btn");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Screening...';
+  document.getElementById("bd-status").style.display = "none";
+  try {
+    const res = await fetch("/api/bigdrop/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ threshold }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showStatus("bd-status", "Error: " + data.error, false); return; }
+    renderBigdrop(data);
+    showStatus("bd-status", `Found ${data.candidates.length} candidate(s) at or above ${threshold}.`, true);
+  } catch (err) {
+    showStatus("bd-status", "Error: " + err, false);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Run Now";
+  }
+}
+
+function renderBigdrop(data) {
+  document.getElementById("bd-as-of").textContent = data.asof_date ? `As of ${data.asof_date}` : "No scan has run yet.";
+  bigdropRows = data.candidates || [];
+  renderBigdropTable();
+}
+
+async function checkBigdropPreRevenue() {
+  const btn = document.getElementById("bd-check-pre-revenue-btn");
+  const statusEl = document.getElementById("bd-pre-revenue-status");
+  if (bigdropRows.length === 0) { statusEl.textContent = "No candidates to check -- run the screen first."; return; }
+  const threshold = document.getElementById("bd-threshold").value;
+  btn.disabled = true;
+  statusEl.innerHTML = `<span class="spinner"></span> Checking ${bigdropRows.length} candidate(s) with AI\\u2014this makes one AI call per candidate and can take a bit.`;
+  try {
+    const res = await fetch("/api/bigdrop/check-pre-revenue", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ threshold }) });
+    const data = await res.json();
+    if (!res.ok) { statusEl.textContent = "Error: " + data.error; return; }
+    bigdropRows = data.candidates || [];
+    renderBigdropTable();
+    statusEl.textContent = `Re-checked ${bigdropRows.length} candidate(s).`;
+  } catch (err) {
+    statusEl.textContent = "Error: " + err;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function sortBigdrop(field) {
+  if (bigdropSort.field === field) {
+    bigdropSort.dir *= -1;
+  } else {
+    bigdropSort.field = field;
+    bigdropSort.dir = field === "ticker" ? 1 : -1;
+  }
+  renderBigdropTable();
+}
+
+function renderBigdropTable() {
+  const body = document.getElementById("bd-body");
+  const { field, dir } = bigdropSort;
+
+  document.querySelectorAll("#bd-head th.sortable").forEach(th => {
+    const arrow = th.querySelector(".arrow");
+    arrow.textContent = th.dataset.sort === field ? (dir === 1 ? "\\u25b2" : "\\u25bc") : "";
+  });
+
+  if (bigdropRows.length === 0) {
+    body.innerHTML = '<tr><td colspan="11" class="muted">No candidates found. Click "Run Now" to screen today\\'s market.</td></tr>';
+    return;
+  }
+
+  const minAnalysts = Number(document.getElementById("bd-min-analysts").value);
+  const preRevenueFilter = document.getElementById("bd-pre-revenue").value;
+  const filtered = bigdropRows.filter(c => (c.ratings_count || 0) >= minAnalysts && matchesPreRevenueFilter(c, preRevenueFilter));
+  if (filtered.length === 0) {
+    body.innerHTML = `<tr><td colspan="11" class="muted">No candidates match the current "Min analysts"/"Pre-revenue" filters.</td></tr>`;
+    return;
+  }
+
+  const sorted = [...filtered].sort((a, b) => {
+    let av = a[field], bv = b[field];
+    if (av === null || av === undefined) return 1;
+    if (bv === null || bv === undefined) return -1;
+    if (typeof av === "string") { av = av.toLowerCase(); bv = bv.toLowerCase(); }
+    if (av < bv) return -1 * dir;
+    if (av > bv) return 1 * dir;
+    return 0;
+  });
+
+  body.innerHTML = sorted.map(c => {
+    const ratings = c.analyst_ratings || {};
+    const ratingsStr = Object.keys(ratings).length
+      ? Object.entries(ratings).map(([k, v]) => `${k}: ${v}`).join(", ")
+      : "n/a";
+    const buyRatioCell = c.buy_ratio_pct !== null && c.buy_ratio_pct !== undefined
+      ? `${fmtNum(c.buy_ratio_pct, 0)}% <span class="muted">(${ratingsStr})</span>`
+      : `<span class="muted">no coverage</span>`;
+    const pctStr = (v) => v !== null && v !== undefined ? `${v >= 0 ? "+" : ""}${fmtNum(v, 1)}%` : "n/a";
+    const changeCell = (v) => v !== null && v !== undefined
+      ? `<span class="value ${v < 0 ? "neg" : "pos"}">${v >= 0 ? "+" : ""}${fmtNum(v, 1)}%</span>` : "n/a";
+    const highCell = c.year_high !== null && c.year_high !== undefined
+      ? `${fmtMoney(c.year_high)} <span class="muted">(${pctStr(c.pct_from_52w_high)})</span>` : "n/a";
+    const lowCell = c.year_low !== null && c.year_low !== undefined
+      ? `${fmtMoney(c.year_low)} <span class="muted">(${pctStr(c.pct_from_52w_low)})</span>` : "n/a";
+    const upsideCell = c.target_upside_pct !== null && c.target_upside_pct !== undefined
+      ? `${c.target_upside_pct >= 0 ? "+" : ""}${fmtNum(c.target_upside_pct, 1)}% <span class="muted">(${fmtMoney(c.target_mean)})</span>`
+      : "n/a";
+    return `<tr>
+      <td><a class="ticker-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(c.ticker)}" target="_blank" rel="noopener">${c.ticker}</a>${c.name ? ` <span class="muted">(${c.name})</span>` : ""}${preRevenueTag(c)}${negativePeTag(c)}</td>
+      <td>${fmtMoney(c.price)}</td>
+      <td>${changeCell(c.pct_change_1d)}</td>
+      <td>${changeCell(c.pct_change_1w)}</td>
+      <td>${changeCell(c.pct_change_1m)}</td>
+      <td>${highCell}</td>
+      <td>${lowCell}</td>
+      <td>${buyRatioCell}</td>
+      <td>${upsideCell}</td>
+      <td>${fmtCap(c.market_cap)}</td>
+      <td>
+        <button class="secondary" style="font-size:0.75rem; padding:3px 8px;" id="bd-toggle-${c.ticker}" onclick="toggleBigdropDetail('${c.ticker}')">Analyze</button>
+        <button class="secondary" style="font-size:0.75rem; padding:3px 8px;" onclick="showRatingChartFor('bd', '${c.ticker}')">Chart</button>
+        ${watchlistButtonHtml(c.ticker, c.name, "big_drops")}
+      </td>
+    </tr>
+    <tr id="bd-detail-row-${c.ticker}" style="display:none;">
+      <td colspan="11" style="border-top:none;">
+        <div id="bd-detail-${c.ticker}"></div>
+        <div id="bd-chart-${c.ticker}" style="max-width:720px;"></div>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+document.getElementById("bd-head").addEventListener("click", (e) => {
+  const th = e.target.closest("th.sortable");
+  if (th) sortBigdrop(th.dataset.sort);
+});
+
+function toggleBigdropDetail(ticker) {
+  const row = document.getElementById(`bd-detail-row-${ticker}`);
+  const btn = document.getElementById(`bd-toggle-${ticker}`);
+  const isOpen = row.style.display !== "none";
+  if (isOpen) {
+    row.style.display = "none";
+    btn.textContent = "Analyze";
+    return;
+  }
+  row.style.display = "table-row";
+  btn.textContent = "Hide";
+  if (!bigdropExpert[ticker]) {
+    loadBigdropExpert(ticker);
+  }
+  const chartEl = document.getElementById(`bd-chart-${ticker}`);
+  if (chartEl && !chartEl.innerHTML) {
+    chartEl.innerHTML = ratingChartHtml(`bd-${ticker}`, ticker);
+  }
+}
+
+function bigdropCandidate(ticker) {
+  return bigdropRows.find(c => c.ticker === ticker);
+}
+
+async function loadBigdropExpert(ticker) {
+  const container = document.getElementById(`bd-detail-${ticker}`);
+  container.innerHTML = '<div class="muted" style="padding:8px 0;"><span class="spinner"></span> Loading expert take...</div>';
+  try {
+    const res = await fetch("/api/stock-analysis/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker, candidate: bigdropCandidate(ticker) }),
+    });
+    const resData = await res.json();
+    if (!res.ok) {
+      container.innerHTML = `<div class="muted" style="padding:8px 0;">Error: ${escapeHtml(resData.error)}</div>`;
+      return;
+    }
+    bigdropExpert[ticker] = resData;
+    renderBigdropDetail(ticker);
+  } catch (err) {
+    container.innerHTML = `<div class="muted" style="padding:8px 0;">Error: ${escapeHtml(String(err))}</div>`;
+  }
+}
+
+function renderBigdropDetail(ticker) {
+  const container = document.getElementById(`bd-detail-${ticker}`);
+  const expert = bigdropExpert[ticker];
+  if (!expert) return;
+  const [label, color] = nearlowVerdictLabel(expert.verdict);
+  const panel = bigdropPanel[ticker];
+  const cardsHtml = panel ? panel.map(renderNearlowPanelCard).join("") : "";
+
+  container.innerHTML = `
+    <div style="padding:10px 0 14px; max-width:720px;">
+      <span style="display:inline-block; padding:2px 8px; border-radius:10px; background:${color}22; color:${color}; font-size:0.75rem; font-weight:600;">${escapeHtml(label)}</span>
+      <div style="margin-top:6px;">${escapeHtml(expert.analysis || "n/a")}</div>
+      <div class="disclaimer" style="margin-top:6px;">${escapeHtml(expert.disclaimer || "This is not investment advice.")}</div>
+      <div id="bd-panel-cards-${ticker}" style="margin-top:10px;">${cardsHtml}</div>
+      <div id="bd-panel-status-${ticker}" class="muted" style="margin-top:8px;"></div>
+      <div style="margin-top:8px;">${agentPickerHtml(`bd-${ticker}`, `loadBigdropPanel('${ticker}')`)}</div>
+    </div>`;
+}
+
+async function loadBigdropPanel(ticker) {
+  const scopeId = `bd-${ticker}`;
+  const personas = collectSelectedPersonas(scopeId);
+  const socialSentimentWindow = collectSentimentWindow(scopeId);
+  const statusEl = document.getElementById(`bd-panel-status-${ticker}`);
+  if (personas.length === 0) { statusEl.textContent = "Pick at least one agent to run."; return; }
+  statusEl.innerHTML = `<span class="spinner"></span> Running ${personas.length} agent(s)\\u2014this makes ${personas.length} AI call(s) and can take a bit.`;
+  try {
+    const res = await fetch("/api/stock-analysis/panel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker, candidate: bigdropCandidate(ticker), personas, social_sentiment_window: socialSentimentWindow }),
+    });
+    const resData = await res.json();
+    if (!res.ok) { statusEl.textContent = "Error: " + resData.error; return; }
+    bigdropPanel[ticker] = mergePanelResults(bigdropPanel[ticker], resData.panel);
+    statusEl.textContent = "";
+    renderBigdropDetail(ticker);
+  } catch (err) {
+    statusEl.textContent = "Error: " + err;
+  }
+}
+
 // ---------- Selectable-agent panel picker (shared: Near 52W Low + Stock Analysis) ----------
 
 const AGENT_LABELS = {
@@ -3119,6 +3518,7 @@ async function loadWatchlistTickers() {
 function refreshWatchlistButtonsEverywhere() {
   if (nearlowRows.length) renderNearlowTable();
   if (pennystockRows.length) renderPennystockTable();
+  if (bigdropRows.length) renderBigdropTable();
   if (saCurrent) renderStockAnalysisResult();
 }
 
@@ -4196,6 +4596,7 @@ loadMovers();
 loadGrowth();
 loadNearlow();
 loadPennystock();
+loadBigdrop();
 loadWatchlistTickers();
 loadForex();
 loadSchedulerStatus();

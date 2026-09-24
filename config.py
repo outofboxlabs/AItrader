@@ -149,6 +149,23 @@ PENNYSTOCK_MIN_VOLUME = 200_000
 PENNYSTOCK_MAX_RESULTS = 100
 PENNYSTOCK_MAX_WORKERS = 20
 
+# --- Biggest drops screener (Big Drops tab) ---
+# Large-cap US stocks (market cap at or above a selectable floor) ranked
+# by their 1-day/1-week/1-month price drop, carrying the same rich
+# per-candidate columns as Near 52W Low (52-week range, buy ratio,
+# target upside, pre-revenue/negative-P/E signals) -- unlike that
+# screener, no single quality filter is imposed here either (see Penny
+# Stocks), since the point is to surface any big-cap hit, not just ones
+# the Street still rates favorably. yfinance's screener has no native
+# 1-week/1-month percent-change field, so those two are computed
+# ourselves from ~2 months of daily closes per candidate (see
+# bigdrop_screener._enrich_candidate).
+BIGDROP_THRESHOLDS = {"1B": 1_000_000_000, "2B": 2_000_000_000, "5B": 5_000_000_000, "10B": 10_000_000_000}
+BIGDROP_CANDIDATE_POOL_SIZE = 150
+BIGDROP_MIN_VOLUME = 100_000
+BIGDROP_MAX_RESULTS = 100
+BIGDROP_MAX_WORKERS = 20
+
 # --- Forex Factory economic calendar (Forex Calendar tab) ---
 # Forex Factory has no official public API for this. It does publish a
 # public JSON/XML/CSV/ICS feed that powers their own embeddable calendar

@@ -751,6 +751,177 @@ def test_check_pennystock_pre_revenue_skips_ai_call_for_positive_pe(client, monk
     assert by_ticker["UNCLEAR"]["is_pre_revenue"] is True
 
 
+# --- biggest drops screener -------------------------------------------------
+
+
+def test_get_bigdrop_empty_when_no_scan_yet(client):
+    res = client.get("/api/bigdrop?threshold=1B")
+    assert res.status_code == 200
+    assert res.get_json() == {"asof_date": None, "threshold": "1B", "candidates": []}
+
+
+def test_get_bigdrop_defaults_to_threshold_1b(client):
+    res = client.get("/api/bigdrop")
+    assert res.status_code == 200
+    assert res.get_json()["threshold"] == "1B"
+
+
+def test_get_bigdrop_rejects_unknown_threshold(client):
+    res = client.get("/api/bigdrop?threshold=3B")
+    assert res.status_code == 400
+
+
+def test_run_bigdrop_now_returns_and_persists_results(client, monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_find(**kw):
+        captured.update(kw)
+        return [
+            {
+                "ticker": "HITHARD",
+                "name": "Hit Hard Co",
+                "price": 80.0,
+                "year_low": 60.0,
+                "year_high": 150.0,
+                "pct_from_52w_low": 33.3,
+                "pct_from_52w_high": -46.7,
+                "pct_change_1d": -12.0,
+                "pct_change_1w": -20.0,
+                "pct_change_1m": -30.0,
+                "target_mean": 100.0,
+                "target_upside_pct": 25.0,
+                "analyst_ratings": {"strongBuy": 4, "buy": 2},
+                "buy_ratio_pct": 85.0,
+                "ratings_count": 7,
+                "market_cap": 5e9,
+            }
+        ]
+
+    monkeypatch.setattr(app_mod.bigdrop_screener, "find_bigdrop_candidates", fake_find)
+    res = client.post("/api/bigdrop/run", data=json.dumps({"threshold": "5B"}), content_type="application/json")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["threshold"] == "5B"
+    assert data["candidates"][0]["ticker"] == "HITHARD"
+    assert data["asof_date"] == date.today().isoformat()
+    assert captured["min_market_cap"] == 5_000_000_000
+
+    # Persisted -- a fresh GET for the same threshold reads it back.
+    res2 = client.get("/api/bigdrop?threshold=5B")
+    data2 = res2.get_json()
+    assert data2["candidates"][0]["ticker"] == "HITHARD"
+    assert data2["candidates"][0]["pct_change_1m"] == -30.0
+
+    # A different threshold has nothing scanned yet -- thresholds don't bleed together.
+    res3 = client.get("/api/bigdrop?threshold=1B")
+    assert res3.get_json()["candidates"] == []
+
+    # And a CSV landed in the configured exports dir under big_drops/.
+    export_dir = tmp_path / "exports" / "big_drops"
+    assert export_dir.exists()
+    assert len(list(export_dir.glob("*.csv"))) == 1
+
+
+def test_run_bigdrop_now_rejects_unknown_threshold(client):
+    res = client.post("/api/bigdrop/run", data=json.dumps({"threshold": "3B"}), content_type="application/json")
+    assert res.status_code == 400
+
+
+def test_run_bigdrop_now_handles_screener_failure(client, monkeypatch):
+    def boom(**kw):
+        raise RuntimeError("yahoo screener down")
+
+    monkeypatch.setattr(app_mod.bigdrop_screener, "find_bigdrop_candidates", boom)
+    res = client.post("/api/bigdrop/run", data=json.dumps({"threshold": "1B"}), content_type="application/json")
+    assert res.status_code == 502
+    assert "error" in res.get_json()
+
+
+def test_run_bigdrop_now_auto_classifies_pre_revenue_when_key_saved(client, monkeypatch):
+    """Same automatic AI-fallback behavior as Near 52W Low/Penny Stocks."""
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
+    monkeypatch.setattr(
+        app_mod.bigdrop_screener,
+        "find_bigdrop_candidates",
+        lambda **kw: [{"ticker": "UNCLEAR", "name": "Unclear Co", "is_pre_revenue": None, "trailing_pe": None}],
+    )
+    monkeypatch.setattr(
+        app_mod.nearlow_analysis,
+        "classify_pre_revenue",
+        lambda ticker, name, financials, provider, model, api_key=None, market_cap=None: {"is_pre_revenue": True, "reason": "no commercial revenue yet"},
+    )
+    res = client.post("/api/bigdrop/run", data=json.dumps({"threshold": "1B"}), content_type="application/json")
+    assert res.status_code == 200
+    assert res.get_json()["candidates"][0]["is_pre_revenue"] is True
+
+
+def _seed_bigdrop_run(threshold, candidates):
+    app_mod.db_mod.init_db(app_mod.config.DB_PATH)
+    with app_mod.db_mod.connect(app_mod.config.DB_PATH) as conn:
+        app_mod.db_mod.save_bigdrop_candidates(conn, date.today().isoformat(), threshold, candidates)
+
+
+def test_check_bigdrop_pre_revenue_rejects_unknown_threshold(client):
+    res = client.post("/api/bigdrop/check-pre-revenue", data=json.dumps({"threshold": "3B"}), content_type="application/json")
+    assert res.status_code == 400
+
+
+def test_check_bigdrop_pre_revenue_requires_saved_scan(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    res = client.post("/api/bigdrop/check-pre-revenue", data=json.dumps({"threshold": "1B"}), content_type="application/json")
+    assert res.status_code == 400
+    assert "Run the screen first" in res.get_json()["error"]
+
+
+def test_check_bigdrop_pre_revenue_classifies_and_persists(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
+    _seed_bigdrop_run("1B", [{"ticker": "OKLO", "name": "Oklo Inc."}])
+
+    monkeypatch.setattr(
+        app_mod.nearlow_analysis,
+        "classify_pre_revenue",
+        lambda ticker, name, financials, provider, model, api_key=None, market_cap=None: {"is_pre_revenue": True, "reason": "no commercial revenue yet"},
+    )
+
+    res = client.post("/api/bigdrop/check-pre-revenue", data=json.dumps({"threshold": "1B"}), content_type="application/json")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["candidates"][0]["is_pre_revenue"] is True
+
+    res2 = client.get("/api/bigdrop?threshold=1B")
+    assert res2.get_json()["candidates"][0]["is_pre_revenue"] is True
+
+
+def test_check_bigdrop_pre_revenue_skips_ai_call_for_positive_pe(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
+    _seed_bigdrop_run(
+        "1B",
+        [
+            {"ticker": "PROFITABLE", "name": "Profitable Co", "trailing_pe": 8.2},
+            {"ticker": "UNCLEAR", "name": "Unclear Co", "trailing_pe": -3.1},
+        ],
+    )
+
+    calls = []
+
+    def fake_classify(ticker, name, financials, provider, model, api_key=None, market_cap=None):
+        calls.append(ticker)
+        return {"is_pre_revenue": True, "reason": "no commercial revenue yet"}
+
+    monkeypatch.setattr(app_mod.nearlow_analysis, "classify_pre_revenue", fake_classify)
+
+    res = client.post("/api/bigdrop/check-pre-revenue", data=json.dumps({"threshold": "1B"}), content_type="application/json")
+    assert res.status_code == 200
+    by_ticker = {c["ticker"]: c for c in res.get_json()["candidates"]}
+
+    assert calls == ["UNCLEAR"]  # PROFITABLE never triggered an AI call
+    assert by_ticker["PROFITABLE"]["is_pre_revenue"] is False
+    assert by_ticker["UNCLEAR"]["is_pre_revenue"] is True
+
+
 # --- watchlist / Potential Portfolio ---------------------------------------
 
 
