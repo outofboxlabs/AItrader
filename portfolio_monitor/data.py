@@ -411,6 +411,18 @@ def get_financial_highlights(ticker: str) -> Optional[dict]:
     revenue_labels = ["Total Revenue", "Total Revenues", "Operating Revenue"]
     latest_revenue = _value(income, revenue_labels, income_col)
     prior_revenue = _value(income, revenue_labels, income_prior_col)
+    if latest_revenue is None:
+        # The full income statement still doesn't have a match -- fall
+        # back to .info's "totalRevenue" (a single quoteSummary field),
+        # found live to be more consistently populated than the detailed
+        # statement for some industries (e.g. insurers). No prior-year
+        # figure this way, so revenue_yoy_pct stays unavailable.
+        try:
+            info_revenue = t.info.get("totalRevenue")
+        except Exception:
+            info_revenue = None
+        if isinstance(info_revenue, numbers.Real):
+            latest_revenue = float(info_revenue)
     latest_net_income = _value(income, ["Net Income"], income_col)
     latest_gross_profit = _value(income, ["Gross Profit"], income_col)
 

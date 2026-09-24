@@ -51,22 +51,34 @@ def _buy_ratio_pct(ratings: dict) -> tuple[Optional[float], int]:
 
 def _is_pre_revenue(t) -> Optional[bool]:
     """Same as nearlow_screener._is_pre_revenue -- see there for why this
-    is duplicated rather than shared, and why None is treated the same
+    is duplicated rather than shared, why .info's totalRevenue is checked
+    before the full income statement, and why None is treated the same
     as True by callers/the UI filter."""
+    try:
+        info = t.info or {}
+    except Exception:
+        info = {}
+    revenue = info.get("totalRevenue")
+    if isinstance(revenue, numbers.Real):
+        return float(revenue) <= 0
+
     try:
         income = t.get_income_stmt(freq="yearly")
     except Exception:
         return None
-    if income is None or income.empty or "Total Revenue" not in income.index:
+    if income is None or income.empty:
         return None
     latest_col = sorted(income.columns, reverse=True)[0]
-    try:
-        revenue = float(income.loc["Total Revenue", latest_col])
-    except (TypeError, ValueError):
-        return None
-    if revenue != revenue:  # NaN
-        return None
-    return revenue <= 0
+    for label in ("Total Revenue", "Total Revenues", "Operating Revenue"):
+        if label not in income.index:
+            continue
+        try:
+            revenue = float(income.loc[label, latest_col])
+        except (TypeError, ValueError):
+            continue
+        if revenue == revenue:  # not NaN
+            return revenue <= 0
+    return None
 
 
 def _enrich_candidate(q: dict) -> tuple[Optional[dict], str]:

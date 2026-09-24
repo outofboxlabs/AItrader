@@ -613,6 +613,28 @@ def test_get_financial_highlights_finds_revenue_under_alternate_label(monkeypatc
     assert highlights["revenue"] == 2_700_000_000.0
 
 
+def test_get_financial_highlights_falls_back_to_info_total_revenue(monkeypatch):
+    """The exact bug hit live: an income statement with no revenue line
+    yfinance's label list matches, but .info's totalRevenue has it."""
+    income = pd.DataFrame({pd.Timestamp("2026-01-31"): {"Net Income": 500_000_000.0}})  # no revenue line at all
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def get_income_stmt(self, freq="yearly"):
+            return income
+
+        @property
+        def info(self):
+            return {"totalRevenue": 2_700_000_000.0}
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    highlights = data_mod.get_financial_highlights("ALHC")
+    assert highlights["revenue"] == 2_700_000_000.0
+    assert highlights["revenue_yoy_pct"] is None  # .info only gives the current figure, no prior-year comparison
+
+
 # --- get_peer_comparison ---------------------------------------------------
 
 

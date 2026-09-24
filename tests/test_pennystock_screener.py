@@ -47,6 +47,18 @@ def test_is_pre_revenue_none_when_statement_unavailable():
     assert ps._is_pre_revenue(FakeTicker()) is None
 
 
+def test_is_pre_revenue_uses_info_total_revenue_first():
+    class FakeTicker:
+        @property
+        def info(self):
+            return {"totalRevenue": 2_700_000_000.0}
+
+        def get_income_stmt(self, freq="yearly"):
+            raise AssertionError("should not fall back to the income statement when .info already has revenue")
+
+    assert ps._is_pre_revenue(FakeTicker()) is False
+
+
 def _fake_ticker_factory(data_by_symbol):
     class FakeFastInfo:
         def __init__(self, year_high, year_low):

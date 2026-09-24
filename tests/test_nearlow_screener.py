@@ -63,6 +63,38 @@ def test_is_pre_revenue_none_when_statement_unavailable():
     assert nl._is_pre_revenue(FakeTicker()) is None
 
 
+def test_is_pre_revenue_uses_info_total_revenue_first():
+    """Regression test for the exact bug a user hit live: a real,
+    revenue-generating company (a health insurer, ALHC) got tagged
+    pre-revenue because its income statement's revenue line didn't match
+    any of the labels checked -- but .info's totalRevenue had it. That
+    field must be checked before falling back to the income statement."""
+
+    class FakeTicker:
+        @property
+        def info(self):
+            return {"totalRevenue": 2_700_000_000.0}
+
+        def get_income_stmt(self, freq="yearly"):
+            raise AssertionError("should not fall back to the income statement when .info already has revenue")
+
+    assert nl._is_pre_revenue(FakeTicker()) is False
+
+
+def test_is_pre_revenue_falls_back_to_income_statement_when_info_lacks_revenue():
+    class FakeTicker:
+        @property
+        def info(self):
+            return {"sector": "Healthcare"}  # no totalRevenue key
+
+        def get_income_stmt(self, freq="yearly"):
+            import pandas as pd
+
+            return pd.DataFrame({pd.Timestamp("2026-01-31"): {"Total Revenues": 500_000.0}})
+
+    assert nl._is_pre_revenue(FakeTicker()) is False
+
+
 def _fake_ticker_factory(data_by_symbol):
     class FakeFastInfo:
         def __init__(self, year_high, year_low):

@@ -52,28 +52,45 @@ def _buy_ratio_pct(ratings: dict) -> tuple[Optional[float], int]:
 
 
 def _is_pre_revenue(t) -> Optional[bool]:
-    """True if the latest annual income statement reports zero/no revenue,
-    False if it reports real revenue, None if no income statement is
-    available via yfinance at all -- which on this app's typical universe
-    (micro-caps, recent IPOs, clinical-stage biotech) usually means the
-    same thing in practice: too early-stage to have one. Callers/the UI
-    filter treat None the same as True for that reason. A separate,
-    cheap call (revenue only) rather than data.get_financial_highlights'
-    fuller balance-sheet/cash-flow pull, which this doesn't need."""
+    """True if trailing-twelve-month revenue is confirmed zero/none, False
+    if confirmed real revenue, None if it can't be determined either way
+    -- which on this app's typical universe (micro-caps, recent IPOs,
+    clinical-stage biotech) usually means the same thing in practice:
+    too early-stage to have meaningful revenue reporting. Callers/the UI
+    filter treat None the same as True for that reason.
+
+    Checks .info's "totalRevenue" first (a single quoteSummary field) --
+    in practice more consistently populated across tickers than the full
+    annual income statement, which was found live to come back without a
+    usable revenue line for BOTH a genuinely pre-revenue biotech AND a
+    real, revenue-generating health insurer (whose income statement uses
+    a non-standard label). Only falls back to the income statement if
+    .info didn't have it."""
+    try:
+        info = t.info or {}
+    except Exception:
+        info = {}
+    revenue = info.get("totalRevenue")
+    if isinstance(revenue, numbers.Real):
+        return float(revenue) <= 0
+
     try:
         income = t.get_income_stmt(freq="yearly")
     except Exception:
         return None
-    if income is None or income.empty or "Total Revenue" not in income.index:
+    if income is None or income.empty:
         return None
     latest_col = sorted(income.columns, reverse=True)[0]
-    try:
-        revenue = float(income.loc["Total Revenue", latest_col])
-    except (TypeError, ValueError):
-        return None
-    if revenue != revenue:  # NaN
-        return None
-    return revenue <= 0
+    for label in ("Total Revenue", "Total Revenues", "Operating Revenue"):
+        if label not in income.index:
+            continue
+        try:
+            revenue = float(income.loc[label, latest_col])
+        except (TypeError, ValueError):
+            continue
+        if revenue == revenue:  # not NaN
+            return revenue <= 0
+    return None
 
 
 def _enrich_candidate(
