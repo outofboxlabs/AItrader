@@ -2589,14 +2589,22 @@ function analystRatingsCount(c) {
   return Object.values(ratings).reduce((sum, n) => sum + (Number(n) || 0), 0);
 }
 
-// is_pre_revenue is true/false/null (null = no income statement available
-// at all via yfinance, treated the same as pre-revenue -- see the
-// screener's _is_pre_revenue for why). "exclude" therefore keeps only
-// candidates with CONFIRMED revenue (is_pre_revenue === false).
+// is_pre_revenue is true/false/null -- null means undetermined (a data
+// fetch failed somewhere, not that the company has no revenue), and
+// treating it the same as CONFIRMED pre-revenue is wrong two different
+// ways for the two filters:
+//   - "exclude" should stay conservative: drop null too, since we can't
+//     vouch for the revenue either way (matches _is_pre_revenue's own
+//     doc -- see the screener).
+//   - "only" must NOT also match null, or a well-known, obviously
+//     revenue-generating company (Flutter, Universal Display, Planet
+//     Fitness, ...) whose fetch simply failed/was incomplete gets listed
+//     as pre-revenue right alongside a genuine one -- "only" therefore
+//     requires CONFIRMED pre-revenue (is_pre_revenue === true).
 function matchesPreRevenueFilter(c, filterValue) {
   if (filterValue === "include") return true;
-  const hasConfirmedRevenue = c.is_pre_revenue === false;
-  return filterValue === "exclude" ? hasConfirmedRevenue : !hasConfirmedRevenue;
+  if (filterValue === "only") return c.is_pre_revenue === true;
+  return c.is_pre_revenue === false; // "exclude"
 }
 
 // Reusable registry of small inline-SVG badges shown next to a candidate's
