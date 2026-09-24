@@ -31,6 +31,38 @@ def test_buy_ratio_pct_handles_numpy_types():
     assert count == 10
 
 
+def test_is_pre_revenue_true_for_confirmed_zero_revenue(monkeypatch):
+    import pandas as pd
+
+    income = pd.DataFrame({pd.Timestamp("2026-01-31"): {"Total Revenue": 0.0}})
+
+    class FakeTicker:
+        def get_income_stmt(self, freq="yearly"):
+            return income
+
+    assert nl._is_pre_revenue(FakeTicker()) is True
+
+
+def test_is_pre_revenue_false_for_real_revenue(monkeypatch):
+    import pandas as pd
+
+    income = pd.DataFrame({pd.Timestamp("2026-01-31"): {"Total Revenue": 2_700_000_000.0}})
+
+    class FakeTicker:
+        def get_income_stmt(self, freq="yearly"):
+            return income
+
+    assert nl._is_pre_revenue(FakeTicker()) is False
+
+
+def test_is_pre_revenue_none_when_statement_unavailable():
+    class FakeTicker:
+        def get_income_stmt(self, freq="yearly"):
+            raise RuntimeError("no data")
+
+    assert nl._is_pre_revenue(FakeTicker()) is None
+
+
 def _fake_ticker_factory(data_by_symbol):
     class FakeFastInfo:
         def __init__(self, year_high, year_low):
@@ -94,6 +126,43 @@ def test_find_nearlow_candidates_filters_on_both_conditions(monkeypatch):
     only = results[0]
     assert only["buy_ratio_pct"] == 90.0
     assert round(only["pct_from_52w_low"], 1) == 5.3
+    assert only["is_pre_revenue"] is None  # FakeTicker has no get_income_stmt -- degrades gracefully
+
+
+def test_find_nearlow_candidates_reports_is_pre_revenue(monkeypatch):
+    import pandas as pd
+
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        return {"quotes": [{"symbol": "BIOTECH", "shortName": "Biotech Co", "regularMarketPrice": 10.0, "marketCap": 1e9}]}
+
+    class FakeFastInfo:
+        year_high = 20.0
+        year_low = 9.5
+
+    income = pd.DataFrame({pd.Timestamp("2026-01-31"): {"Total Revenue": 0.0}})
+
+    class FakeTicker:
+        def __init__(self, symbol):
+            pass
+
+        def get_analyst_price_targets(self):
+            return {"mean": 15.0}
+
+        def get_recommendations_summary(self, as_dict=False):
+            return {"strongBuy": {0: 6}, "buy": {0: 3}, "hold": {0: 1}, "sell": {0: 0}, "strongSell": {0: 0}}
+
+        def get_income_stmt(self, freq="yearly"):
+            return income
+
+        @property
+        def fast_info(self):
+            return FakeFastInfo()
+
+    monkeypatch.setattr(nl.yf, "screen", fake_screen)
+    monkeypatch.setattr(nl.yf, "Ticker", FakeTicker)
+
+    results = nl.find_nearlow_candidates(max_pct_from_low=15.0, min_buy_ratio_pct=60.0, min_ratings_count=3)
+    assert results[0]["is_pre_revenue"] is True
 
 
 def test_find_nearlow_candidates_requires_minimum_ratings_count(monkeypatch):

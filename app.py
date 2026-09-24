@@ -512,6 +512,7 @@ def _build_agent_context(
 
     if "fundamental" in selected:
         context["financials"] = data.get_financial_highlights(ticker)
+        context["peer_comparison"] = data.get_peer_comparison(ticker)
     if "filings" in selected:
         context["filings"] = edgar.get_recent_filings(ticker)
     if "social_sentiment" in selected:
@@ -1462,14 +1463,24 @@ PAGE_TEMPLATE = """<!doctype html>
           <option value="7">7 or more</option>
         </select>
       </div>
+      <div><label>Pre-revenue</label><br>
+        <select id="nl-pre-revenue" onchange="renderNearlowTable()">
+          <option value="include" selected>Include</option>
+          <option value="exclude">Exclude</option>
+          <option value="only">Only pre-revenue</option>
+        </select>
+      </div>
     </div>
     <p class="muted" style="max-width:640px;">
       Beaten-down stocks the analyst consensus still likes: within {{ nearlow_max_pct_from_low }}% of the
       52-week low, with at least {{ nearlow_min_ratings_count }} analyst ratings of which
       {{ nearlow_min_buy_ratio_pct }}% or more are "buy" or "strong buy". Both conditions are required --
       this is not investment advice, just a starting point for further research. The "Min analysts"
-      filter narrows the table further, client-side, since every candidate already has at least
-      {{ nearlow_min_ratings_count }}. Click "Analyze" on a
+      and "Pre-revenue" filters narrow the table further, client-side, since every candidate already has at least
+      {{ nearlow_min_ratings_count }}. "Pre-revenue" is based on each company's latest annual income
+      statement (via yfinance); a ticker with no income statement available at all is treated as
+      pre-revenue too, since on this screen that almost always means the same thing in practice
+      (too early-stage to have one). Click "Analyze" on a
       candidate for a ~200-word expert take (with a buy-opportunity verdict), then pick which of 8
       independent agents to run (technical / fundamental / news / analyst-ratings-timing / macro /
       SEC filings / social sentiment / price targets) for their own take on it.
@@ -1508,6 +1519,13 @@ PAGE_TEMPLATE = """<!doctype html>
           <option value="7">7 or more</option>
         </select>
       </div>
+      <div><label>Pre-revenue</label><br>
+        <select id="ps-pre-revenue" onchange="renderPennystockTable()">
+          <option value="include" selected>Include</option>
+          <option value="exclude">Exclude</option>
+          <option value="only">Only pre-revenue</option>
+        </select>
+      </div>
       <button class="action" id="ps-run-btn" onclick="runPennystockNow()">Run Now</button>
     </div>
     <p class="muted" style="max-width:640px;">
@@ -1515,7 +1533,9 @@ PAGE_TEMPLATE = """<!doctype html>
       quality filter is imposed here -- most penny stocks have no analyst coverage at all -- so every
       candidate carries three independent columns to judge by instead: analyst buy ratio (when there
       is any), momentum (% from its own 52-week high), and trading volume. Use "Min analysts" to
-      narrow down to more-covered names, client-side. This is not investment
+      narrow down to more-covered names, and "Pre-revenue" to include/exclude/isolate companies with
+      no reported revenue on their latest annual income statement (a ticker with no income statement
+      at all is treated as pre-revenue too), both client-side. This is not investment
       advice, just a starting point for further research. Click "Analyze" on a candidate for a
       ~200-word expert take (with a buy-opportunity verdict), then pick which of 8 independent agents
       to run for their own take on it.
@@ -2434,6 +2454,20 @@ function analystRatingsCount(c) {
   return Object.values(ratings).reduce((sum, n) => sum + (Number(n) || 0), 0);
 }
 
+// is_pre_revenue is true/false/null (null = no income statement available
+// at all via yfinance, treated the same as pre-revenue -- see the
+// screener's _is_pre_revenue for why). "exclude" therefore keeps only
+// candidates with CONFIRMED revenue (is_pre_revenue === false).
+function matchesPreRevenueFilter(c, filterValue) {
+  if (filterValue === "include") return true;
+  const hasConfirmedRevenue = c.is_pre_revenue === false;
+  return filterValue === "exclude" ? hasConfirmedRevenue : !hasConfirmedRevenue;
+}
+
+function preRevenueTag(c) {
+  return c.is_pre_revenue !== false ? ` <span class="muted">(pre-revenue)</span>` : "";
+}
+
 function renderNearlowTable() {
   const body = document.getElementById("nl-body");
   const { field, dir } = nearlowSort;
@@ -2449,9 +2483,10 @@ function renderNearlowTable() {
   }
 
   const minAnalysts = Number(document.getElementById("nl-min-analysts").value);
-  const filtered = nearlowRows.filter(c => analystRatingsCount(c) >= minAnalysts);
+  const preRevenueFilter = document.getElementById("nl-pre-revenue").value;
+  const filtered = nearlowRows.filter(c => analystRatingsCount(c) >= minAnalysts && matchesPreRevenueFilter(c, preRevenueFilter));
   if (filtered.length === 0) {
-    body.innerHTML = `<tr><td colspan="8" class="muted">No candidates with ${minAnalysts}+ analyst ratings. Try a lower "Min analysts" filter.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="8" class="muted">No candidates match the current "Min analysts"/"Pre-revenue" filters.</td></tr>`;
     return;
   }
 
@@ -2477,7 +2512,7 @@ function renderNearlowTable() {
       ? `${c.target_upside_pct >= 0 ? "+" : ""}${fmtNum(c.target_upside_pct, 1)}%`
       : "n/a";
     return `<tr>
-      <td><a class="ticker-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(c.ticker)}" target="_blank" rel="noopener">${c.ticker}</a>${c.name ? ` <span class="muted">(${c.name})</span>` : ""}</td>
+      <td><a class="ticker-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(c.ticker)}" target="_blank" rel="noopener">${c.ticker}</a>${c.name ? ` <span class="muted">(${c.name})</span>` : ""}${preRevenueTag(c)}</td>
       <td>${fmtMoney(c.price)}</td>
       <td class="neg">+${fmtNum(c.pct_from_52w_low, 1)}%</td>
       <td>${c.pct_from_52w_high !== null && c.pct_from_52w_high !== undefined ? fmtNum(c.pct_from_52w_high, 1) + "%" : "n/a"}</td>
@@ -2576,9 +2611,10 @@ function renderPennystockTable() {
   }
 
   const minAnalysts = Number(document.getElementById("ps-min-analysts").value);
-  const filtered = pennystockRows.filter(c => (c.ratings_count || 0) >= minAnalysts);
+  const preRevenueFilter = document.getElementById("ps-pre-revenue").value;
+  const filtered = pennystockRows.filter(c => (c.ratings_count || 0) >= minAnalysts && matchesPreRevenueFilter(c, preRevenueFilter));
   if (filtered.length === 0) {
-    body.innerHTML = `<tr><td colspan="8" class="muted">No candidates with ${minAnalysts}+ analyst ratings. Try a lower "Min analysts" filter.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="8" class="muted">No candidates match the current "Min analysts"/"Pre-revenue" filters.</td></tr>`;
     return;
   }
 
@@ -2606,7 +2642,7 @@ function renderPennystockTable() {
     const lowCell = c.year_low !== null && c.year_low !== undefined
       ? `${fmtMoney(c.year_low)} <span class="muted">(${pctStr(c.pct_from_52w_low)})</span>` : "n/a";
     return `<tr>
-      <td><a class="ticker-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(c.ticker)}" target="_blank" rel="noopener">${c.ticker}</a>${c.name ? ` <span class="muted">(${c.name})</span>` : ""}</td>
+      <td><a class="ticker-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(c.ticker)}" target="_blank" rel="noopener">${c.ticker}</a>${c.name ? ` <span class="muted">(${c.name})</span>` : ""}${preRevenueTag(c)}</td>
       <td>${fmtMoney(c.price)}</td>
       <td>${c.volume !== null && c.volume !== undefined ? Number(c.volume).toLocaleString() : "n/a"}</td>
       <td>${highCell}</td>

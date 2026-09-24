@@ -593,3 +593,114 @@ def test_get_financial_highlights_no_runway_when_cash_flow_positive(monkeypatch)
     highlights = data_mod.get_financial_highlights("ACME")
     assert highlights["free_cash_flow"] == 5_000.0
     assert highlights["cash_runway_quarters"] is None
+
+
+def test_get_financial_highlights_finds_revenue_under_alternate_label(monkeypatch):
+    """Some industries (insurers especially) don't populate yfinance's
+    usual "Total Revenue" line -- real revenue-generating companies
+    should still be recognized as having revenue via the alternates."""
+    income = pd.DataFrame({pd.Timestamp("2026-01-31"): {"Total Revenues": 2_700_000_000.0}})
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def get_income_stmt(self, freq="yearly"):
+            return income
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    highlights = data_mod.get_financial_highlights("ALHC")
+    assert highlights["revenue"] == 2_700_000_000.0
+
+
+# --- get_peer_comparison ---------------------------------------------------
+
+
+def test_get_peer_comparison_returns_none_without_industry(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        @property
+        def info(self):
+            return {"sector": "Healthcare"}  # no "industry" key
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    assert data_mod.get_peer_comparison("ALHC") is None
+
+
+def test_get_peer_comparison_ranks_peers_and_averages_pe(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            self.ticker = ticker
+
+        @property
+        def info(self):
+            if self.ticker == "ALHC":
+                return {"sector": "Healthcare", "industry": "Healthcare Plans", "trailingPE": 18.5}
+            return {"trailingPE": None}  # peer info fallback, not exercised when screen already has it
+
+    captured_query = {}
+
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        captured_query["query"] = query
+        captured_query["sortField"] = sortField
+        return {
+            "quotes": [
+                {"symbol": "ALHC", "shortName": "Alignment Healthcare", "marketCap": 3_000_000_000, "trailingPE": 18.5},
+                {"symbol": "UNH", "shortName": "UnitedHealth Group", "marketCap": 400_000_000_000, "trailingPE": 20.0},
+                {"symbol": "HUM", "shortName": "Humana Inc.", "marketCap": 30_000_000_000, "trailingPE": 24.0},
+                {"symbol": "MOH", "shortName": "Molina Healthcare", "marketCap": 15_000_000_000, "trailingPE": None},
+            ]
+        }
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    monkeypatch.setattr(data_mod.yf, "screen", fake_screen)
+
+    result = data_mod.get_peer_comparison("ALHC", max_peers=5)
+    assert result["industry"] == "Healthcare Plans"
+    assert result["target_pe"] == 18.5
+    peer_tickers = [p["ticker"] for p in result["peers"]]
+    assert "ALHC" not in peer_tickers  # excludes itself
+    assert peer_tickers == ["UNH", "HUM", "MOH"]
+    assert result["peer_avg_pe"] == pytest.approx((20.0 + 24.0) / 2)  # MOH's None excluded from the average
+
+
+def test_get_peer_comparison_caps_at_max_peers(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            self.ticker = ticker
+
+        @property
+        def info(self):
+            return {"industry": "Semiconductors", "trailingPE": 30.0}
+
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        return {"quotes": [{"symbol": f"PEER{i}", "shortName": f"Peer {i}", "marketCap": 1e9, "trailingPE": 15.0} for i in range(10)]}
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    monkeypatch.setattr(data_mod.yf, "screen", fake_screen)
+
+    result = data_mod.get_peer_comparison("ACME", max_peers=5)
+    assert len(result["peers"]) == 5
+
+
+def test_get_peer_comparison_handles_screen_failure(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        @property
+        def info(self):
+            return {"industry": "Semiconductors", "trailingPE": 30.0}
+
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        raise RuntimeError("screener unavailable")
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    monkeypatch.setattr(data_mod.yf, "screen", fake_screen)
+
+    result = data_mod.get_peer_comparison("ACME")
+    assert result["target_pe"] == 30.0
+    assert result["peers"] == []
+    assert result["peer_avg_pe"] is None

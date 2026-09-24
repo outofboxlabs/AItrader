@@ -51,6 +51,31 @@ def _buy_ratio_pct(ratings: dict) -> tuple[Optional[float], int]:
     return buy_like / total * 100.0, int(total)
 
 
+def _is_pre_revenue(t) -> Optional[bool]:
+    """True if the latest annual income statement reports zero/no revenue,
+    False if it reports real revenue, None if no income statement is
+    available via yfinance at all -- which on this app's typical universe
+    (micro-caps, recent IPOs, clinical-stage biotech) usually means the
+    same thing in practice: too early-stage to have one. Callers/the UI
+    filter treat None the same as True for that reason. A separate,
+    cheap call (revenue only) rather than data.get_financial_highlights'
+    fuller balance-sheet/cash-flow pull, which this doesn't need."""
+    try:
+        income = t.get_income_stmt(freq="yearly")
+    except Exception:
+        return None
+    if income is None or income.empty or "Total Revenue" not in income.index:
+        return None
+    latest_col = sorted(income.columns, reverse=True)[0]
+    try:
+        revenue = float(income.loc["Total Revenue", latest_col])
+    except (TypeError, ValueError):
+        return None
+    if revenue != revenue:  # NaN
+        return None
+    return revenue <= 0
+
+
 def _enrich_candidate(
     q: dict, max_pct_from_low: float, min_buy_ratio_pct: float, min_ratings_count: int
 ) -> tuple[Optional[dict], str]:
@@ -97,6 +122,7 @@ def _enrich_candidate(
     target_upside_pct = (mean_target - current_price) / current_price * 100.0 if mean_target else None
 
     pct_from_52w_high = (current_price - year_high) / year_high * 100.0 if year_high else None
+    is_pre_revenue = _is_pre_revenue(t)
 
     candidate = {
         "ticker": ticker,
@@ -111,6 +137,7 @@ def _enrich_candidate(
         "analyst_ratings": ratings,
         "buy_ratio_pct": buy_ratio_pct,
         "market_cap": q.get("marketCap"),
+        "is_pre_revenue": is_pre_revenue,
     }
     # See growth_screener._enrich_candidate for why this round-trip is
     # required: yfinance's dict conversions carry numpy/pandas types that

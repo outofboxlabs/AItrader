@@ -15,6 +15,38 @@ def test_buy_ratio_pct_none_when_no_ratings():
     assert count == 0
 
 
+def test_is_pre_revenue_true_for_confirmed_zero_revenue():
+    import pandas as pd
+
+    income = pd.DataFrame({pd.Timestamp("2026-01-31"): {"Total Revenue": 0.0}})
+
+    class FakeTicker:
+        def get_income_stmt(self, freq="yearly"):
+            return income
+
+    assert ps._is_pre_revenue(FakeTicker()) is True
+
+
+def test_is_pre_revenue_false_for_real_revenue():
+    import pandas as pd
+
+    income = pd.DataFrame({pd.Timestamp("2026-01-31"): {"Total Revenue": 500_000.0}})
+
+    class FakeTicker:
+        def get_income_stmt(self, freq="yearly"):
+            return income
+
+    assert ps._is_pre_revenue(FakeTicker()) is False
+
+
+def test_is_pre_revenue_none_when_statement_unavailable():
+    class FakeTicker:
+        def get_income_stmt(self, freq="yearly"):
+            raise RuntimeError("no data")
+
+    assert ps._is_pre_revenue(FakeTicker()) is None
+
+
 def _fake_ticker_factory(data_by_symbol):
     class FakeFastInfo:
         def __init__(self, year_high, year_low):
@@ -58,6 +90,43 @@ def test_find_pennystock_candidates_includes_candidates_with_no_analyst_coverage
 
     results = ps.find_pennystock_candidates(price_threshold=5.0)
     assert [r["ticker"] for r in results] == ["NOCOVERAGE"]
+    assert results[0]["is_pre_revenue"] is None  # FakeTicker has no get_income_stmt -- degrades gracefully
+
+
+def test_find_pennystock_candidates_reports_is_pre_revenue(monkeypatch):
+    import pandas as pd
+
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        return {"quotes": [{"symbol": "BIOTECH", "shortName": "Biotech Co", "regularMarketPrice": 2.5, "marketCap": 5e7, "regularMarketVolume": 500_000}]}
+
+    income = pd.DataFrame({pd.Timestamp("2026-01-31"): {"Total Revenue": 0.0}})
+
+    class FakeTicker:
+        def __init__(self, symbol):
+            pass
+
+        def get_analyst_price_targets(self):
+            return {}
+
+        def get_recommendations_summary(self, as_dict=False):
+            return {}
+
+        def get_income_stmt(self, freq="yearly"):
+            return income
+
+        @property
+        def fast_info(self):
+            class FakeFastInfo:
+                year_high = 4.0
+                year_low = 1.5
+
+            return FakeFastInfo()
+
+    monkeypatch.setattr(ps.yf, "screen", fake_screen)
+    monkeypatch.setattr(ps.yf, "Ticker", FakeTicker)
+
+    results = ps.find_pennystock_candidates(price_threshold=5.0)
+    assert results[0]["is_pre_revenue"] is True
     assert results[0]["buy_ratio_pct"] is None
     assert results[0]["ratings_count"] == 0
 

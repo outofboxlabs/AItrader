@@ -388,12 +388,22 @@ def _fundamental_lines(ticker: str, context: dict) -> list[str]:
         return lines
 
     lines.append(f"Latest annual financials (fiscal year end {financials.get('fiscal_year_end')}):")
-    if financials.get("revenue") is not None:
+    revenue = financials.get("revenue")
+    if revenue is not None and revenue > 0:
         yoy = financials.get("revenue_yoy_pct")
         yoy_note = f", {yoy:+.1f}% YoY" if yoy is not None else ""
-        lines.append(f"- Revenue: {financials['revenue']:,.0f}{yoy_note}")
+        lines.append(f"- Revenue: {revenue:,.0f}{yoy_note}")
+    elif revenue == 0:
+        # A CONFIRMED $0 on the income statement -- this is the only case
+        # that actually justifies calling the company pre-revenue.
+        lines.append("- Revenue: $0 reported (confirmed pre-revenue).")
     else:
-        lines.append("- Revenue: none reported (pre-revenue).")
+        # revenue is None: the income statement didn't have a usable
+        # revenue line at all (missing statement, unmatched label, NaN).
+        # This is a DATA GAP, not evidence of being pre-revenue -- a real,
+        # revenue-generating company can hit this if yfinance's line-item
+        # labels don't match for its industry (observed with an insurer).
+        lines.append("- Revenue: not available (income statement data incomplete for this ticker -- this does NOT by itself mean pre-revenue).")
     if financials.get("net_income") is not None:
         lines.append(f"- Net income: {financials['net_income']:,.0f}")
     if financials.get("gross_margin_pct") is not None:
@@ -412,6 +422,27 @@ def _fundamental_lines(ticker: str, context: dict) -> list[str]:
         change = financials.get("shares_outstanding_yoy_pct")
         change_note = f", {change:+.1f}% YoY" if change is not None else ""
         lines.append(f"- Shares outstanding: {financials['shares_outstanding']:,.0f}{change_note}")
+
+    peer_comparison = context.get("peer_comparison")
+    lines.append("")
+    if not peer_comparison:
+        lines.append("Peer/industry P/E comparison: not available for this ticker.")
+        return lines
+
+    lines.append(f"Valuation vs. industry ({peer_comparison.get('industry')}):")
+    target_pe = peer_comparison.get("target_pe")
+    lines.append(f"- This company's trailing P/E: {target_pe:.1f}" if target_pe is not None else "- This company's trailing P/E: not available (likely unprofitable -- P/E is meaningless for a company with no earnings).")
+    peer_avg_pe = peer_comparison.get("peer_avg_pe")
+    if peer_avg_pe is not None:
+        lines.append(f"- Average trailing P/E of the {len(peer_comparison.get('peers') or [])} largest same-industry peers below: {peer_avg_pe:.1f}")
+    peers = peer_comparison.get("peers") or []
+    if peers:
+        lines.append("- Largest same-industry peers by market cap (yfinance's industry classification, not a curated competitor list):")
+        for p in peers:
+            pe_str = f"P/E {p['pe']:.1f}" if p.get("pe") is not None else "P/E n/a"
+            lines.append(f"  - {p.get('ticker')} ({p.get('name') or 'n/a'}): {pe_str}")
+    else:
+        lines.append("- No same-industry peers with usable data found.")
     return lines
 
 
@@ -568,24 +599,46 @@ Respond with ONLY a JSON object, no other text: \
     "fundamental": (
         "Fundamental Analyst",
         """You are a fundamental analyst. Assess this company using ONLY its \
-own reported financial statements: revenue and its growth trend, \
-profitability (net income, gross margin), cash and debt on the balance \
-sheet, operating/free cash flow, the estimated cash runway at the current \
-burn rate, and the share-count trend (rising share count signals \
-dilution). You do NOT have access to analyst price targets or ratings, \
-and must not reason from them, guess at them, or mention them -- that is \
-a different analyst's job on this panel; yours is the underlying \
-business, not what Wall Street thinks it's worth. Many small/micro-cap \
-names (biotech and other pre-revenue companies especially) legitimately \
-report zero revenue -- treat that as a real data point about the business \
-stage, not a gap to talk around, and weigh cash runway and dilution more \
-heavily than revenue for names like that. Give a short (60-100 word) \
-fundamental-only read on the company's financial health and what would \
-need to be true of the BUSINESS ITSELF (e.g. a revenue inflection, an \
-extended runway, improving margins) to strengthen it. If no financial \
-statements are available at all, say so plainly and use "neutral" -- \
-don't invent figures or fall back on price/valuation reasoning when there \
-is nothing fundamental to go on. Never say to buy, sell, or hold.
+own reported financial statements and valuation data given below: revenue \
+and its growth trend, profitability (net income, gross margin), cash and \
+debt on the balance sheet, operating/free cash flow, the estimated cash \
+runway at the current burn rate, the share-count trend (rising share \
+count signals dilution), and trailing P/E versus the average P/E of the \
+largest same-industry peers also given. You do NOT have access to analyst \
+price targets or ratings, and must not reason from them, guess at them, \
+or mention them -- that is a different analyst's job on this panel; yours \
+is the underlying business and its valuation against real peers, not what \
+Wall Street's target price implies.
+
+Revenue reported as a confirmed $0 means the company is genuinely \
+pre-revenue -- treat that as a real data point about the business stage, \
+say so explicitly, and weigh cash runway and dilution more heavily than \
+revenue for it: state the actual cash runway figure if given (e.g. "~6 \
+quarters of runway at the current burn rate") rather than vaguely saying \
+runway "should be assessed" -- you have the number, use it. You do not \
+know and must not guess a specific revenue-generation date (no earnings \
+guidance is given to you) -- instead say plainly what the runway implies \
+(e.g. whether it likely covers any near-term catalysts) and what would \
+need to change (financing, cost cuts, a revenue inflection) to extend it. \
+Revenue reported as "not available" is a different thing: a DATA GAP, not \
+evidence of being pre-revenue -- a real, revenue-generating company can \
+show this if the statement's line-item labels didn't match. Never call a \
+company pre-revenue on the basis of missing data alone.
+
+For P/E: if this company's own trailing P/E and the peer average are both \
+given, say explicitly whether it trades at a premium or discount to \
+peers and by roughly how much -- naming at least one or two of the peer \
+tickers. If this company's P/E isn't available (typically because it's \
+unprofitable), say so rather than comparing anyway.
+
+Give a short (70-110 word) fundamental-only read covering both the \
+balance-sheet health and the valuation-vs-peers comparison, and what \
+would need to be true of the BUSINESS ITSELF (e.g. a revenue inflection, \
+an extended runway, improving margins, a re-rating toward peer multiples) \
+to strengthen it. If no financial statements are available at all, say so \
+plainly and use "neutral" -- don't invent figures or fall back on price/ \
+valuation-target reasoning when there is nothing fundamental to go on. \
+Never say to buy, sell, or hold.
 
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",

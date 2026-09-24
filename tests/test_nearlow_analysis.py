@@ -604,7 +604,7 @@ def test_fundamental_lines_never_mentions_analyst_target_or_ratings():
 def test_fundamental_lines_reports_balance_sheet_and_cash_flow_fields():
     financials = {
         "fiscal_year_end": "2026-01-31",
-        "revenue": None,
+        "revenue": 0,
         "revenue_yoy_pct": None,
         "net_income": None,
         "gross_margin_pct": None,
@@ -618,9 +618,58 @@ def test_fundamental_lines_reports_balance_sheet_and_cash_flow_fields():
     }
     lines = nla._fundamental_lines("ACME", _context(financials=financials))
     text = " ".join(lines)
-    assert "none reported (pre-revenue)" in text
+    assert "$0 reported (confirmed pre-revenue)" in text
     assert "Cash & equivalents: 40,000,000" in text
     assert "Total debt: 5,000,000" in text
     assert "Free cash flow (annual): -20,000,000" in text
     assert "cash runway at current burn rate: 8.0 quarters" in text
     assert "Shares outstanding: 110,000,000, +10.0% YoY" in text
+
+
+def test_fundamental_lines_never_calls_missing_revenue_pre_revenue():
+    """Regression guard for the exact bug a user hit live: a real,
+    revenue-generating company (a health insurer) got called
+    "pre-revenue" because its income statement didn't have a "Total
+    Revenue" line yfinance recognized -- i.e. missing DATA, not a
+    confirmed $0. Only a confirmed 0 may be called pre-revenue."""
+    financials = {"fiscal_year_end": "2026-01-31", "revenue": None, "net_income": 500_000_000.0}
+    lines = nla._fundamental_lines("ALHC", _context(financials=financials))
+    text = " ".join(lines)
+    assert "confirmed pre-revenue" not in text.lower()
+    assert "not available" in text
+    assert "does NOT by itself mean pre-revenue" in text
+
+
+def test_fundamental_lines_reports_positive_revenue_normally():
+    financials = {"fiscal_year_end": "2026-01-31", "revenue": 2_700_000_000.0, "revenue_yoy_pct": 15.0}
+    lines = nla._fundamental_lines("ALHC", _context(financials=financials))
+    text = " ".join(lines)
+    assert "Revenue: 2,700,000,000, +15.0% YoY" in text
+    assert "pre-revenue" not in text.lower()
+
+
+def test_fundamental_lines_reports_peer_comparison_when_available():
+    financials = {"fiscal_year_end": "2026-01-31", "revenue": 2_700_000_000.0}
+    peer_comparison = {
+        "sector": "Healthcare",
+        "industry": "Healthcare Plans",
+        "target_pe": 18.5,
+        "peer_avg_pe": 22.0,
+        "peers": [
+            {"ticker": "UNH", "name": "UnitedHealth Group", "market_cap": 400_000_000_000, "pe": 20.0},
+            {"ticker": "HUM", "name": "Humana Inc.", "market_cap": 30_000_000_000, "pe": 24.0},
+        ],
+    }
+    lines = nla._fundamental_lines("ALHC", _context(financials=financials, peer_comparison=peer_comparison))
+    text = " ".join(lines)
+    assert "Healthcare Plans" in text
+    assert "trailing P/E: 18.5" in text
+    assert "Average trailing P/E of the 2 largest same-industry peers" in text
+    assert "UNH (UnitedHealth Group): P/E 20.0" in text
+    assert "HUM (Humana Inc.): P/E 24.0" in text
+
+
+def test_fundamental_lines_reports_when_peer_comparison_unavailable():
+    financials = {"fiscal_year_end": "2026-01-31", "revenue": 2_700_000_000.0}
+    lines = nla._fundamental_lines("ALHC", _context(financials=financials, peer_comparison=None))
+    assert any("Peer/industry P/E comparison: not available" in line for line in lines)

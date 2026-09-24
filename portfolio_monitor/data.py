@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import yfinance as yf
+from yfinance import EquityQuery
 
 
 @dataclass
@@ -403,8 +404,13 @@ def get_financial_highlights(ticker: str) -> Optional[dict]:
 
     fiscal_year_end = (income_col or balance_col or cashflow_col)
 
-    latest_revenue = _value(income, ["Total Revenue"], income_col)
-    prior_revenue = _value(income, ["Total Revenue"], income_prior_col)
+    # "Total Revenue" is yfinance's usual normalized line, but some
+    # industries (insurers especially) present revenue under a different
+    # GAAP line item that doesn't always get normalized into it -- try
+    # the alternates before concluding revenue truly isn't reported.
+    revenue_labels = ["Total Revenue", "Total Revenues", "Operating Revenue"]
+    latest_revenue = _value(income, revenue_labels, income_col)
+    prior_revenue = _value(income, revenue_labels, income_prior_col)
     latest_net_income = _value(income, ["Net Income"], income_col)
     latest_gross_profit = _value(income, ["Gross Profit"], income_col)
 
@@ -447,6 +453,62 @@ def get_financial_highlights(ticker: str) -> Optional[dict]:
         ),
     }
     return json.loads(json.dumps(highlights, default=str))
+
+
+def get_peer_comparison(ticker: str, max_peers: int = 5) -> Optional[dict]:
+    """This ticker's trailing P/E next to up to `max_peers` other US-listed
+    companies yfinance classifies under the same industry, ranked by
+    market cap -- the closest free proxy to "top competitors", since
+    yfinance has no actual competitor/peer-list endpoint. Also returns
+    the average trailing P/E across those peers as an industry-average
+    proxy. Returns None if the ticker's own industry classification isn't
+    available at all (some tickers -- ETFs, ADRs, very new listings --
+    don't have one via yfinance's .info)."""
+    t = yf.Ticker(ticker)
+    try:
+        info = t.info or {}
+    except Exception:
+        return None
+
+    industry = info.get("industry")
+    if not industry:
+        return None
+    sector = info.get("sector")
+    target_pe = info.get("trailingPE")
+
+    try:
+        query = EquityQuery("AND", [EquityQuery("EQ", ["region", "us"]), EquityQuery("EQ", ["industry", industry])])
+        response = yf.screen(query, sortField="intradaymarketcap", sortAsc=False, size=max_peers + 5)
+        quotes = response.get("quotes", []) if response else []
+    except Exception:
+        quotes = []
+
+    peers = []
+    for q in quotes:
+        peer_ticker = q.get("symbol")
+        if not peer_ticker or peer_ticker == ticker:
+            continue
+        pe = q.get("trailingPE")
+        if not isinstance(pe, numbers.Real):
+            try:
+                pe = yf.Ticker(peer_ticker).info.get("trailingPE")
+            except Exception:
+                pe = None
+        peers.append({"ticker": peer_ticker, "name": q.get("shortName") or q.get("longName"), "market_cap": q.get("marketCap"), "pe": pe})
+        if len(peers) >= max_peers:
+            break
+
+    valid_pes = [p["pe"] for p in peers if isinstance(p["pe"], numbers.Real) and p["pe"] > 0]
+    peer_avg_pe = sum(valid_pes) / len(valid_pes) if valid_pes else None
+
+    result = {
+        "sector": sector,
+        "industry": industry,
+        "target_pe": target_pe if isinstance(target_pe, numbers.Real) else None,
+        "peers": peers,
+        "peer_avg_pe": peer_avg_pe,
+    }
+    return json.loads(json.dumps(result, default=str))
 
 
 def find_quote(chain: dict, expiry: str, option_type: str, strike: float) -> Optional[Quote]:

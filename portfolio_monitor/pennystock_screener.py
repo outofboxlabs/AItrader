@@ -49,6 +49,26 @@ def _buy_ratio_pct(ratings: dict) -> tuple[Optional[float], int]:
     return buy_like / total * 100.0, int(total)
 
 
+def _is_pre_revenue(t) -> Optional[bool]:
+    """Same as nearlow_screener._is_pre_revenue -- see there for why this
+    is duplicated rather than shared, and why None is treated the same
+    as True by callers/the UI filter."""
+    try:
+        income = t.get_income_stmt(freq="yearly")
+    except Exception:
+        return None
+    if income is None or income.empty or "Total Revenue" not in income.index:
+        return None
+    latest_col = sorted(income.columns, reverse=True)[0]
+    try:
+        revenue = float(income.loc["Total Revenue", latest_col])
+    except (TypeError, ValueError):
+        return None
+    if revenue != revenue:  # NaN
+        return None
+    return revenue <= 0
+
+
 def _enrich_candidate(q: dict) -> tuple[Optional[dict], str]:
     """Fetch one candidate's 52-week range, volume, and (if any) analyst
     data -- no hard filter beyond what the EquityQuery pool already
@@ -87,6 +107,7 @@ def _enrich_candidate(q: dict) -> tuple[Optional[dict], str]:
     except Exception:
         mean_target = None
     target_upside_pct = (mean_target - current_price) / current_price * 100.0 if mean_target else None
+    is_pre_revenue = _is_pre_revenue(t)
 
     candidate = {
         "ticker": ticker,
@@ -103,6 +124,7 @@ def _enrich_candidate(q: dict) -> tuple[Optional[dict], str]:
         "buy_ratio_pct": buy_ratio_pct,
         "ratings_count": ratings_count,
         "market_cap": q.get("marketCap"),
+        "is_pre_revenue": is_pre_revenue,
     }
     # Same round-trip as the other screeners -- yfinance's dict
     # conversions carry numpy/pandas types that json.dumps chokes on
