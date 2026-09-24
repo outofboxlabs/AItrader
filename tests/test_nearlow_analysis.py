@@ -757,6 +757,28 @@ def test_fundamental_lines_reports_peer_comparison_when_available():
     assert "HUM (Humana Inc.): P/E 24.0" in text
 
 
+def test_fundamental_lines_labels_sector_fallback_peers_correctly():
+    """Live case: a narrowly-classified company (WeRide, autonomous
+    driving) can have zero same-industry peers in yfinance's own
+    taxonomy -- get_peer_comparison falls back to the broader sector
+    (see data.get_peer_comparison), and this text must say "same-sector",
+    not misreport it as "same-industry"."""
+    financials = {"fiscal_year_end": "2026-01-31", "revenue": 830_830_000.0}
+    peer_comparison = {
+        "sector": "Technology",
+        "industry": "Software—Application",
+        "peer_group": "sector",
+        "target_pe": -7.6,
+        "peer_avg_pe": None,
+        "peers": [{"ticker": "PONY", "name": "Pony AI Inc.", "market_cap": 8_000_000_000, "pe": None}],
+    }
+    lines = nla._fundamental_lines("WRD", _context(financials=financials, peer_comparison=peer_comparison))
+    text = " ".join(lines)
+    assert "same-sector peers" in text
+    assert "same-industry peers" not in text
+    assert "PONY (Pony AI Inc.)" in text
+
+
 def test_fundamental_lines_reports_when_peer_comparison_unavailable():
     financials = {"fiscal_year_end": "2026-01-31", "revenue": 2_700_000_000.0}
     lines = nla._fundamental_lines("ALHC", _context(financials=financials, peer_comparison=None))

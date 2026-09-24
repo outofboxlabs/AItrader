@@ -721,6 +721,7 @@ def test_get_peer_comparison_ranks_peers_and_averages_pe(monkeypatch):
     result = data_mod.get_peer_comparison("ALHC", max_peers=5)
     assert result["industry"] == "Healthcare Plans"
     assert result["target_pe"] == 18.5
+    assert result["peer_group"] == "industry"
     peer_tickers = [p["ticker"] for p in result["peers"]]
     assert "ALHC" not in peer_tickers  # excludes itself
     assert peer_tickers == ["UNH", "HUM", "MOH"]
@@ -765,3 +766,58 @@ def test_get_peer_comparison_handles_screen_failure(monkeypatch):
     assert result["target_pe"] == 30.0
     assert result["peers"] == []
     assert result["peer_avg_pe"] is None
+    assert result["peer_group"] is None
+
+
+def test_get_peer_comparison_falls_back_to_sector_when_industry_has_no_peers(monkeypatch):
+    """Live case: WeRide (an autonomous-driving company) had zero
+    same-industry peers via yfinance's own taxonomy even though a real
+    comparable (Pony AI) exists one level up, under the broader sector.
+    Falling back to sector means a narrowly-classified ticker still gets
+    a usable comparison instead of "no peers available"."""
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        @property
+        def info(self):
+            return {"industry": "Software—Application", "sector": "Technology", "trailingPE": None}
+
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        # The industry-level query returns nothing; the sector-level one does.
+        field, value = query.operands[1].operands
+        if field == "industry":
+            return {"quotes": []}
+        assert field == "sector" and value == "Technology"
+        return {
+            "quotes": [
+                {"symbol": "PONY", "shortName": "Pony AI Inc.", "marketCap": 8_000_000_000, "trailingPE": None},
+            ]
+        }
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    monkeypatch.setattr(data_mod.yf, "screen", fake_screen)
+
+    result = data_mod.get_peer_comparison("WRD")
+    assert result["peer_group"] == "sector"
+    assert [p["ticker"] for p in result["peers"]] == ["PONY"]
+
+
+def test_get_peer_comparison_peer_group_none_when_no_sector_either(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        @property
+        def info(self):
+            return {"industry": "Software—Application", "trailingPE": None}  # no sector at all
+
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        return {"quotes": []}
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    monkeypatch.setattr(data_mod.yf, "screen", fake_screen)
+
+    result = data_mod.get_peer_comparison("WRD")
+    assert result["peer_group"] is None
+    assert result["peers"] == []

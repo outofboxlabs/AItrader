@@ -511,17 +511,28 @@ def _fundamental_lines(ticker: str, context: dict) -> list[str]:
     lines.append(f"Valuation vs. industry ({peer_comparison.get('industry')}):")
     target_pe = peer_comparison.get("target_pe")
     lines.append(f"- This company's trailing P/E: {target_pe:.1f}" if target_pe is not None else "- This company's trailing P/E: not available (likely unprofitable -- P/E is meaningless for a company with no earnings).")
+    # peer_group is "industry", "sector", or None: get_peer_comparison
+    # falls back from an exact industry match to the broader sector when
+    # the industry is too narrow/uncommon to have other real constituents
+    # in yfinance's own taxonomy (seen live: WeRide, an autonomous-
+    # driving company, had zero same-industry peers even though a real
+    # comparable -- Pony AI -- exists one level up). Label peers by
+    # whichever level actually produced them so this doesn't get
+    # misreported as "same-industry" when it's really "same-sector".
+    peer_group = peer_comparison.get("peer_group")
+    peer_label = "same-industry" if peer_group == "industry" else "same-sector" if peer_group == "sector" else "same-industry"
     peer_avg_pe = peer_comparison.get("peer_avg_pe")
     if peer_avg_pe is not None:
-        lines.append(f"- Average trailing P/E of the {len(peer_comparison.get('peers') or [])} largest same-industry peers below: {peer_avg_pe:.1f}")
+        lines.append(f"- Average trailing P/E of the {len(peer_comparison.get('peers') or [])} largest {peer_label} peers below: {peer_avg_pe:.1f}")
     peers = peer_comparison.get("peers") or []
     if peers:
-        lines.append("- Largest same-industry peers by market cap (yfinance's industry classification, not a curated competitor list):")
+        note = "yfinance's industry classification" if peer_group == "industry" else "no peers exist under the exact industry classification, so this is the broader sector instead"
+        lines.append(f"- Largest {peer_label} peers by market cap ({note}, not a curated competitor list):")
         for p in peers:
             pe_str = f"P/E {p['pe']:.1f}" if p.get("pe") is not None else "P/E n/a"
             lines.append(f"  - {p.get('ticker')} ({p.get('name') or 'n/a'}): {pe_str}")
     else:
-        lines.append("- No same-industry peers with usable data found.")
+        lines.append("- No same-industry or same-sector peers with usable data found.")
     return lines
 
 

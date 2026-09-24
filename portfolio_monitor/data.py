@@ -486,6 +486,34 @@ def _compute_trailing_pe(info: dict) -> Optional[float]:
     return None
 
 
+def _find_peers(ticker: str, field: str, value: str, max_peers: int) -> list[dict]:
+    """Same-`field`-value peers (by market cap, US-listed), excluding the
+    ticker itself. `field` is "industry" or "sector" -- see
+    get_peer_comparison for why both get tried."""
+    try:
+        query = EquityQuery("AND", [EquityQuery("EQ", ["region", "us"]), EquityQuery("EQ", [field, value])])
+        response = yf.screen(query, sortField="intradaymarketcap", sortAsc=False, size=max_peers + 5)
+        quotes = response.get("quotes", []) if response else []
+    except Exception:
+        quotes = []
+
+    peers = []
+    for q in quotes:
+        peer_ticker = q.get("symbol")
+        if not peer_ticker or peer_ticker == ticker:
+            continue
+        pe = q.get("trailingPE")
+        if not isinstance(pe, numbers.Real):
+            try:
+                pe = _compute_trailing_pe(yf.Ticker(peer_ticker).info or {})
+            except Exception:
+                pe = None
+        peers.append({"ticker": peer_ticker, "name": q.get("shortName") or q.get("longName"), "market_cap": q.get("marketCap"), "pe": pe})
+        if len(peers) >= max_peers:
+            break
+    return peers
+
+
 def get_peer_comparison(ticker: str, max_peers: int = 5) -> Optional[dict]:
     """This ticker's trailing P/E next to up to `max_peers` other US-listed
     companies yfinance classifies under the same industry, ranked by
@@ -507,33 +535,27 @@ def get_peer_comparison(ticker: str, max_peers: int = 5) -> Optional[dict]:
     sector = info.get("sector")
     target_pe = _compute_trailing_pe(info)
 
-    try:
-        query = EquityQuery("AND", [EquityQuery("EQ", ["region", "us"]), EquityQuery("EQ", ["industry", industry])])
-        response = yf.screen(query, sortField="intradaymarketcap", sortAsc=False, size=max_peers + 5)
-        quotes = response.get("quotes", []) if response else []
-    except Exception:
-        quotes = []
-
-    peers = []
-    for q in quotes:
-        peer_ticker = q.get("symbol")
-        if not peer_ticker or peer_ticker == ticker:
-            continue
-        pe = q.get("trailingPE")
-        if not isinstance(pe, numbers.Real):
-            try:
-                pe = _compute_trailing_pe(yf.Ticker(peer_ticker).info or {})
-            except Exception:
-                pe = None
-        peers.append({"ticker": peer_ticker, "name": q.get("shortName") or q.get("longName"), "market_cap": q.get("marketCap"), "pe": pe})
-        if len(peers) >= max_peers:
-            break
+    peers = _find_peers(ticker, "industry", industry, max_peers)
+    peer_group = "industry" if peers else None
+    if not peers and sector:
+        # A narrow/uncommon industry classification -- a niche, recently
+        # listed company (confirmed live: WeRide/WRD, an autonomous-
+        # driving company) -- can have zero OTHER constituents under that
+        # exact industry string in yfinance's own taxonomy, even though a
+        # real comparable exists one level up (e.g. Pony AI/PONY, also
+        # autonomous driving, just not tagged with the identical industry
+        # label). Falling back to the broader sector means a narrowly-
+        # classified ticker still gets a usable comparison instead of
+        # just "no peers available".
+        peers = _find_peers(ticker, "sector", sector, max_peers)
+        peer_group = "sector" if peers else None
 
     valid_pes = [p["pe"] for p in peers if isinstance(p["pe"], numbers.Real) and p["pe"] > 0]
     peer_avg_pe = sum(valid_pes) / len(valid_pes) if valid_pes else None
 
     result = {
         "sector": sector,
+        "peer_group": peer_group,
         "industry": industry,
         "target_pe": target_pe if isinstance(target_pe, numbers.Real) else None,
         "peers": peers,
