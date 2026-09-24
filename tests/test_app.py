@@ -376,6 +376,72 @@ def test_run_nearlow_now_handles_screener_failure(client, monkeypatch):
     assert "error" in res.get_json()
 
 
+def _seed_nearlow_run(candidates):
+    app_mod.db_mod.init_db(app_mod.config.DB_PATH)
+    with app_mod.db_mod.connect(app_mod.config.DB_PATH) as conn:
+        app_mod.db_mod.save_nearlow_candidates(conn, date.today().isoformat(), candidates)
+
+
+def test_check_nearlow_pre_revenue_requires_saved_scan(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    res = client.post("/api/nearlow/check-pre-revenue")
+    assert res.status_code == 400
+    assert "Run the screen first" in res.get_json()["error"]
+
+
+def test_check_nearlow_pre_revenue_requires_api_key(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: None)
+    _seed_nearlow_run([{"ticker": "OKLO", "name": "Oklo Inc."}])
+    res = client.post("/api/nearlow/check-pre-revenue")
+    assert res.status_code == 400
+    assert "API key" in res.get_json()["error"]
+
+
+def test_check_nearlow_pre_revenue_classifies_and_persists(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
+    _seed_nearlow_run([{"ticker": "OKLO", "name": "Oklo Inc."}, {"ticker": "ALHC", "name": "Alignment Healthcare"}])
+
+    def fake_classify(ticker, name, financials, provider, model, api_key=None):
+        return {"is_pre_revenue": ticker == "OKLO", "reason": f"reason for {ticker}"}
+
+    monkeypatch.setattr(app_mod.nearlow_analysis, "classify_pre_revenue", fake_classify)
+
+    res = client.post("/api/nearlow/check-pre-revenue")
+    assert res.status_code == 200
+    data = res.get_json()
+    by_ticker = {c["ticker"]: c for c in data["candidates"]}
+    assert by_ticker["OKLO"]["is_pre_revenue"] is True
+    assert by_ticker["OKLO"]["is_pre_revenue_reason"] == "reason for OKLO"
+    assert by_ticker["ALHC"]["is_pre_revenue"] is False
+
+    # Persisted -- a fresh GET reads the AI-corrected values back, not undefined/stale.
+    res2 = client.get("/api/nearlow")
+    by_ticker2 = {c["ticker"]: c for c in res2.get_json()["candidates"]}
+    assert by_ticker2["OKLO"]["is_pre_revenue"] is True
+    assert by_ticker2["ALHC"]["is_pre_revenue"] is False
+
+
+def test_check_nearlow_pre_revenue_isolates_one_ticker_failure(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
+    _seed_nearlow_run([{"ticker": "GOOD", "name": "Good Co"}, {"ticker": "BAD", "name": "Bad Co"}])
+
+    def fake_classify(ticker, name, financials, provider, model, api_key=None):
+        if ticker == "BAD":
+            raise RuntimeError("rate limited")
+        return {"is_pre_revenue": False, "reason": "has revenue"}
+
+    monkeypatch.setattr(app_mod.nearlow_analysis, "classify_pre_revenue", fake_classify)
+
+    res = client.post("/api/nearlow/check-pre-revenue")
+    assert res.status_code == 200
+    by_ticker = {c["ticker"]: c for c in res.get_json()["candidates"]}
+    assert by_ticker["GOOD"]["is_pre_revenue"] is False
+    assert by_ticker["BAD"]["is_pre_revenue"] is None
+    assert "AI check failed" in by_ticker["BAD"]["is_pre_revenue_reason"]
+
+
 # --- penny stock screener -------------------------------------------------
 
 
@@ -458,6 +524,44 @@ def test_run_pennystock_now_handles_screener_failure(client, monkeypatch):
     res = client.post("/api/pennystock/run", data=json.dumps({"threshold": "5"}), content_type="application/json")
     assert res.status_code == 502
     assert "error" in res.get_json()
+
+
+def _seed_pennystock_run(threshold, candidates):
+    app_mod.db_mod.init_db(app_mod.config.DB_PATH)
+    with app_mod.db_mod.connect(app_mod.config.DB_PATH) as conn:
+        app_mod.db_mod.save_pennystock_candidates(conn, date.today().isoformat(), threshold, candidates)
+
+
+def test_check_pennystock_pre_revenue_rejects_unknown_threshold(client):
+    res = client.post("/api/pennystock/check-pre-revenue", data=json.dumps({"threshold": "100"}), content_type="application/json")
+    assert res.status_code == 400
+
+
+def test_check_pennystock_pre_revenue_requires_saved_scan(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    res = client.post("/api/pennystock/check-pre-revenue", data=json.dumps({"threshold": "5"}), content_type="application/json")
+    assert res.status_code == 400
+    assert "Run the screen first" in res.get_json()["error"]
+
+
+def test_check_pennystock_pre_revenue_classifies_and_persists(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
+    _seed_pennystock_run("5", [{"ticker": "OKLO", "name": "Oklo Inc."}])
+
+    monkeypatch.setattr(
+        app_mod.nearlow_analysis,
+        "classify_pre_revenue",
+        lambda ticker, name, financials, provider, model, api_key=None: {"is_pre_revenue": True, "reason": "no commercial revenue yet"},
+    )
+
+    res = client.post("/api/pennystock/check-pre-revenue", data=json.dumps({"threshold": "5"}), content_type="application/json")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["candidates"][0]["is_pre_revenue"] is True
+
+    res2 = client.get("/api/pennystock?threshold=5")
+    assert res2.get_json()["candidates"][0]["is_pre_revenue"] is True
 
 
 # --- watchlist / Potential Portfolio ---------------------------------------

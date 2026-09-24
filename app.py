@@ -21,6 +21,7 @@ import shutil
 import threading
 import traceback
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
@@ -339,6 +340,49 @@ def run_nearlow_now():
     return jsonify({"asof_date": date.today().isoformat(), "candidates": candidates})
 
 
+@app.route("/api/nearlow/check-pre-revenue", methods=["POST"])
+def check_nearlow_pre_revenue():
+    """On-demand AI re-classification of is_pre_revenue for the CURRENT
+    Near 52W Low results -- deliberately separate from Run Now (which
+    stays free/fast/no-API-key): the screener's own numeric heuristic off
+    yfinance's revenue data has been wrong in both directions in live use
+    (see nearlow_analysis.classify_pre_revenue), so this makes one small,
+    explicit AI call per candidate to double-check using the model's own
+    knowledge, and persists the result so it survives a reload."""
+    body = request.get_json(silent=True) or {}
+    requested_provider = body.get("provider")
+    if requested_provider and requested_provider not in PROVIDERS:
+        return jsonify({"error": f"unknown provider {requested_provider!r}"}), 400
+    provider, api_key = _resolve_forex_analysis_provider(requested_provider)
+    if not api_key:
+        return jsonify({"error": "No saved API key for any provider. Add one in the Settings tab first."}), 400
+    model = body.get("model") or NEWS_DEFAULT_MODEL[provider]
+
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        latest_date = db_mod.get_latest_nearlow_candidates_date(conn)
+        if not latest_date:
+            return jsonify({"error": "No Near 52W Low results yet. Run the screen first."}), 400
+        candidates = db_mod.get_nearlow_candidates(conn, latest_date)
+
+    def _classify(c):
+        try:
+            financials = data.get_financial_highlights(c["ticker"])
+            result = nearlow_analysis.classify_pre_revenue(c["ticker"], c.get("name"), financials, provider, model, api_key=api_key)
+        except Exception as exc:
+            result = {"is_pre_revenue": None, "reason": f"AI check failed: {exc}"}
+        c["is_pre_revenue"] = result.get("is_pre_revenue")
+        c["is_pre_revenue_reason"] = result.get("reason")
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        list(executor.map(_classify, candidates))
+
+    with db_mod.connect(config.DB_PATH) as conn:
+        db_mod.save_nearlow_candidates(conn, latest_date, candidates)
+
+    return jsonify({"asof_date": latest_date, "candidates": candidates})
+
+
 # --- Penny stock screener (Penny Stocks tab) ----------------------------
 
 
@@ -392,6 +436,48 @@ def run_pennystock_now():
         traceback.print_exc()
         return jsonify({"error": str(exc)}), 502
     return jsonify({"asof_date": date.today().isoformat(), "threshold": threshold_key, "candidates": candidates})
+
+
+@app.route("/api/pennystock/check-pre-revenue", methods=["POST"])
+def check_pennystock_pre_revenue():
+    """Same as check_nearlow_pre_revenue, for the current Penny Stocks
+    results at the given threshold."""
+    body = request.get_json(silent=True) or {}
+    threshold_key = _pennystock_threshold_key(body.get("threshold"))
+    if threshold_key is None:
+        return jsonify({"error": f"threshold must be one of {sorted(config.PENNYSTOCK_THRESHOLDS)}"}), 400
+
+    requested_provider = body.get("provider")
+    if requested_provider and requested_provider not in PROVIDERS:
+        return jsonify({"error": f"unknown provider {requested_provider!r}"}), 400
+    provider, api_key = _resolve_forex_analysis_provider(requested_provider)
+    if not api_key:
+        return jsonify({"error": "No saved API key for any provider. Add one in the Settings tab first."}), 400
+    model = body.get("model") or NEWS_DEFAULT_MODEL[provider]
+
+    db_mod.init_db(config.DB_PATH)
+    with db_mod.connect(config.DB_PATH) as conn:
+        latest_date = db_mod.get_latest_pennystock_candidates_date(conn, threshold_key)
+        if not latest_date:
+            return jsonify({"error": "No Penny Stocks results yet. Run the screen first."}), 400
+        candidates = db_mod.get_pennystock_candidates(conn, latest_date, threshold_key)
+
+    def _classify(c):
+        try:
+            financials = data.get_financial_highlights(c["ticker"])
+            result = nearlow_analysis.classify_pre_revenue(c["ticker"], c.get("name"), financials, provider, model, api_key=api_key)
+        except Exception as exc:
+            result = {"is_pre_revenue": None, "reason": f"AI check failed: {exc}"}
+        c["is_pre_revenue"] = result.get("is_pre_revenue")
+        c["is_pre_revenue_reason"] = result.get("reason")
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        list(executor.map(_classify, candidates))
+
+    with db_mod.connect(config.DB_PATH) as conn:
+        db_mod.save_pennystock_candidates(conn, latest_date, threshold_key, candidates)
+
+    return jsonify({"asof_date": latest_date, "threshold": threshold_key, "candidates": candidates})
 
 
 # --- Potential Portfolio (watchlist bundle, built from any screen) -----
@@ -1470,17 +1556,20 @@ PAGE_TEMPLATE = """<!doctype html>
           <option value="only">Only pre-revenue</option>
         </select>
       </div>
+      <button class="secondary" id="nl-check-pre-revenue-btn" onclick="checkNearlowPreRevenue()">Check pre-revenue (AI)</button>
     </div>
+    <div id="nl-pre-revenue-status" class="muted"></div>
     <p class="muted" style="max-width:640px;">
       Beaten-down stocks the analyst consensus still likes: within {{ nearlow_max_pct_from_low }}% of the
       52-week low, with at least {{ nearlow_min_ratings_count }} analyst ratings of which
       {{ nearlow_min_buy_ratio_pct }}% or more are "buy" or "strong buy". Both conditions are required --
       this is not investment advice, just a starting point for further research. The "Min analysts"
       and "Pre-revenue" filters narrow the table further, client-side, since every candidate already has at least
-      {{ nearlow_min_ratings_count }}. "Pre-revenue" is based on each company's latest annual income
-      statement (via yfinance); a ticker with no income statement available at all is treated as
-      pre-revenue too, since on this screen that almost always means the same thing in practice
-      (too early-stage to have one). Click "Analyze" on a
+      {{ nearlow_min_ratings_count }}. "Pre-revenue" defaults to each company's latest annual revenue figure
+      (via yfinance), which can be wrong for early-stage or non-standard-industry companies -- click
+      "Check pre-revenue (AI)" to re-classify every current candidate with one small AI call each, using
+      the model's own knowledge of the company alongside whatever revenue data is available (needs an
+      API key set in Settings). Click "Analyze" on a
       candidate for a ~200-word expert take (with a buy-opportunity verdict), then pick which of 8
       independent agents to run (technical / fundamental / news / analyst-ratings-timing / macro /
       SEC filings / social sentiment / price targets) for their own take on it.
@@ -1527,15 +1616,19 @@ PAGE_TEMPLATE = """<!doctype html>
         </select>
       </div>
       <button class="action" id="ps-run-btn" onclick="runPennystockNow()">Run Now</button>
+      <button class="secondary" id="ps-check-pre-revenue-btn" onclick="checkPennystockPreRevenue()">Check pre-revenue (AI)</button>
     </div>
+    <div id="ps-pre-revenue-status" class="muted"></div>
     <p class="muted" style="max-width:640px;">
       Cheap, liquid US stocks under the selected price threshold. Unlike Near 52W Low, no single
       quality filter is imposed here -- most penny stocks have no analyst coverage at all -- so every
       candidate carries three independent columns to judge by instead: analyst buy ratio (when there
       is any), momentum (% from its own 52-week high), and trading volume. Use "Min analysts" to
       narrow down to more-covered names, and "Pre-revenue" to include/exclude/isolate companies with
-      no reported revenue on their latest annual income statement (a ticker with no income statement
-      at all is treated as pre-revenue too), both client-side. This is not investment
+      no reported revenue on their latest annual income statement, client-side. That default can be
+      wrong for early-stage or non-standard-industry companies -- click "Check pre-revenue (AI)" to
+      re-classify every current candidate with one small AI call each (needs an API key in Settings).
+      This is not investment
       advice, just a starting point for further research. Click "Analyze" on a candidate for a
       ~200-word expert take (with a buy-opportunity verdict), then pick which of 8 independent agents
       to run for their own take on it.
@@ -2439,6 +2532,26 @@ function renderNearlow(data) {
   renderNearlowTable();
 }
 
+async function checkNearlowPreRevenue() {
+  const btn = document.getElementById("nl-check-pre-revenue-btn");
+  const statusEl = document.getElementById("nl-pre-revenue-status");
+  if (nearlowRows.length === 0) { statusEl.textContent = "No candidates to check -- run the screen first."; return; }
+  btn.disabled = true;
+  statusEl.innerHTML = `<span class="spinner"></span> Checking ${nearlowRows.length} candidate(s) with AI\\u2014this makes one AI call per candidate and can take a bit.`;
+  try {
+    const res = await fetch("/api/nearlow/check-pre-revenue", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const data = await res.json();
+    if (!res.ok) { statusEl.textContent = "Error: " + data.error; return; }
+    nearlowRows = data.candidates || [];
+    renderNearlowTable();
+    statusEl.textContent = `Re-checked ${nearlowRows.length} candidate(s).`;
+  } catch (err) {
+    statusEl.textContent = "Error: " + err;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function sortNearlow(field) {
   if (nearlowSort.field === field) {
     nearlowSort.dir *= -1;
@@ -2464,8 +2577,16 @@ function matchesPreRevenueFilter(c, filterValue) {
   return filterValue === "exclude" ? hasConfirmedRevenue : !hasConfirmedRevenue;
 }
 
+// The "no revenue coming in" sign next to a pre-revenue candidate's name.
+// There's no literal "empty pocket" glyph in Unicode -- prohibited+moneybag
+// reads unambiguously as "no money" everywhere without relying on an
+// obscure/inconsistently-rendered emoji.
+const PRE_REVENUE_SIGN = "\\u{1F6AB}\\u{1F4B0}";
+
 function preRevenueTag(c) {
-  return c.is_pre_revenue !== false ? ` <span class="muted">(pre-revenue)</span>` : "";
+  if (c.is_pre_revenue === false) return "";
+  const reason = c.is_pre_revenue_reason ? `: ${c.is_pre_revenue_reason}` : " (based on yfinance's reported financials -- click \\"Check pre-revenue (AI)\\" for a more reliable read)";
+  return ` <span title="Pre-revenue -- no confirmed commercial revenue${escapeHtml(reason)}" style="cursor:help;">${PRE_REVENUE_SIGN}</span>`;
 }
 
 function renderNearlowTable() {
@@ -2584,6 +2705,27 @@ function renderPennystock(data) {
   document.getElementById("ps-as-of").textContent = data.asof_date ? `As of ${data.asof_date}` : "No scan has run yet.";
   pennystockRows = data.candidates || [];
   renderPennystockTable();
+}
+
+async function checkPennystockPreRevenue() {
+  const btn = document.getElementById("ps-check-pre-revenue-btn");
+  const statusEl = document.getElementById("ps-pre-revenue-status");
+  if (pennystockRows.length === 0) { statusEl.textContent = "No candidates to check -- run the screen first."; return; }
+  const threshold = document.getElementById("ps-threshold").value;
+  btn.disabled = true;
+  statusEl.innerHTML = `<span class="spinner"></span> Checking ${pennystockRows.length} candidate(s) with AI\\u2014this makes one AI call per candidate and can take a bit.`;
+  try {
+    const res = await fetch("/api/pennystock/check-pre-revenue", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ threshold }) });
+    const data = await res.json();
+    if (!res.ok) { statusEl.textContent = "Error: " + data.error; return; }
+    pennystockRows = data.candidates || [];
+    renderPennystockTable();
+    statusEl.textContent = `Re-checked ${pennystockRows.length} candidate(s).`;
+  } catch (err) {
+    statusEl.textContent = "Error: " + err;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function sortPennystock(field) {

@@ -362,6 +362,57 @@ def test_analyze_expert_take_propagates_api_failure(monkeypatch):
         nla.analyze_expert_take("ACME", _context(), "anthropic", "claude-haiku-4-5", api_key="sk-test")
 
 
+# --- classify_pre_revenue --------------------------------------------------
+
+
+def test_classify_pre_revenue_parses_response(monkeypatch):
+    captured = {}
+
+    def fake_call_provider(provider, system_prompt, user_message, model, api_key=None, max_tokens=800):
+        captured["user_message"] = user_message
+        return '{"is_pre_revenue": true, "reason": "No commercial reactors deployed yet."}'
+
+    monkeypatch.setattr(nla.ai_client, "call_provider", fake_call_provider)
+
+    result = nla.classify_pre_revenue("OKLO", "Oklo Inc.", None, "anthropic", "claude-haiku-4-5", api_key="sk-test")
+
+    assert result == {"is_pre_revenue": True, "reason": "No commercial reactors deployed yet."}
+    assert "OKLO" in captured["user_message"]
+    assert "no usable revenue figure" in captured["user_message"]
+
+
+def test_classify_pre_revenue_includes_yfinance_revenue_when_available(monkeypatch):
+    captured = {}
+
+    def fake_call_provider(provider, system_prompt, user_message, model, api_key=None, max_tokens=800):
+        captured["user_message"] = user_message
+        return '{"is_pre_revenue": false, "reason": "Reports real premium revenue."}'
+
+    monkeypatch.setattr(nla.ai_client, "call_provider", fake_call_provider)
+
+    result = nla.classify_pre_revenue(
+        "ALHC", "Alignment Healthcare", {"revenue": 2_700_000_000.0}, "anthropic", "claude-haiku-4-5", api_key="sk-test"
+    )
+
+    assert result["is_pre_revenue"] is False
+    assert "2,700,000,000" in captured["user_message"]
+
+
+def test_classify_pre_revenue_degrades_on_unparseable_response(monkeypatch):
+    monkeypatch.setattr(nla.ai_client, "call_provider", lambda *a, **kw: "not valid json")
+    result = nla.classify_pre_revenue("ACME", "Acme Corp", None, "anthropic", "claude-haiku-4-5", api_key="sk-test")
+    assert result == {"is_pre_revenue": None, "reason": None}
+
+
+def test_classify_pre_revenue_propagates_api_failure(monkeypatch):
+    def boom(*a, **kw):
+        raise RuntimeError("rate limited")
+
+    monkeypatch.setattr(nla.ai_client, "call_provider", boom)
+    with pytest.raises(RuntimeError):
+        nla.classify_pre_revenue("ACME", "Acme Corp", None, "anthropic", "claude-haiku-4-5", api_key="sk-test")
+
+
 # --- run_expert_panel -----------------------------------------------------
 
 ALL_PERSONAS = ["technical", "fundamental", "news", "ratings_timing", "macro_risk", "filings", "social_sentiment", "price_targets"]

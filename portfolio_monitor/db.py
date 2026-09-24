@@ -184,6 +184,8 @@ CREATE TABLE IF NOT EXISTS nearlow_candidates (
     analyst_ratings_json TEXT,
     buy_ratio_pct REAL,
     market_cap REAL,
+    is_pre_revenue INTEGER,
+    is_pre_revenue_reason TEXT,
     PRIMARY KEY (asof_date, ticker)
 );
 
@@ -204,6 +206,8 @@ CREATE TABLE IF NOT EXISTS pennystock_candidates (
     buy_ratio_pct REAL,
     ratings_count INTEGER,
     market_cap REAL,
+    is_pre_revenue INTEGER,
+    is_pre_revenue_reason TEXT,
     PRIMARY KEY (asof_date, threshold, ticker)
 );
 
@@ -251,6 +255,8 @@ _ADDED_COLUMNS = {
     "news_analysis": [("provider", "TEXT")],
     "growth_candidates": [("strong_buy_ratio_pct", "REAL")],
     "forex_calendar_events": [("direction", "TEXT")],
+    "nearlow_candidates": [("is_pre_revenue", "INTEGER"), ("is_pre_revenue_reason", "TEXT")],
+    "pennystock_candidates": [("is_pre_revenue", "INTEGER"), ("is_pre_revenue_reason", "TEXT")],
 }
 
 
@@ -260,8 +266,18 @@ def _migrate_columns(conn) -> None:
         if not existing:
             continue  # table doesn't exist yet -- executescript's CREATE TABLE already covers it
         for column, coltype in columns:
-            if column not in existing:
+            if column in existing:
+                continue
+            try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+            except sqlite3.OperationalError as exc:
+                # init_db runs on nearly every request, so two requests can
+                # both see the column missing and both try to add it before
+                # either commits (observed live: back-to-back requests,
+                # single-threaded dev server, still hit this) -- the loser
+                # just means someone else already migrated it.
+                if "duplicate column name" not in str(exc):
+                    raise
 
 
 def init_db(db_path: str) -> None:
@@ -579,13 +595,26 @@ def get_latest_growth_candidates_date(conn) -> Optional[str]:
     return row["d"] if row else None
 
 
+def _bool_to_int(v: Optional[bool]) -> Optional[int]:
+    """SQLite has no native boolean -- stores True/False/None as 1/0/NULL.
+    Needed explicitly (rather than passing the Python bool straight
+    through) because the read side must convert back to a real Python
+    bool: jsonify()'d 0 and false are NOT the same value to the frontend's
+    strict `=== false` checks."""
+    return None if v is None else int(bool(v))
+
+
+def _int_to_bool(v: Optional[int]) -> Optional[bool]:
+    return None if v is None else bool(v)
+
+
 def save_nearlow_candidates(conn, asof_date: str, candidates: list[dict]) -> None:
     conn.executemany(
         """INSERT OR REPLACE INTO nearlow_candidates
            (asof_date, ticker, name, price, year_low, year_high, pct_from_52w_low,
             pct_from_52w_high, target_mean, target_upside_pct, analyst_ratings_json,
-            buy_ratio_pct, market_cap)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            buy_ratio_pct, market_cap, is_pre_revenue, is_pre_revenue_reason)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         [
             (
                 asof_date,
@@ -601,6 +630,8 @@ def save_nearlow_candidates(conn, asof_date: str, candidates: list[dict]) -> Non
                 json.dumps(c.get("analyst_ratings") or {}),
                 c.get("buy_ratio_pct"),
                 c.get("market_cap"),
+                _bool_to_int(c.get("is_pre_revenue")),
+                c.get("is_pre_revenue_reason"),
             )
             for c in candidates
         ],
@@ -615,6 +646,7 @@ def get_nearlow_candidates(conn, asof_date: str) -> list[dict]:
     for r in rows:
         d = dict(r)
         d["analyst_ratings"] = json.loads(d.pop("analyst_ratings_json")) if d.get("analyst_ratings_json") else {}
+        d["is_pre_revenue"] = _int_to_bool(d.get("is_pre_revenue"))
         result.append(d)
     return result
 
@@ -629,8 +661,8 @@ def save_pennystock_candidates(conn, asof_date: str, threshold: str, candidates:
         """INSERT OR REPLACE INTO pennystock_candidates
            (asof_date, threshold, ticker, name, price, year_low, year_high, pct_from_52w_low,
             pct_from_52w_high, volume, target_mean, target_upside_pct, analyst_ratings_json,
-            buy_ratio_pct, ratings_count, market_cap)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            buy_ratio_pct, ratings_count, market_cap, is_pre_revenue, is_pre_revenue_reason)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         [
             (
                 asof_date,
@@ -649,6 +681,8 @@ def save_pennystock_candidates(conn, asof_date: str, threshold: str, candidates:
                 c.get("buy_ratio_pct"),
                 c.get("ratings_count"),
                 c.get("market_cap"),
+                _bool_to_int(c.get("is_pre_revenue")),
+                c.get("is_pre_revenue_reason"),
             )
             for c in candidates
         ],
@@ -664,6 +698,7 @@ def get_pennystock_candidates(conn, asof_date: str, threshold: str) -> list[dict
     for r in rows:
         d = dict(r)
         d["analyst_ratings"] = json.loads(d.pop("analyst_ratings_json")) if d.get("analyst_ratings_json") else {}
+        d["is_pre_revenue"] = _int_to_bool(d.get("is_pre_revenue"))
         result.append(d)
     return result
 
