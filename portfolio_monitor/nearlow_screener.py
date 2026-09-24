@@ -91,6 +91,27 @@ def _is_pre_revenue(info: dict, t) -> Optional[bool]:
     return None
 
 
+def _compute_trailing_pe(info: dict) -> Optional[float]:
+    """Yahoo's own "trailingPE" field is commonly missing/None specifically
+    WHEN it would be negative -- confirmed live: a real ticker showing a
+    real -3.1 P/E on Robinhood (which computes and displays negative P/E
+    like any other broker) had no trailingPE at all via yfinance's .info.
+    Rather than surface that gap as "P/E not available" (implying we
+    don't know whether it's profitable, when Yahoo's omission itself is
+    a strong hint that it's not), compute it ourselves as price /
+    trailingEps whenever yfinance has both of those but not trailingPE
+    directly -- that's exactly how a negative P/E like Robinhood's gets
+    left out."""
+    trailing_pe = info.get("trailingPE")
+    if isinstance(trailing_pe, numbers.Real):
+        return float(trailing_pe)
+    eps = info.get("trailingEps")
+    price = info.get("currentPrice") or info.get("regularMarketPrice")
+    if isinstance(eps, numbers.Real) and eps != 0 and isinstance(price, numbers.Real):
+        return float(price) / float(eps)
+    return None
+
+
 def _enrich_candidate(
     q: dict, max_pct_from_low: float, min_buy_ratio_pct: float, min_ratings_count: int
 ) -> tuple[Optional[dict], str]:
@@ -142,8 +163,7 @@ def _enrich_candidate(
     except Exception:
         info = {}
     is_pre_revenue = _is_pre_revenue(info, t)
-    trailing_pe = info.get("trailingPE")
-    trailing_pe = float(trailing_pe) if isinstance(trailing_pe, numbers.Real) else None
+    trailing_pe = _compute_trailing_pe(info)
 
     candidate = {
         "ticker": ticker,

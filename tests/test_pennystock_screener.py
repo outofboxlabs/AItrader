@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from portfolio_monitor import pennystock_screener as ps
 
@@ -172,6 +173,42 @@ def test_find_pennystock_candidates_reports_trailing_pe(monkeypatch):
     results = ps.find_pennystock_candidates(price_threshold=5.0)
     assert results[0]["trailing_pe"] == 8.2
     assert results[0]["is_pre_revenue"] is False
+
+
+def test_find_pennystock_candidates_computes_trailing_pe_when_missing_but_negative(monkeypatch):
+    """Same fallback as nearlow_screener -- see there for the live case
+    that motivated it (Yahoo omits trailingPE specifically when it would
+    be negative)."""
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        return {"quotes": [{"symbol": "LOSSMAKER", "shortName": "Loss Maker Co", "regularMarketPrice": 2.5, "marketCap": 5e7, "regularMarketVolume": 500_000}]}
+
+    class FakeTicker:
+        def __init__(self, symbol):
+            pass
+
+        def get_analyst_price_targets(self):
+            return {}
+
+        def get_recommendations_summary(self, as_dict=False):
+            return {}
+
+        @property
+        def info(self):
+            return {"totalRevenue": 10_000_000.0, "trailingPE": None, "trailingEps": -0.4, "currentPrice": 2.5}
+
+        @property
+        def fast_info(self):
+            class FakeFastInfo:
+                year_high = 4.0
+                year_low = 1.5
+
+            return FakeFastInfo()
+
+    monkeypatch.setattr(ps.yf, "screen", fake_screen)
+    monkeypatch.setattr(ps.yf, "Ticker", FakeTicker)
+
+    results = ps.find_pennystock_candidates(price_threshold=5.0)
+    assert results[0]["trailing_pe"] == pytest.approx(2.5 / -0.4)
 
 
 def test_find_pennystock_candidates_attaches_all_three_columns(monkeypatch):

@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from portfolio_monitor import nearlow_screener as nl
 
@@ -222,6 +223,44 @@ def test_find_nearlow_candidates_reports_trailing_pe(monkeypatch):
     results = nl.find_nearlow_candidates(max_pct_from_low=15.0, min_buy_ratio_pct=60.0, min_ratings_count=3)
     assert results[0]["trailing_pe"] == 22.5
     assert results[0]["is_pre_revenue"] is False
+
+
+def test_find_nearlow_candidates_computes_trailing_pe_when_missing_but_negative(monkeypatch):
+    """Confirmed live: Yahoo's own trailingPE field is commonly missing
+    specifically when it would be negative (a real ticker with an actual
+    -3.1 P/E on Robinhood had no trailingPE via yfinance at all, just
+    price and trailingEps) -- computing it ourselves surfaces the real
+    negative number instead of leaving trailing_pe as None."""
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        return {"quotes": [{"symbol": "LOSSMAKER", "shortName": "Loss Maker Co", "regularMarketPrice": 9.61, "marketCap": 1e9}]}
+
+    class FakeFastInfo:
+        year_high = 20.0
+        year_low = 9.5
+
+    class FakeTicker:
+        def __init__(self, symbol):
+            pass
+
+        def get_analyst_price_targets(self):
+            return {"mean": 15.0}
+
+        def get_recommendations_summary(self, as_dict=False):
+            return {"strongBuy": {0: 6}, "buy": {0: 3}, "hold": {0: 1}, "sell": {0: 0}, "strongSell": {0: 0}}
+
+        @property
+        def info(self):
+            return {"totalRevenue": 10_000_000.0, "trailingPE": None, "trailingEps": -3.1, "currentPrice": 9.61}
+
+        @property
+        def fast_info(self):
+            return FakeFastInfo()
+
+    monkeypatch.setattr(nl.yf, "screen", fake_screen)
+    monkeypatch.setattr(nl.yf, "Ticker", FakeTicker)
+
+    results = nl.find_nearlow_candidates(max_pct_from_low=15.0, min_buy_ratio_pct=60.0, min_ratings_count=3)
+    assert results[0]["trailing_pe"] == pytest.approx(9.61 / -3.1)
 
 
 def test_find_nearlow_candidates_requires_minimum_ratings_count(monkeypatch):

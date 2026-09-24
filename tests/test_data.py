@@ -638,6 +638,45 @@ def test_get_financial_highlights_falls_back_to_info_total_revenue(monkeypatch):
 # --- get_peer_comparison ---------------------------------------------------
 
 
+def test_compute_trailing_pe_prefers_yfinance_field_when_present():
+    assert data_mod._compute_trailing_pe({"trailingPE": 18.5}) == 18.5
+
+
+def test_compute_trailing_pe_falls_back_to_price_over_eps():
+    """Confirmed live: Yahoo's own trailingPE is commonly missing/None
+    specifically when it would be negative -- a real ticker (Evommune,
+    Inc.) with a genuine -3.1 P/E on Robinhood (which computes and shows
+    negative P/E) had no trailingPE via yfinance's .info at all, just
+    price and trailingEps. Computing it ourselves surfaces the real
+    number instead of "not available"."""
+    result = data_mod._compute_trailing_pe({"trailingPE": None, "trailingEps": -2.5, "currentPrice": 7.75})
+    assert result == pytest.approx(7.75 / -2.5)
+
+
+def test_compute_trailing_pe_none_when_neither_field_available():
+    assert data_mod._compute_trailing_pe({}) is None
+    assert data_mod._compute_trailing_pe({"trailingEps": 0, "currentPrice": 10.0}) is None  # avoid a ZeroDivisionError
+
+
+def test_get_peer_comparison_computes_target_pe_when_trailing_pe_missing(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        @property
+        def info(self):
+            return {"industry": "Biotechnology", "trailingPE": None, "trailingEps": -3.1, "currentPrice": 9.61}
+
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        return {"quotes": []}
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    monkeypatch.setattr(data_mod.yf, "screen", fake_screen)
+
+    result = data_mod.get_peer_comparison("EVO")
+    assert result["target_pe"] == pytest.approx(9.61 / -3.1)
+
+
 def test_get_peer_comparison_returns_none_without_industry(monkeypatch):
     class FakeTicker:
         def __init__(self, ticker):

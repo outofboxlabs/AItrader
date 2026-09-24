@@ -376,7 +376,7 @@ def test_run_nearlow_now_handles_screener_failure(client, monkeypatch):
     assert "error" in res.get_json()
 
 
-def test_run_nearlow_now_leaves_undetermined_pre_revenue_when_no_key_saved(client, monkeypatch):
+def test_run_nearlow_now_leaves_pre_revenue_undetermined_when_no_key_saved(client, monkeypatch):
     """No API key saved anywhere -- Run Now must still succeed and just
     leave the heuristic's undetermined result as-is, never demanding a
     key or failing because one is missing."""
@@ -384,22 +384,23 @@ def test_run_nearlow_now_leaves_undetermined_pre_revenue_when_no_key_saved(clien
     monkeypatch.setattr(
         app_mod.nearlow_screener,
         "find_nearlow_candidates",
-        lambda **kw: [{"ticker": "UNCLEAR", "name": "Unclear Co", "is_pre_revenue": None}],
+        lambda **kw: [{"ticker": "UNCLEAR", "name": "Unclear Co", "is_pre_revenue": None, "trailing_pe": None}],
     )
     res = client.post("/api/nearlow/run")
     assert res.status_code == 200
     assert res.get_json()["candidates"][0]["is_pre_revenue"] is None
 
 
-def test_run_nearlow_now_auto_classifies_undetermined_pre_revenue_when_key_saved(client, monkeypatch):
-    """A saved API key lets Run Now resolve what the heuristic couldn't,
-    automatically -- no separate "Check pre-revenue (AI)" click needed."""
+def test_run_nearlow_now_auto_classifies_pre_revenue_when_key_saved(client, monkeypatch):
+    """A saved API key lets Run Now resolve any candidate whose P/E
+    doesn't already disprove pre-revenue on its own, automatically -- no
+    separate "Check pre-revenue (AI)" click needed."""
     monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
     monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
     monkeypatch.setattr(
         app_mod.nearlow_screener,
         "find_nearlow_candidates",
-        lambda **kw: [{"ticker": "UNCLEAR", "name": "Unclear Co", "is_pre_revenue": None}],
+        lambda **kw: [{"ticker": "UNCLEAR", "name": "Unclear Co", "is_pre_revenue": None, "trailing_pe": None}],
     )
     monkeypatch.setattr(
         app_mod.nearlow_analysis,
@@ -417,30 +418,41 @@ def test_run_nearlow_now_auto_classifies_undetermined_pre_revenue_when_key_saved
     assert res2.get_json()["candidates"][0]["is_pre_revenue"] is True
 
 
-def test_run_nearlow_now_skips_ai_for_candidates_the_heuristic_already_answered(client, monkeypatch):
-    """Even with a key saved, Run Now must not spend an AI call on a
-    candidate the yfinance heuristic already gave a definite answer for
-    -- only genuinely undetermined ones are worth the automatic call."""
+def test_run_nearlow_now_skips_ai_only_for_positive_pe_candidates(client, monkeypatch):
+    """The automatic pass is gated on P/E, not on whatever the yfinance
+    revenue heuristic itself already said -- a heuristic answer of False
+    is NOT trustworthy enough to skip the AI call on its own (live case:
+    its totalRevenue field can be tripped by incidental income -- a
+    grant, interest, a JV -- for a company that's still genuinely
+    pre-revenue, exactly what happened with OKLO). Only a CONFIRMED
+    positive P/E is proof enough to skip AI; everything else gets
+    double-checked regardless of the heuristic's own answer."""
     monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
     monkeypatch.setattr(
         app_mod.nearlow_screener,
         "find_nearlow_candidates",
         lambda **kw: [
-            {"ticker": "DEFREVENUE", "name": "Definite Revenue Co", "is_pre_revenue": False},
-            {"ticker": "DEFPRE", "name": "Definite Pre-revenue Co", "is_pre_revenue": True},
+            {"ticker": "PROFITABLE", "name": "Profitable Co", "is_pre_revenue": False, "trailing_pe": 15.0},
+            {"ticker": "WRONGHEURISTIC", "name": "Wrong Heuristic Co", "is_pre_revenue": False, "trailing_pe": None},
         ],
     )
 
-    def fail_if_called(*a, **kw):
-        raise AssertionError("classify_pre_revenue should not be called for a definite heuristic result")
+    calls = []
 
-    monkeypatch.setattr(app_mod.nearlow_analysis, "classify_pre_revenue", fail_if_called)
+    def fake_classify(ticker, name, financials, provider, model, api_key=None):
+        calls.append(ticker)
+        return {"is_pre_revenue": True, "reason": "actually pre-revenue -- heuristic's totalRevenue was incidental income"}
+
+    monkeypatch.setattr(app_mod.nearlow_analysis, "classify_pre_revenue", fake_classify)
 
     res = client.post("/api/nearlow/run")
     assert res.status_code == 200
     by_ticker = {c["ticker"]: c for c in res.get_json()["candidates"]}
-    assert by_ticker["DEFREVENUE"]["is_pre_revenue"] is False
-    assert by_ticker["DEFPRE"]["is_pre_revenue"] is True
+
+    assert calls == ["WRONGHEURISTIC"]  # PROFITABLE's positive P/E skipped the AI call
+    assert by_ticker["PROFITABLE"]["is_pre_revenue"] is False
+    assert by_ticker["WRONGHEURISTIC"]["is_pre_revenue"] is True  # AI corrected the heuristic's wrong answer
 
 
 def _seed_nearlow_run(candidates):
@@ -625,14 +637,14 @@ def test_run_pennystock_now_handles_screener_failure(client, monkeypatch):
     assert "error" in res.get_json()
 
 
-def test_run_pennystock_now_auto_classifies_undetermined_pre_revenue_when_key_saved(client, monkeypatch):
+def test_run_pennystock_now_auto_classifies_pre_revenue_when_key_saved(client, monkeypatch):
     """Same automatic AI-fallback behavior as Near 52W Low's Run Now."""
     monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
     monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
     monkeypatch.setattr(
         app_mod.pennystock_screener,
         "find_pennystock_candidates",
-        lambda **kw: [{"ticker": "UNCLEAR", "name": "Unclear Co", "is_pre_revenue": None}],
+        lambda **kw: [{"ticker": "UNCLEAR", "name": "Unclear Co", "is_pre_revenue": None, "trailing_pe": None}],
     )
     monkeypatch.setattr(
         app_mod.nearlow_analysis,

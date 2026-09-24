@@ -467,6 +467,25 @@ def get_financial_highlights(ticker: str) -> Optional[dict]:
     return json.loads(json.dumps(highlights, default=str))
 
 
+def _compute_trailing_pe(info: dict) -> Optional[float]:
+    """Yahoo's own "trailingPE" field is commonly missing/None specifically
+    WHEN it would be negative -- confirmed live: a real ticker showing a
+    real -3.1 P/E on Robinhood (which computes and displays negative P/E
+    like any other) had no trailingPE at all via yfinance's .info. Rather
+    than surface that gap as "P/E not available" (implying we don't know
+    whether it's profitable), compute it ourselves as price / trailingEps
+    whenever yfinance has both of those but not trailingPE directly --
+    that's exactly how a negative P/E like Robinhood's gets left out."""
+    trailing_pe = info.get("trailingPE")
+    if isinstance(trailing_pe, numbers.Real):
+        return float(trailing_pe)
+    eps = info.get("trailingEps")
+    price = info.get("currentPrice") or info.get("regularMarketPrice")
+    if isinstance(eps, numbers.Real) and eps != 0 and isinstance(price, numbers.Real):
+        return float(price) / float(eps)
+    return None
+
+
 def get_peer_comparison(ticker: str, max_peers: int = 5) -> Optional[dict]:
     """This ticker's trailing P/E next to up to `max_peers` other US-listed
     companies yfinance classifies under the same industry, ranked by
@@ -486,7 +505,7 @@ def get_peer_comparison(ticker: str, max_peers: int = 5) -> Optional[dict]:
     if not industry:
         return None
     sector = info.get("sector")
-    target_pe = info.get("trailingPE")
+    target_pe = _compute_trailing_pe(info)
 
     try:
         query = EquityQuery("AND", [EquityQuery("EQ", ["region", "us"]), EquityQuery("EQ", ["industry", industry])])
@@ -503,7 +522,7 @@ def get_peer_comparison(ticker: str, max_peers: int = 5) -> Optional[dict]:
         pe = q.get("trailingPE")
         if not isinstance(pe, numbers.Real):
             try:
-                pe = yf.Ticker(peer_ticker).info.get("trailingPE")
+                pe = _compute_trailing_pe(yf.Ticker(peer_ticker).info or {})
             except Exception:
                 pe = None
         peers.append({"ticker": peer_ticker, "name": q.get("shortName") or q.get("longName"), "market_cap": q.get("marketCap"), "pe": pe})

@@ -78,6 +78,24 @@ def _is_pre_revenue(info: dict, t) -> Optional[bool]:
     return None
 
 
+def _compute_trailing_pe(info: dict) -> Optional[float]:
+    """Same as nearlow_screener._compute_trailing_pe -- see there for why
+    this is duplicated: Yahoo's own "trailingPE" field is commonly
+    missing/None specifically WHEN it would be negative (confirmed live
+    against a real ticker showing an actual -3.1 P/E on Robinhood, which
+    computes and displays negative P/E, but had no trailingPE at all via
+    yfinance's .info), so this computes price / trailingEps ourselves
+    whenever yfinance has both of those but not trailingPE directly."""
+    trailing_pe = info.get("trailingPE")
+    if isinstance(trailing_pe, numbers.Real):
+        return float(trailing_pe)
+    eps = info.get("trailingEps")
+    price = info.get("currentPrice") or info.get("regularMarketPrice")
+    if isinstance(eps, numbers.Real) and eps != 0 and isinstance(price, numbers.Real):
+        return float(price) / float(eps)
+    return None
+
+
 def _enrich_candidate(q: dict) -> tuple[Optional[dict], str]:
     """Fetch one candidate's 52-week range, volume, and (if any) analyst
     data -- no hard filter beyond what the EquityQuery pool already
@@ -121,8 +139,7 @@ def _enrich_candidate(q: dict) -> tuple[Optional[dict], str]:
     except Exception:
         info = {}
     is_pre_revenue = _is_pre_revenue(info, t)
-    trailing_pe = info.get("trailingPE")
-    trailing_pe = float(trailing_pe) if isinstance(trailing_pe, numbers.Real) else None
+    trailing_pe = _compute_trailing_pe(info)
 
     candidate = {
         "ticker": ticker,

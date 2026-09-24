@@ -301,8 +301,9 @@ def _run_nearlow_screen(asof_date: Optional[date] = None) -> list[dict]:
     """The screener itself (52-week range + analyst ratings + the
     yfinance-only pre-revenue heuristic) needs no API key/provider, so
     this never fails or blocks on one being missing. It does opportunistically
-    spend a gen-AI call per candidate the heuristic left undetermined, but
-    only if a key is already saved -- see _resolve_undetermined_pre_revenue."""
+    spend a gen-AI call per candidate whose P/E doesn't already disprove
+    pre-revenue on its own, but only if a key is already saved -- see
+    _auto_classify_pre_revenue."""
     asof_date = asof_date or date.today()
     db_mod.init_db(config.DB_PATH)
     candidates = nearlow_screener.find_nearlow_candidates(
@@ -316,7 +317,7 @@ def _run_nearlow_screen(asof_date: Optional[date] = None) -> list[dict]:
         max_results=config.NEARLOW_MAX_RESULTS,
         max_workers=config.NEARLOW_MAX_WORKERS,
     )
-    _resolve_undetermined_pre_revenue(candidates)
+    _auto_classify_pre_revenue(candidates)
     with db_mod.connect(config.DB_PATH) as conn:
         db_mod.save_nearlow_candidates(conn, asof_date.isoformat(), candidates)
     exports.export_to_csv(candidates, "near_52w_low", "near_52w_low", export_root=config.EXPORTS_DIR)
@@ -378,28 +379,42 @@ def _classify_pre_revenue_for_candidate(c: dict, provider: str, model: str, api_
     c["is_pre_revenue_reason"] = result.get("reason")
 
 
-def _resolve_undetermined_pre_revenue(candidates: list[dict]) -> None:
-    """Automatic best-effort pass, run as part of every scan: the
-    yfinance-only heuristic already gives a DEFINITE true/false for most
-    candidates (left untouched here, no AI cost) -- this spends a gen-AI
-    call only on the ones it genuinely couldn't resolve (is_pre_revenue
-    is None), and only if a provider key is already saved in Settings.
-    No key saved -- silently leaves those candidates undetermined, same
-    as before this existed, since a background scan should never demand
-    a key or fail because one is missing. (The separate "Check
-    pre-revenue (AI)" button still exists for re-checking EVERY current
-    candidate with AI, including ones the heuristic already answered --
-    that heuristic has been wrong in both directions live, so a human
-    asking for a full recheck should get one.)"""
+def _needs_pre_revenue_ai_check(c: dict) -> bool:
+    """A positive trailing P/E already proves real, positive earnings --
+    hence real revenue -- entirely on its own, so a candidate with one
+    never needs a gen-AI check. Everything else (negative or missing
+    P/E) does, REGARDLESS of what the yfinance revenue heuristic itself
+    already claimed. That matters because the heuristic has been seen
+    live to confidently answer False (\"has revenue\") for a genuinely
+    pre-revenue company -- e.g. its totalRevenue field picking up
+    incidental income (a grant, interest, a JV) that isn't real
+    commercial revenue -- and trusting a \"definite\" heuristic answer
+    whenever P/E can't itself rule out pre-revenue is exactly how a case
+    like that slips through uncorrected."""
+    trailing_pe = c.get("trailing_pe")
+    return not (isinstance(trailing_pe, (int, float)) and trailing_pe > 0)
+
+
+def _auto_classify_pre_revenue(candidates: list[dict]) -> None:
+    """Automatic pass run as part of every scan: double-checks with
+    gen AI any candidate whose P/E doesn't already disprove pre-revenue
+    on its own (see _needs_pre_revenue_ai_check), regardless of the
+    yfinance-only heuristic's own answer -- and only if a provider key is
+    already saved in Settings. No key saved -- leaves the heuristic's
+    answer as-is, since a background scan should never demand a key or
+    fail because one is missing. (The separate "Check pre-revenue (AI)"
+    button still exists to force this same recheck on demand -- e.g.
+    right after saving a key for the first time, without re-running the
+    whole scan.)"""
     provider, api_key = _resolve_forex_analysis_provider(None)
     if not api_key:
         return
     model = NEWS_DEFAULT_MODEL[provider]
-    undetermined = [c for c in candidates if c.get("is_pre_revenue") is None]
-    if not undetermined:
+    to_check = [c for c in candidates if _needs_pre_revenue_ai_check(c)]
+    if not to_check:
         return
     with ThreadPoolExecutor(max_workers=10) as executor:
-        list(executor.map(lambda c: _classify_pre_revenue_for_candidate(c, provider, model, api_key), undetermined))
+        list(executor.map(lambda c: _classify_pre_revenue_for_candidate(c, provider, model, api_key), to_check))
 
 
 @app.route("/api/nearlow/check-pre-revenue", methods=["POST"])
@@ -447,8 +462,9 @@ def _pennystock_threshold_key(raw: Optional[str]) -> Optional[str]:
 def _run_pennystock_screen(threshold_key: str, asof_date: Optional[date] = None) -> list[dict]:
     """Same as Near 52W Low: the screen itself needs no API key/provider
     and never blocks on one being missing, but opportunistically spends a
-    gen-AI call per candidate the pre-revenue heuristic left undetermined
-    if a key is already saved -- see _resolve_undetermined_pre_revenue."""
+    gen-AI call per candidate whose P/E doesn't already disprove
+    pre-revenue on its own, if a key is already saved -- see
+    _auto_classify_pre_revenue."""
     asof_date = asof_date or date.today()
     db_mod.init_db(config.DB_PATH)
     candidates = pennystock_screener.find_pennystock_candidates(
@@ -459,7 +475,7 @@ def _run_pennystock_screen(threshold_key: str, asof_date: Optional[date] = None)
         max_results=config.PENNYSTOCK_MAX_RESULTS,
         max_workers=config.PENNYSTOCK_MAX_WORKERS,
     )
-    _resolve_undetermined_pre_revenue(candidates)
+    _auto_classify_pre_revenue(candidates)
     with db_mod.connect(config.DB_PATH) as conn:
         db_mod.save_pennystock_candidates(conn, asof_date.isoformat(), threshold_key, candidates)
     exports.export_to_csv(candidates, "penny_stocks", f"penny_stocks_under_{threshold_key}", export_root=config.EXPORTS_DIR)
