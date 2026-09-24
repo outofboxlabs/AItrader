@@ -505,3 +505,91 @@ def test_get_financial_highlights_returns_none_when_empty(monkeypatch):
 
     monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
     assert data_mod.get_financial_highlights("ACME") is None
+
+
+def test_get_financial_highlights_includes_balance_sheet_and_cash_flow(monkeypatch):
+    income = pd.DataFrame({pd.Timestamp("2026-01-31"): {"Total Revenue": 1_000.0}})
+    balance = pd.DataFrame(
+        {
+            pd.Timestamp("2026-01-31"): {"Cash And Cash Equivalents": 40_000.0, "Total Debt": 5_000.0, "Ordinary Shares Number": 110_000_000.0},
+            pd.Timestamp("2025-01-31"): {"Ordinary Shares Number": 100_000_000.0},
+        }
+    )
+    cashflow = pd.DataFrame({pd.Timestamp("2026-01-31"): {"Free Cash Flow": -20_000.0}})
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def get_income_stmt(self, freq="yearly"):
+            return income
+
+        def get_balance_sheet(self, freq="yearly"):
+            return balance
+
+        def get_cashflow(self, freq="yearly"):
+            return cashflow
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+
+    highlights = data_mod.get_financial_highlights("ACME")
+    assert highlights["cash"] == 40_000.0
+    assert highlights["total_debt"] == 5_000.0
+    assert highlights["free_cash_flow"] == -20_000.0
+    assert highlights["cash_runway_quarters"] == pytest.approx(40_000.0 / (20_000.0 / 4))  # 8.0 quarters
+    assert highlights["shares_outstanding"] == 110_000_000.0
+    assert highlights["shares_outstanding_yoy_pct"] == pytest.approx(10.0)
+
+
+def test_get_financial_highlights_available_from_balance_sheet_alone(monkeypatch):
+    """A pre-revenue biotech routinely has no usable income statement via
+    yfinance but does have a balance sheet -- cash/debt/shares should
+    still come through rather than the whole result being discarded."""
+    balance = pd.DataFrame({pd.Timestamp("2026-01-31"): {"Cash And Cash Equivalents": 15_000.0}})
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def get_income_stmt(self, freq="yearly"):
+            return pd.DataFrame()
+
+        def get_balance_sheet(self, freq="yearly"):
+            return balance
+
+        def get_cashflow(self, freq="yearly"):
+            raise RuntimeError("no data")
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+
+    highlights = data_mod.get_financial_highlights("ACME")
+    assert highlights is not None
+    assert highlights["cash"] == 15_000.0
+    assert highlights["revenue"] is None
+    assert highlights["cash_runway_quarters"] is None  # no cash-flow data to estimate burn from
+
+
+def test_get_financial_highlights_no_runway_when_cash_flow_positive(monkeypatch):
+    """Cash runway is a burn-rate estimate -- meaningless (and should stay
+    None) when the company isn't actually burning cash."""
+    balance = pd.DataFrame({pd.Timestamp("2026-01-31"): {"Cash And Cash Equivalents": 40_000.0}})
+    cashflow = pd.DataFrame({pd.Timestamp("2026-01-31"): {"Free Cash Flow": 5_000.0}})
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        def get_income_stmt(self, freq="yearly"):
+            raise RuntimeError("no data")
+
+        def get_balance_sheet(self, freq="yearly"):
+            return balance
+
+        def get_cashflow(self, freq="yearly"):
+            return cashflow
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+
+    highlights = data_mod.get_financial_highlights("ACME")
+    assert highlights["free_cash_flow"] == 5_000.0
+    assert highlights["cash_runway_quarters"] is None

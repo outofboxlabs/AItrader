@@ -373,29 +373,45 @@ def _price_range_lines(ticker: str, context: dict) -> list[str]:
 
 
 def _fundamental_lines(ticker: str, context: dict) -> list[str]:
+    """Deliberately excludes the analyst mean target/ratings that other
+    context builders here include -- this persona's whole point is an
+    independent read of the actual business, and handing it the target/
+    rating consensus just invited it to reason from "analysts say X%
+    upside" instead of the balance sheet (this is exactly what happened
+    in practice: a pre-revenue biotech with no income-statement data got
+    called "significantly undervalued" purely off its price target)."""
     candidate = context["candidate"]
-    lines = [
-        f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})",
-        f"Market cap: {candidate.get('market_cap')}",
-        f"Analyst mean price target: {candidate.get('target_mean')} "
-        f"({candidate.get('target_upside_pct')}% upside from current price {candidate.get('price')})",
-        f"Current analyst ratings breakdown: {candidate.get('analyst_ratings')} "
-        f"({candidate.get('buy_ratio_pct')}% buy/strong-buy)",
-    ]
+    lines = [f"Ticker: {ticker} ({candidate.get('name') or 'n/a'})", f"Market cap: {candidate.get('market_cap')}", ""]
     financials = context.get("financials")
-    lines.append("")
-    if financials:
-        lines.append(f"Latest annual financials (fiscal year end {financials.get('fiscal_year_end')}):")
-        if financials.get("revenue") is not None:
-            yoy = financials.get("revenue_yoy_pct")
-            yoy_note = f", {yoy:+.1f}% YoY" if yoy is not None else ""
-            lines.append(f"- Revenue: {financials['revenue']:,.0f}{yoy_note}")
-        if financials.get("net_income") is not None:
-            lines.append(f"- Net income: {financials['net_income']:,.0f}")
-        if financials.get("gross_margin_pct") is not None:
-            lines.append(f"- Gross margin: {financials['gross_margin_pct']:.1f}%")
-    else:
+    if not financials:
         lines.append("Financial statements: not available for this ticker.")
+        return lines
+
+    lines.append(f"Latest annual financials (fiscal year end {financials.get('fiscal_year_end')}):")
+    if financials.get("revenue") is not None:
+        yoy = financials.get("revenue_yoy_pct")
+        yoy_note = f", {yoy:+.1f}% YoY" if yoy is not None else ""
+        lines.append(f"- Revenue: {financials['revenue']:,.0f}{yoy_note}")
+    else:
+        lines.append("- Revenue: none reported (pre-revenue).")
+    if financials.get("net_income") is not None:
+        lines.append(f"- Net income: {financials['net_income']:,.0f}")
+    if financials.get("gross_margin_pct") is not None:
+        lines.append(f"- Gross margin: {financials['gross_margin_pct']:.1f}%")
+    if financials.get("cash") is not None:
+        lines.append(f"- Cash & equivalents: {financials['cash']:,.0f}")
+    if financials.get("total_debt") is not None:
+        lines.append(f"- Total debt: {financials['total_debt']:,.0f}")
+    if financials.get("operating_cash_flow") is not None:
+        lines.append(f"- Operating cash flow (annual): {financials['operating_cash_flow']:,.0f}")
+    if financials.get("free_cash_flow") is not None:
+        lines.append(f"- Free cash flow (annual): {financials['free_cash_flow']:,.0f}")
+    if financials.get("cash_runway_quarters") is not None:
+        lines.append(f"- Estimated cash runway at current burn rate: {financials['cash_runway_quarters']:.1f} quarters")
+    if financials.get("shares_outstanding") is not None:
+        change = financials.get("shares_outstanding_yoy_pct")
+        change_note = f", {change:+.1f}% YoY" if change is not None else ""
+        lines.append(f"- Shares outstanding: {financials['shares_outstanding']:,.0f}{change_note}")
     return lines
 
 
@@ -551,16 +567,25 @@ Respond with ONLY a JSON object, no other text: \
     ),
     "fundamental": (
         "Fundamental Analyst",
-        """You are a fundamental analyst. You're asked to independently assess \
-one stock given its market cap, analyst mean price target, the buy-ratio \
-among current ratings, and (when available) real reported annual revenue, \
-net income, revenue YoY growth, and gross margin from its own financial \
-statements. Give a short (60-100 word) fundamental read on whether the \
-current price plausibly undervalues the business given what analysts are \
-pricing in via their target AND what the actual financials show, and what \
-would need to be true for the stock to re-rate higher. Be explicit when \
-financials weren't available -- don't invent figures. Never say to buy, \
-sell, or hold.
+        """You are a fundamental analyst. Assess this company using ONLY its \
+own reported financial statements: revenue and its growth trend, \
+profitability (net income, gross margin), cash and debt on the balance \
+sheet, operating/free cash flow, the estimated cash runway at the current \
+burn rate, and the share-count trend (rising share count signals \
+dilution). You do NOT have access to analyst price targets or ratings, \
+and must not reason from them, guess at them, or mention them -- that is \
+a different analyst's job on this panel; yours is the underlying \
+business, not what Wall Street thinks it's worth. Many small/micro-cap \
+names (biotech and other pre-revenue companies especially) legitimately \
+report zero revenue -- treat that as a real data point about the business \
+stage, not a gap to talk around, and weigh cash runway and dilution more \
+heavily than revenue for names like that. Give a short (60-100 word) \
+fundamental-only read on the company's financial health and what would \
+need to be true of the BUSINESS ITSELF (e.g. a revenue inflection, an \
+extended runway, improving margins) to strengthen it. If no financial \
+statements are available at all, say so plainly and use "neutral" -- \
+don't invent figures or fall back on price/valuation reasoning when there \
+is nothing fundamental to go on. Never say to buy, sell, or hold.
 
 Respond with ONLY a JSON object, no other text: \
 {"take": "...", "stance": "bullish|bearish|neutral"}""",

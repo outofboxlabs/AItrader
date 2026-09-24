@@ -340,46 +340,88 @@ def get_stock_snapshot(ticker: str) -> Optional[dict]:
 
 
 def get_financial_highlights(ticker: str) -> Optional[dict]:
-    """Latest-vs-prior-year revenue, net income, and gross margin from
-    yfinance's own annual income statement -- real reported figures, not
-    an AI guess. Returns None if the statement isn't available at all
-    (some tickers -- very new listings, some non-US filers -- don't have
-    one via yfinance) or has no usable columns.
+    """Real reported fundamentals from yfinance's own annual statements --
+    income statement (revenue, net income, gross margin), balance sheet
+    (cash, debt, shares outstanding), and cash flow (operating/free cash
+    flow, used to estimate cash runway). Not an AI guess.
 
-    Reads the DataFrame directly (not via as_dict=True) and converts each
-    fiscal-year column to a plain string itself -- to_dict() on a frame
+    The three statements are fetched and can fail independently -- a
+    pre-revenue biotech or other early-stage company routinely has cash/
+    debt/shares data via the balance sheet even when its income statement
+    shows nothing worth reporting, and for exactly that kind of ticker
+    cash runway and share dilution matter far more than revenue. Returns
+    None only if ALL three statements are unavailable/empty (some tickers
+    -- very new listings, some non-US filers -- don't have any of them
+    via yfinance).
+
+    Reads each DataFrame directly (not via as_dict=True) and converts
+    fiscal-year columns to plain strings itself -- to_dict() on a frame
     with a DatetimeIndex/columns can leave pandas Timestamp objects as
     dict keys, which json.dumps refuses to serialize even with a
     default= fallback (default only rescues values, never keys)."""
     t = yf.Ticker(ticker)
-    try:
-        income = t.get_income_stmt(freq="yearly")
-    except Exception:
-        return None
-    if income is None or income.empty or len(income.columns) == 0:
-        return None
 
-    columns = sorted(income.columns, reverse=True)  # most recent fiscal year end first
-    latest_col = columns[0]
-    prior_col = columns[1] if len(columns) > 1 else None
-
-    def _value(label, col):
-        if col is None or label not in income.index:
-            return None
-        v = income.loc[label, col]
+    def _fetch(method_name):
         try:
-            v = float(v)
-        except (TypeError, ValueError):
+            df = getattr(t, method_name)(freq="yearly")
+        except Exception:
             return None
-        return v if v == v else None  # filter NaN
+        return df if df is not None and not df.empty and len(df.columns) > 0 else None
 
-    latest_revenue = _value("Total Revenue", latest_col)
-    prior_revenue = _value("Total Revenue", prior_col)
-    latest_net_income = _value("Net Income", latest_col)
-    latest_gross_profit = _value("Gross Profit", latest_col)
+    income = _fetch("get_income_stmt")
+    balance = _fetch("get_balance_sheet")
+    cashflow = _fetch("get_cashflow")
+    if income is None and balance is None and cashflow is None:
+        return None
+
+    def _cols(df):
+        return sorted(df.columns, reverse=True) if df is not None else []
+
+    def _value(df, labels, col):
+        """Tries each label in turn (yfinance's exact row names can vary
+        by ticker/version) and returns the first real (non-NaN) match."""
+        if df is None or col is None:
+            return None
+        for label in labels:
+            if label not in df.index:
+                continue
+            v = df.loc[label, col]
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                continue
+            if v == v:  # filter NaN
+                return v
+        return None
+
+    income_cols, balance_cols, cashflow_cols = _cols(income), _cols(balance), _cols(cashflow)
+    income_col = income_cols[0] if income_cols else None
+    income_prior_col = income_cols[1] if len(income_cols) > 1 else None
+    balance_col = balance_cols[0] if balance_cols else None
+    balance_prior_col = balance_cols[1] if len(balance_cols) > 1 else None
+    cashflow_col = cashflow_cols[0] if cashflow_cols else None
+
+    fiscal_year_end = (income_col or balance_col or cashflow_col)
+
+    latest_revenue = _value(income, ["Total Revenue"], income_col)
+    prior_revenue = _value(income, ["Total Revenue"], income_prior_col)
+    latest_net_income = _value(income, ["Net Income"], income_col)
+    latest_gross_profit = _value(income, ["Gross Profit"], income_col)
+
+    cash = _value(balance, ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"], balance_col)
+    total_debt = _value(balance, ["Total Debt"], balance_col)
+    shares_outstanding = _value(balance, ["Ordinary Shares Number", "Share Issued"], balance_col)
+    prior_shares_outstanding = _value(balance, ["Ordinary Shares Number", "Share Issued"], balance_prior_col)
+
+    operating_cash_flow = _value(cashflow, ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities"], cashflow_col)
+    free_cash_flow = _value(cashflow, ["Free Cash Flow"], cashflow_col)
+    # Quarterly burn from whichever annual cash-flow figure is available --
+    # only meaningful when the company is actually burning cash (negative).
+    annual_burn = free_cash_flow if free_cash_flow is not None else operating_cash_flow
+    quarterly_burn = -annual_burn / 4.0 if annual_burn is not None and annual_burn < 0 else None
 
     highlights = {
-        "fiscal_year_end": latest_col.strftime("%Y-%m-%d"),
+        "fiscal_year_end": fiscal_year_end.strftime("%Y-%m-%d") if fiscal_year_end is not None else None,
         "revenue": latest_revenue,
         "revenue_yoy_pct": (
             (latest_revenue - prior_revenue) / prior_revenue * 100.0
@@ -390,6 +432,17 @@ def get_financial_highlights(ticker: str) -> Optional[dict]:
         "gross_margin_pct": (
             latest_gross_profit / latest_revenue * 100.0
             if latest_gross_profit is not None and latest_revenue
+            else None
+        ),
+        "cash": cash,
+        "total_debt": total_debt,
+        "operating_cash_flow": operating_cash_flow,
+        "free_cash_flow": free_cash_flow,
+        "cash_runway_quarters": (cash / quarterly_burn) if cash is not None and quarterly_burn else None,
+        "shares_outstanding": shares_outstanding,
+        "shares_outstanding_yoy_pct": (
+            (shares_outstanding - prior_shares_outstanding) / prior_shares_outstanding * 100.0
+            if shares_outstanding is not None and prior_shares_outstanding
             else None
         ),
     }

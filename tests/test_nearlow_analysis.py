@@ -582,3 +582,45 @@ def test_technical_lines_reports_when_indicators_unavailable():
 def test_fundamental_lines_reports_when_financials_unavailable():
     lines = nla._fundamental_lines("ACME", _context(financials=None))
     assert any("not available for this ticker" in line for line in lines)
+
+
+def test_fundamental_lines_never_mentions_analyst_target_or_ratings():
+    """Regression guard: this persona used to include the candidate's
+    analyst mean target and ratings breakdown, which let it fall back on
+    "analysts say N% upside" reasoning instead of the actual business --
+    observed in practice giving a pre-revenue biotech with no financials
+    a "significantly undervalued" bullish call based purely on its price
+    target. The candidate here still carries target_mean/buy_ratio_pct
+    (as every real candidate does), so this only passes if the function
+    itself never reads them."""
+    lines = nla._fundamental_lines("ACME", _context(financials=None))
+    text = " ".join(lines).lower()
+    assert "target" not in text
+    assert "rating" not in text
+    assert "analyst" not in text
+    assert "upside" not in text
+
+
+def test_fundamental_lines_reports_balance_sheet_and_cash_flow_fields():
+    financials = {
+        "fiscal_year_end": "2026-01-31",
+        "revenue": None,
+        "revenue_yoy_pct": None,
+        "net_income": None,
+        "gross_margin_pct": None,
+        "cash": 40_000_000.0,
+        "total_debt": 5_000_000.0,
+        "operating_cash_flow": -18_000_000.0,
+        "free_cash_flow": -20_000_000.0,
+        "cash_runway_quarters": 8.0,
+        "shares_outstanding": 110_000_000.0,
+        "shares_outstanding_yoy_pct": 10.0,
+    }
+    lines = nla._fundamental_lines("ACME", _context(financials=financials))
+    text = " ".join(lines)
+    assert "none reported (pre-revenue)" in text
+    assert "Cash & equivalents: 40,000,000" in text
+    assert "Total debt: 5,000,000" in text
+    assert "Free cash flow (annual): -20,000,000" in text
+    assert "cash runway at current burn rate: 8.0 quarters" in text
+    assert "Shares outstanding: 110,000,000, +10.0% YoY" in text
