@@ -40,7 +40,7 @@ def test_is_pre_revenue_true_for_confirmed_zero_revenue(monkeypatch):
         def get_income_stmt(self, freq="yearly"):
             return income
 
-    assert nl._is_pre_revenue(FakeTicker()) is True
+    assert nl._is_pre_revenue({}, FakeTicker()) is True
 
 
 def test_is_pre_revenue_false_for_real_revenue(monkeypatch):
@@ -52,7 +52,7 @@ def test_is_pre_revenue_false_for_real_revenue(monkeypatch):
         def get_income_stmt(self, freq="yearly"):
             return income
 
-    assert nl._is_pre_revenue(FakeTicker()) is False
+    assert nl._is_pre_revenue({}, FakeTicker()) is False
 
 
 def test_is_pre_revenue_none_when_statement_unavailable():
@@ -60,7 +60,7 @@ def test_is_pre_revenue_none_when_statement_unavailable():
         def get_income_stmt(self, freq="yearly"):
             raise RuntimeError("no data")
 
-    assert nl._is_pre_revenue(FakeTicker()) is None
+    assert nl._is_pre_revenue({}, FakeTicker()) is None
 
 
 def test_is_pre_revenue_uses_info_total_revenue_first():
@@ -71,28 +71,20 @@ def test_is_pre_revenue_uses_info_total_revenue_first():
     field must be checked before falling back to the income statement."""
 
     class FakeTicker:
-        @property
-        def info(self):
-            return {"totalRevenue": 2_700_000_000.0}
-
         def get_income_stmt(self, freq="yearly"):
             raise AssertionError("should not fall back to the income statement when .info already has revenue")
 
-    assert nl._is_pre_revenue(FakeTicker()) is False
+    assert nl._is_pre_revenue({"totalRevenue": 2_700_000_000.0}, FakeTicker()) is False
 
 
 def test_is_pre_revenue_falls_back_to_income_statement_when_info_lacks_revenue():
     class FakeTicker:
-        @property
-        def info(self):
-            return {"sector": "Healthcare"}  # no totalRevenue key
-
         def get_income_stmt(self, freq="yearly"):
             import pandas as pd
 
             return pd.DataFrame({pd.Timestamp("2026-01-31"): {"Total Revenues": 500_000.0}})
 
-    assert nl._is_pre_revenue(FakeTicker()) is False
+    assert nl._is_pre_revenue({"sector": "Healthcare"}, FakeTicker()) is False
 
 
 def _fake_ticker_factory(data_by_symbol):
@@ -195,6 +187,41 @@ def test_find_nearlow_candidates_reports_is_pre_revenue(monkeypatch):
 
     results = nl.find_nearlow_candidates(max_pct_from_low=15.0, min_buy_ratio_pct=60.0, min_ratings_count=3)
     assert results[0]["is_pre_revenue"] is True
+    assert results[0]["trailing_pe"] is None  # FakeTicker has no .info -- degrades gracefully
+
+
+def test_find_nearlow_candidates_reports_trailing_pe(monkeypatch):
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        return {"quotes": [{"symbol": "PROFITABLE", "shortName": "Profitable Co", "regularMarketPrice": 10.0, "marketCap": 1e9}]}
+
+    class FakeFastInfo:
+        year_high = 20.0
+        year_low = 9.5
+
+    class FakeTicker:
+        def __init__(self, symbol):
+            pass
+
+        def get_analyst_price_targets(self):
+            return {"mean": 15.0}
+
+        def get_recommendations_summary(self, as_dict=False):
+            return {"strongBuy": {0: 6}, "buy": {0: 3}, "hold": {0: 1}, "sell": {0: 0}, "strongSell": {0: 0}}
+
+        @property
+        def info(self):
+            return {"totalRevenue": 500_000_000.0, "trailingPE": 22.5}
+
+        @property
+        def fast_info(self):
+            return FakeFastInfo()
+
+    monkeypatch.setattr(nl.yf, "screen", fake_screen)
+    monkeypatch.setattr(nl.yf, "Ticker", FakeTicker)
+
+    results = nl.find_nearlow_candidates(max_pct_from_low=15.0, min_buy_ratio_pct=60.0, min_ratings_count=3)
+    assert results[0]["trailing_pe"] == 22.5
+    assert results[0]["is_pre_revenue"] is False
 
 
 def test_find_nearlow_candidates_requires_minimum_ratings_count(monkeypatch):

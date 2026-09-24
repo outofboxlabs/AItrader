@@ -24,7 +24,7 @@ def test_is_pre_revenue_true_for_confirmed_zero_revenue():
         def get_income_stmt(self, freq="yearly"):
             return income
 
-    assert ps._is_pre_revenue(FakeTicker()) is True
+    assert ps._is_pre_revenue({}, FakeTicker()) is True
 
 
 def test_is_pre_revenue_false_for_real_revenue():
@@ -36,7 +36,7 @@ def test_is_pre_revenue_false_for_real_revenue():
         def get_income_stmt(self, freq="yearly"):
             return income
 
-    assert ps._is_pre_revenue(FakeTicker()) is False
+    assert ps._is_pre_revenue({}, FakeTicker()) is False
 
 
 def test_is_pre_revenue_none_when_statement_unavailable():
@@ -44,19 +44,15 @@ def test_is_pre_revenue_none_when_statement_unavailable():
         def get_income_stmt(self, freq="yearly"):
             raise RuntimeError("no data")
 
-    assert ps._is_pre_revenue(FakeTicker()) is None
+    assert ps._is_pre_revenue({}, FakeTicker()) is None
 
 
 def test_is_pre_revenue_uses_info_total_revenue_first():
     class FakeTicker:
-        @property
-        def info(self):
-            return {"totalRevenue": 2_700_000_000.0}
-
         def get_income_stmt(self, freq="yearly"):
             raise AssertionError("should not fall back to the income statement when .info already has revenue")
 
-    assert ps._is_pre_revenue(FakeTicker()) is False
+    assert ps._is_pre_revenue({"totalRevenue": 2_700_000_000.0}, FakeTicker()) is False
 
 
 def _fake_ticker_factory(data_by_symbol):
@@ -139,8 +135,43 @@ def test_find_pennystock_candidates_reports_is_pre_revenue(monkeypatch):
 
     results = ps.find_pennystock_candidates(price_threshold=5.0)
     assert results[0]["is_pre_revenue"] is True
+    assert results[0]["trailing_pe"] is None  # FakeTicker has no .info -- degrades gracefully
     assert results[0]["buy_ratio_pct"] is None
     assert results[0]["ratings_count"] == 0
+
+
+def test_find_pennystock_candidates_reports_trailing_pe(monkeypatch):
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        return {"quotes": [{"symbol": "PROFITABLE", "shortName": "Profitable Co", "regularMarketPrice": 2.5, "marketCap": 5e7, "regularMarketVolume": 500_000}]}
+
+    class FakeTicker:
+        def __init__(self, symbol):
+            pass
+
+        def get_analyst_price_targets(self):
+            return {}
+
+        def get_recommendations_summary(self, as_dict=False):
+            return {}
+
+        @property
+        def info(self):
+            return {"totalRevenue": 10_000_000.0, "trailingPE": 8.2}
+
+        @property
+        def fast_info(self):
+            class FakeFastInfo:
+                year_high = 4.0
+                year_low = 1.5
+
+            return FakeFastInfo()
+
+    monkeypatch.setattr(ps.yf, "screen", fake_screen)
+    monkeypatch.setattr(ps.yf, "Ticker", FakeTicker)
+
+    results = ps.find_pennystock_candidates(price_threshold=5.0)
+    assert results[0]["trailing_pe"] == 8.2
+    assert results[0]["is_pre_revenue"] is False
 
 
 def test_find_pennystock_candidates_attaches_all_three_columns(monkeypatch):

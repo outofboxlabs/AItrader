@@ -340,6 +340,24 @@ def run_nearlow_now():
     return jsonify({"asof_date": date.today().isoformat(), "candidates": candidates})
 
 
+def _pre_revenue_pe_prefilter(c: dict) -> Optional[dict]:
+    """A positive trailing P/E is proof of real, positive earnings, which
+    is proof of real revenue -- pre-revenue companies can never post one
+    (see the pre-revenue/negative-P/E discussion this was built from: the
+    implication only runs one way, negative/missing P/E does NOT prove
+    pre-revenue, but positive P/E DOES disprove it). So for those
+    candidates the AI call below is pure cost with no informational value
+    -- skip it and answer directly. Returns None (caller must still run
+    the AI check) when P/E doesn't settle it."""
+    trailing_pe = c.get("trailing_pe")
+    if isinstance(trailing_pe, (int, float)) and trailing_pe > 0:
+        return {
+            "is_pre_revenue": False,
+            "reason": f"Positive trailing P/E ({trailing_pe:.1f}) confirms real earnings -- not pre-revenue (AI check skipped).",
+        }
+    return None
+
+
 @app.route("/api/nearlow/check-pre-revenue", methods=["POST"])
 def check_nearlow_pre_revenue():
     """On-demand AI re-classification of is_pre_revenue for the CURRENT
@@ -366,11 +384,13 @@ def check_nearlow_pre_revenue():
         candidates = db_mod.get_nearlow_candidates(conn, latest_date)
 
     def _classify(c):
-        try:
-            financials = data.get_financial_highlights(c["ticker"])
-            result = nearlow_analysis.classify_pre_revenue(c["ticker"], c.get("name"), financials, provider, model, api_key=api_key)
-        except Exception as exc:
-            result = {"is_pre_revenue": None, "reason": f"AI check failed: {exc}"}
+        result = _pre_revenue_pe_prefilter(c)
+        if result is None:
+            try:
+                financials = data.get_financial_highlights(c["ticker"])
+                result = nearlow_analysis.classify_pre_revenue(c["ticker"], c.get("name"), financials, provider, model, api_key=api_key)
+            except Exception as exc:
+                result = {"is_pre_revenue": None, "reason": f"AI check failed: {exc}"}
         c["is_pre_revenue"] = result.get("is_pre_revenue")
         c["is_pre_revenue_reason"] = result.get("reason")
 
@@ -463,11 +483,13 @@ def check_pennystock_pre_revenue():
         candidates = db_mod.get_pennystock_candidates(conn, latest_date, threshold_key)
 
     def _classify(c):
-        try:
-            financials = data.get_financial_highlights(c["ticker"])
-            result = nearlow_analysis.classify_pre_revenue(c["ticker"], c.get("name"), financials, provider, model, api_key=api_key)
-        except Exception as exc:
-            result = {"is_pre_revenue": None, "reason": f"AI check failed: {exc}"}
+        result = _pre_revenue_pe_prefilter(c)
+        if result is None:
+            try:
+                financials = data.get_financial_highlights(c["ticker"])
+                result = nearlow_analysis.classify_pre_revenue(c["ticker"], c.get("name"), financials, provider, model, api_key=api_key)
+            except Exception as exc:
+                result = {"is_pre_revenue": None, "reason": f"AI check failed: {exc}"}
         c["is_pre_revenue"] = result.get("is_pre_revenue")
         c["is_pre_revenue_reason"] = result.get("reason")
 
@@ -2577,16 +2599,61 @@ function matchesPreRevenueFilter(c, filterValue) {
   return filterValue === "exclude" ? hasConfirmedRevenue : !hasConfirmedRevenue;
 }
 
-// The "no revenue coming in" sign next to a pre-revenue candidate's name.
-// There's no literal "empty pocket" glyph in Unicode -- prohibited+moneybag
-// reads unambiguously as "no money" everywhere without relying on an
-// obscure/inconsistently-rendered emoji.
-const PRE_REVENUE_SIGN = "\\u{1F6AB}\\u{1F4B0}";
+// Reusable registry of small inline-SVG badges shown next to a candidate's
+// name in a screener table. SVG (not native emoji) is used deliberately --
+// two emoji don't reliably compose into one glyph across platforms/fonts,
+// while an SVG gives full, consistent control over a single combined icon.
+// To add a new sign in future: add an entry here, then a small
+// `<name>Tag(c)` helper below (see preRevenueTag/negativePeTag) that
+// decides when it applies and calls signHtml(key, label, detail).
+const SIGNS = {
+  // Coin ("$") overlaid with a red prohibited-circle/slash -- "no revenue
+  // coming in". Replaces the old two-character prohibited+moneybag emoji
+  // combo with one single glyph.
+  preRevenue: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" style="vertical-align:-3px;">
+    <circle cx="8" cy="8" r="6.25" fill="#d4a017" stroke="#8a6d00" stroke-width="0.75"/>
+    <text x="8" y="10.8" text-anchor="middle" font-size="7.5" font-weight="bold" fill="#5c4700" font-family="sans-serif">$</text>
+    <circle cx="8" cy="8" r="7" fill="none" stroke="#d32f2f" stroke-width="1.8"/>
+    <line x1="3.3" y1="12.7" x2="12.7" y2="3.3" stroke="#d32f2f" stroke-width="1.8"/>
+  </svg>`,
+  // Same coin base, but a small red down-arrow badge in the corner instead
+  // of the full prohibited circle -- visually related (same underlying
+  // "$") but a distinct, weaker signal: "currently unprofitable" does NOT
+  // imply pre-revenue the way pre-revenue always implies negative/missing
+  // P/E (see preRevenueTag/negativePeTag below for how the two stay
+  // mutually exclusive on one row).
+  negativePe: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" style="vertical-align:-3px;">
+    <circle cx="8" cy="8" r="6.25" fill="#d4a017" stroke="#8a6d00" stroke-width="0.75"/>
+    <text x="8" y="10.8" text-anchor="middle" font-size="7.5" font-weight="bold" fill="#5c4700" font-family="sans-serif">$</text>
+    <circle cx="12" cy="12" r="4.5" fill="#d32f2f" stroke="var(--bg,#fff)" stroke-width="1"/>
+    <path d="M12 9.6v4.8m0 0l-1.7-1.7M12 14.4l1.7-1.7" stroke="#fff" stroke-width="1.1" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`,
+};
+
+function signHtml(key, label, detail) {
+  const svg = SIGNS[key];
+  if (!svg) return "";
+  const title = detail ? `${label}: ${detail}` : label;
+  return ` <span title="${escapeHtml(title)}" style="cursor:help; display:inline-block;">${svg}</span>`;
+}
 
 function preRevenueTag(c) {
   if (c.is_pre_revenue === false) return "";
-  const reason = c.is_pre_revenue_reason ? `: ${c.is_pre_revenue_reason}` : " (based on yfinance's reported financials -- click \\"Check pre-revenue (AI)\\" for a more reliable read)";
-  return ` <span title="Pre-revenue -- no confirmed commercial revenue${escapeHtml(reason)}" style="cursor:help;">${PRE_REVENUE_SIGN}</span>`;
+  const reason = c.is_pre_revenue_reason || "based on yfinance's reported financials -- click \\"Check pre-revenue (AI)\\" for a more reliable read";
+  return signHtml("preRevenue", "Pre-revenue -- no confirmed commercial revenue", reason);
+}
+
+// Shown only when revenue is CONFIRMED real (is_pre_revenue === false) but
+// the trailing P/E is still negative -- i.e. unprofitable for some other
+// reason (write-downs, a cyclical downturn, heavy reinvestment, debt
+// load). When is_pre_revenue isn't confirmed false, preRevenueTag already
+// covers the row (pre-revenue always implies negative/missing P/E, so a
+// second sign there would just repeat the same point).
+function negativePeTag(c) {
+  if (c.is_pre_revenue !== false) return "";
+  const pe = c.trailing_pe;
+  if (typeof pe !== "number" || pe >= 0) return "";
+  return signHtml("negativePe", "Negative P/E despite confirmed revenue", `trailing P/E of ${pe.toFixed(1)}`);
 }
 
 function renderNearlowTable() {
@@ -2633,7 +2700,7 @@ function renderNearlowTable() {
       ? `${c.target_upside_pct >= 0 ? "+" : ""}${fmtNum(c.target_upside_pct, 1)}%`
       : "n/a";
     return `<tr>
-      <td><a class="ticker-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(c.ticker)}" target="_blank" rel="noopener">${c.ticker}</a>${c.name ? ` <span class="muted">(${c.name})</span>` : ""}${preRevenueTag(c)}</td>
+      <td><a class="ticker-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(c.ticker)}" target="_blank" rel="noopener">${c.ticker}</a>${c.name ? ` <span class="muted">(${c.name})</span>` : ""}${preRevenueTag(c)}${negativePeTag(c)}</td>
       <td>${fmtMoney(c.price)}</td>
       <td class="neg">+${fmtNum(c.pct_from_52w_low, 1)}%</td>
       <td>${c.pct_from_52w_high !== null && c.pct_from_52w_high !== undefined ? fmtNum(c.pct_from_52w_high, 1) + "%" : "n/a"}</td>
@@ -2784,7 +2851,7 @@ function renderPennystockTable() {
     const lowCell = c.year_low !== null && c.year_low !== undefined
       ? `${fmtMoney(c.year_low)} <span class="muted">(${pctStr(c.pct_from_52w_low)})</span>` : "n/a";
     return `<tr>
-      <td><a class="ticker-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(c.ticker)}" target="_blank" rel="noopener">${c.ticker}</a>${c.name ? ` <span class="muted">(${c.name})</span>` : ""}${preRevenueTag(c)}</td>
+      <td><a class="ticker-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(c.ticker)}" target="_blank" rel="noopener">${c.ticker}</a>${c.name ? ` <span class="muted">(${c.name})</span>` : ""}${preRevenueTag(c)}${negativePeTag(c)}</td>
       <td>${fmtMoney(c.price)}</td>
       <td>${c.volume !== null && c.volume !== undefined ? Number(c.volume).toLocaleString() : "n/a"}</td>
       <td>${highCell}</td>

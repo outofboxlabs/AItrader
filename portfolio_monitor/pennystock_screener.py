@@ -49,15 +49,12 @@ def _buy_ratio_pct(ratings: dict) -> tuple[Optional[float], int]:
     return buy_like / total * 100.0, int(total)
 
 
-def _is_pre_revenue(t) -> Optional[bool]:
+def _is_pre_revenue(info: dict, t) -> Optional[bool]:
     """Same as nearlow_screener._is_pre_revenue -- see there for why this
-    is duplicated rather than shared, why .info's totalRevenue is checked
-    before the full income statement, and why None is treated the same
-    as True by callers/the UI filter."""
-    try:
-        info = t.info or {}
-    except Exception:
-        info = {}
+    is duplicated rather than shared, why .info is fetched once by the
+    caller and passed in (it's also where trailing_pe comes from), why
+    its totalRevenue is checked before the full income statement, and why
+    None is treated the same as True by callers/the UI filter."""
     revenue = info.get("totalRevenue")
     if isinstance(revenue, numbers.Real):
         return float(revenue) <= 0
@@ -119,7 +116,13 @@ def _enrich_candidate(q: dict) -> tuple[Optional[dict], str]:
     except Exception:
         mean_target = None
     target_upside_pct = (mean_target - current_price) / current_price * 100.0 if mean_target else None
-    is_pre_revenue = _is_pre_revenue(t)
+    try:
+        info = t.info or {}
+    except Exception:
+        info = {}
+    is_pre_revenue = _is_pre_revenue(info, t)
+    trailing_pe = info.get("trailingPE")
+    trailing_pe = float(trailing_pe) if isinstance(trailing_pe, numbers.Real) else None
 
     candidate = {
         "ticker": ticker,
@@ -137,6 +140,7 @@ def _enrich_candidate(q: dict) -> tuple[Optional[dict], str]:
         "ratings_count": ratings_count,
         "market_cap": q.get("marketCap"),
         "is_pre_revenue": is_pre_revenue,
+        "trailing_pe": trailing_pe,
     }
     # Same round-trip as the other screeners -- yfinance's dict
     # conversions carry numpy/pandas types that json.dumps chokes on

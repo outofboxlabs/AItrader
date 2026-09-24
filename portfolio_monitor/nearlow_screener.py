@@ -51,7 +51,7 @@ def _buy_ratio_pct(ratings: dict) -> tuple[Optional[float], int]:
     return buy_like / total * 100.0, int(total)
 
 
-def _is_pre_revenue(t) -> Optional[bool]:
+def _is_pre_revenue(info: dict, t) -> Optional[bool]:
     """True if trailing-twelve-month revenue is confirmed zero/none, False
     if confirmed real revenue, None if it can't be determined either way
     -- which on this app's typical universe (micro-caps, recent IPOs,
@@ -59,17 +59,15 @@ def _is_pre_revenue(t) -> Optional[bool]:
     too early-stage to have meaningful revenue reporting. Callers/the UI
     filter treat None the same as True for that reason.
 
-    Checks .info's "totalRevenue" first (a single quoteSummary field) --
-    in practice more consistently populated across tickers than the full
-    annual income statement, which was found live to come back without a
-    usable revenue line for BOTH a genuinely pre-revenue biotech AND a
-    real, revenue-generating health insurer (whose income statement uses
-    a non-standard label). Only falls back to the income statement if
+    Checks .info's "totalRevenue" first (a single quoteSummary field,
+    fetched once by the caller and passed in here rather than re-fetched
+    -- it's also where trailing_pe comes from) -- in practice more
+    consistently populated across tickers than the full annual income
+    statement, which was found live to come back without a usable
+    revenue line for BOTH a genuinely pre-revenue biotech AND a real,
+    revenue-generating health insurer (whose income statement uses a
+    non-standard label). Only falls back to the income statement if
     .info didn't have it."""
-    try:
-        info = t.info or {}
-    except Exception:
-        info = {}
     revenue = info.get("totalRevenue")
     if isinstance(revenue, numbers.Real):
         return float(revenue) <= 0
@@ -139,7 +137,13 @@ def _enrich_candidate(
     target_upside_pct = (mean_target - current_price) / current_price * 100.0 if mean_target else None
 
     pct_from_52w_high = (current_price - year_high) / year_high * 100.0 if year_high else None
-    is_pre_revenue = _is_pre_revenue(t)
+    try:
+        info = t.info or {}
+    except Exception:
+        info = {}
+    is_pre_revenue = _is_pre_revenue(info, t)
+    trailing_pe = info.get("trailingPE")
+    trailing_pe = float(trailing_pe) if isinstance(trailing_pe, numbers.Real) else None
 
     candidate = {
         "ticker": ticker,
@@ -155,6 +159,7 @@ def _enrich_candidate(
         "buy_ratio_pct": buy_ratio_pct,
         "market_cap": q.get("marketCap"),
         "is_pre_revenue": is_pre_revenue,
+        "trailing_pe": trailing_pe,
     }
     # See growth_screener._enrich_candidate for why this round-trip is
     # required: yfinance's dict conversions carry numpy/pandas types that

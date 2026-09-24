@@ -186,6 +186,7 @@ CREATE TABLE IF NOT EXISTS nearlow_candidates (
     market_cap REAL,
     is_pre_revenue INTEGER,
     is_pre_revenue_reason TEXT,
+    trailing_pe REAL,
     PRIMARY KEY (asof_date, ticker)
 );
 
@@ -208,6 +209,7 @@ CREATE TABLE IF NOT EXISTS pennystock_candidates (
     market_cap REAL,
     is_pre_revenue INTEGER,
     is_pre_revenue_reason TEXT,
+    trailing_pe REAL,
     PRIMARY KEY (asof_date, threshold, ticker)
 );
 
@@ -255,8 +257,8 @@ _ADDED_COLUMNS = {
     "news_analysis": [("provider", "TEXT")],
     "growth_candidates": [("strong_buy_ratio_pct", "REAL")],
     "forex_calendar_events": [("direction", "TEXT")],
-    "nearlow_candidates": [("is_pre_revenue", "INTEGER"), ("is_pre_revenue_reason", "TEXT")],
-    "pennystock_candidates": [("is_pre_revenue", "INTEGER"), ("is_pre_revenue_reason", "TEXT")],
+    "nearlow_candidates": [("is_pre_revenue", "INTEGER"), ("is_pre_revenue_reason", "TEXT"), ("trailing_pe", "REAL")],
+    "pennystock_candidates": [("is_pre_revenue", "INTEGER"), ("is_pre_revenue_reason", "TEXT"), ("trailing_pe", "REAL")],
 }
 
 
@@ -613,8 +615,8 @@ def save_nearlow_candidates(conn, asof_date: str, candidates: list[dict]) -> Non
         """INSERT OR REPLACE INTO nearlow_candidates
            (asof_date, ticker, name, price, year_low, year_high, pct_from_52w_low,
             pct_from_52w_high, target_mean, target_upside_pct, analyst_ratings_json,
-            buy_ratio_pct, market_cap, is_pre_revenue, is_pre_revenue_reason)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            buy_ratio_pct, market_cap, is_pre_revenue, is_pre_revenue_reason, trailing_pe)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         [
             (
                 asof_date,
@@ -632,6 +634,7 @@ def save_nearlow_candidates(conn, asof_date: str, candidates: list[dict]) -> Non
                 c.get("market_cap"),
                 _bool_to_int(c.get("is_pre_revenue")),
                 c.get("is_pre_revenue_reason"),
+                c.get("trailing_pe"),
             )
             for c in candidates
         ],
@@ -661,8 +664,8 @@ def save_pennystock_candidates(conn, asof_date: str, threshold: str, candidates:
         """INSERT OR REPLACE INTO pennystock_candidates
            (asof_date, threshold, ticker, name, price, year_low, year_high, pct_from_52w_low,
             pct_from_52w_high, volume, target_mean, target_upside_pct, analyst_ratings_json,
-            buy_ratio_pct, ratings_count, market_cap, is_pre_revenue, is_pre_revenue_reason)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            buy_ratio_pct, ratings_count, market_cap, is_pre_revenue, is_pre_revenue_reason, trailing_pe)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         [
             (
                 asof_date,
@@ -683,6 +686,7 @@ def save_pennystock_candidates(conn, asof_date: str, threshold: str, candidates:
                 c.get("market_cap"),
                 _bool_to_int(c.get("is_pre_revenue")),
                 c.get("is_pre_revenue_reason"),
+                c.get("trailing_pe"),
             )
             for c in candidates
         ],

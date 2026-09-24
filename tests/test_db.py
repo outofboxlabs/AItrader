@@ -3,6 +3,43 @@ import sqlite3
 from portfolio_monitor import db as db_mod
 
 
+def test_nearlow_candidates_round_trip_trailing_pe(tmp_path):
+    """trailing_pe is a later addition (like is_pre_revenue before it) --
+    guard against the same silent-data-loss bug: a missing column would
+    make save_nearlow_candidates raise instead of quietly dropping the
+    field, but this locks in the actual read-back value/type too."""
+    db_path = str(tmp_path / "test.db")
+    db_mod.init_db(db_path)
+    with db_mod.connect(db_path) as conn:
+        db_mod.save_nearlow_candidates(
+            conn,
+            "2026-01-01",
+            [
+                {"ticker": "PROFITABLE", "trailing_pe": 15.5},
+                {"ticker": "UNKNOWN", "trailing_pe": None},
+            ],
+        )
+    with db_mod.connect(db_path) as conn:
+        rows = {r["ticker"]: r for r in db_mod.get_nearlow_candidates(conn, "2026-01-01")}
+    assert rows["PROFITABLE"]["trailing_pe"] == 15.5
+    assert rows["UNKNOWN"]["trailing_pe"] is None
+
+
+def test_pennystock_candidates_round_trip_trailing_pe(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db_mod.init_db(db_path)
+    with db_mod.connect(db_path) as conn:
+        db_mod.save_pennystock_candidates(
+            conn,
+            "2026-01-01",
+            "5",
+            [{"ticker": "PROFITABLE", "trailing_pe": 8.2}],
+        )
+    with db_mod.connect(db_path) as conn:
+        rows = db_mod.get_pennystock_candidates(conn, "2026-01-01", "5")
+    assert rows[0]["trailing_pe"] == 8.2
+
+
 def test_migrate_columns_survives_concurrent_duplicate_add(tmp_path):
     """Regression test for a real crash hit live: init_db runs on nearly
     every request, so two requests can both see a newly-added column

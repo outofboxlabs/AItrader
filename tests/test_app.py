@@ -442,6 +442,38 @@ def test_check_nearlow_pre_revenue_isolates_one_ticker_failure(client, monkeypat
     assert "AI check failed" in by_ticker["BAD"]["is_pre_revenue_reason"]
 
 
+def test_check_nearlow_pre_revenue_skips_ai_call_for_positive_pe(client, monkeypatch):
+    """A positive trailing P/E proves real, positive earnings -- which
+    proves real revenue -- so it's a cheap, sufficient way to answer
+    "not pre-revenue" without spending an AI call. Only candidates with
+    negative/missing P/E should ever reach classify_pre_revenue."""
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
+    _seed_nearlow_run(
+        [
+            {"ticker": "PROFITABLE", "name": "Profitable Co", "trailing_pe": 15.5},
+            {"ticker": "UNCLEAR", "name": "Unclear Co", "trailing_pe": None},
+        ]
+    )
+
+    calls = []
+
+    def fake_classify(ticker, name, financials, provider, model, api_key=None):
+        calls.append(ticker)
+        return {"is_pre_revenue": True, "reason": "no commercial revenue yet"}
+
+    monkeypatch.setattr(app_mod.nearlow_analysis, "classify_pre_revenue", fake_classify)
+
+    res = client.post("/api/nearlow/check-pre-revenue")
+    assert res.status_code == 200
+    by_ticker = {c["ticker"]: c for c in res.get_json()["candidates"]}
+
+    assert calls == ["UNCLEAR"]  # PROFITABLE never triggered an AI call
+    assert by_ticker["PROFITABLE"]["is_pre_revenue"] is False
+    assert "P/E" in by_ticker["PROFITABLE"]["is_pre_revenue_reason"]
+    assert by_ticker["UNCLEAR"]["is_pre_revenue"] is True
+
+
 # --- penny stock screener -------------------------------------------------
 
 
@@ -562,6 +594,35 @@ def test_check_pennystock_pre_revenue_classifies_and_persists(client, monkeypatc
 
     res2 = client.get("/api/pennystock?threshold=5")
     assert res2.get_json()["candidates"][0]["is_pre_revenue"] is True
+
+
+def test_check_pennystock_pre_revenue_skips_ai_call_for_positive_pe(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.data, "get_financial_highlights", lambda ticker: None)
+    _seed_pennystock_run(
+        "5",
+        [
+            {"ticker": "PROFITABLE", "name": "Profitable Co", "trailing_pe": 8.2},
+            {"ticker": "UNCLEAR", "name": "Unclear Co", "trailing_pe": -3.1},
+        ],
+    )
+
+    calls = []
+
+    def fake_classify(ticker, name, financials, provider, model, api_key=None):
+        calls.append(ticker)
+        return {"is_pre_revenue": True, "reason": "no commercial revenue yet"}
+
+    monkeypatch.setattr(app_mod.nearlow_analysis, "classify_pre_revenue", fake_classify)
+
+    res = client.post("/api/pennystock/check-pre-revenue", data=json.dumps({"threshold": "5"}), content_type="application/json")
+    assert res.status_code == 200
+    by_ticker = {c["ticker"]: c for c in res.get_json()["candidates"]}
+
+    assert calls == ["UNCLEAR"]  # PROFITABLE never triggered an AI call
+    assert by_ticker["PROFITABLE"]["is_pre_revenue"] is False
+    assert "P/E" in by_ticker["PROFITABLE"]["is_pre_revenue_reason"]
+    assert by_ticker["UNCLEAR"]["is_pre_revenue"] is True
 
 
 # --- watchlist / Potential Portfolio ---------------------------------------
