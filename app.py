@@ -1836,7 +1836,7 @@ PAGE_TEMPLATE = """<!doctype html>
         </select>
       </div>
       <div><label>Rank by</label><br>
-        <select id="bd-rank-by">
+        <select id="bd-rank-by" onchange="runBigdropNow()">
           <option value="1d" selected>Biggest 1-day drop</option>
           <option value="1w">Biggest 1-week drop</option>
           <option value="1m">Biggest 1-month drop</option>
@@ -1864,12 +1864,13 @@ PAGE_TEMPLATE = """<!doctype html>
     <p class="muted" style="max-width:640px;">
       Large-cap US stocks at or above the selected market cap, ranked by how hard they've been hit --
       1-day, 1-week, and 1-month price drop side by side (yfinance has no native weekly/monthly change
-      field, so those two are computed from daily closes). "Rank by" controls which of the three
-      "Run Now" actually searches for: since Yahoo has no native weekly/monthly sort either, ranking by
-      1-week/1-month sources the candidate pool from the worst 52-week performers instead of today's
-      movers, so it can find names that dropped hard over the past week/month even if they didn't move
-      much today -- the table itself stays sortable by any of the three columns regardless of which was
-      used to run the screen. Unlike Near 52W Low, no single quality filter is imposed here either --
+      field, so those two are computed from daily closes). "Rank by" controls which of the three the
+      screen actually searches for, and changing it re-runs the scan right away: since Yahoo has no
+      native weekly/monthly sort either, ranking by 1-week/1-month sources the candidate pool from the
+      worst 52-week performers instead of today's movers, so it can find names that dropped hard over
+      the past week/month even if they didn't move much today -- the table itself stays sortable by any
+      of the three columns afterward regardless of which was used to run the screen. Unlike Near 52W Low,
+      no single quality filter is imposed here either --
       the point is to surface any big-cap hit, not just ones the Street still likes -- so every candidate
       carries the same rich column set (52-week range, buy ratio, target upside) to judge by.
       "Pre-revenue" behaves exactly as on Near 52W Low/Penny Stocks: defaults to
