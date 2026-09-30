@@ -54,7 +54,12 @@ def _fake_ticker_factory(data_by_symbol):
 
         def history(self, period=None, interval=None):
             closes = self._data["closes"]
-            return pd.DataFrame({"Close": closes})
+            # Business days ending YESTERDAY -- the code under test drops
+            # any bar dated today (see _enrich_candidate), so fixtures
+            # must never include one, exactly like real post/pre-market
+            # data never should either.
+            index = pd.bdate_range(end=pd.Timestamp.now().normalize() - pd.Timedelta(days=1), periods=len(closes))
+            return pd.DataFrame({"Close": closes}, index=index)
 
         @property
         def fast_info(self):
@@ -104,6 +109,64 @@ def test_find_bigdrop_candidates_computes_all_three_drop_windows(monkeypatch):
     assert only["target_upside_pct"] == pytest.approx((25.0 - current_price) / current_price * 100.0)
     assert only["pct_from_52w_low"] == pytest.approx((current_price - 15.0) / 15.0 * 100.0)
     assert only["pct_from_52w_high"] == pytest.approx((current_price - 150.0) / 150.0 * 100.0)
+
+
+def test_find_bigdrop_candidates_excludes_todays_bar_from_1day_change(monkeypatch):
+    """Live bug: yfinance's history() includes a bar for the CURRENT
+    session (live-updating while the market's open, still present right
+    after close) -- if that bar isn't dropped, it's essentially the same
+    value as current_price, so comparing against it makes pct_change_1d
+    collapse to ~0% for every single candidate (confirmed live: an
+    entire Big Drops table showing +0.0%/-0.0% in the 1-Day column while
+    1-Week/1-Month, unaffected since they're far enough back, showed
+    real numbers). pct_change_1d must be computed against the most
+    recently COMPLETED prior session instead."""
+    class FakeTicker:
+        def __init__(self, symbol):
+            pass
+
+        def get_analyst_price_targets(self):
+            return {}
+
+        def get_recommendations_summary(self, as_dict=False):
+            return {}
+
+        def history(self, period=None, interval=None):
+            # 5 real prior sessions ending yesterday at 90.0, PLUS a bar
+            # for today at 100.0 (yfinance including the live/current
+            # session) -- current_price below matches that today bar
+            # almost exactly, as it would live (today's quote and
+            # today's still-forming daily bar track each other closely).
+            prior_index = pd.bdate_range(end=pd.Timestamp.now().normalize() - pd.Timedelta(days=1), periods=5)
+            today_index = pd.DatetimeIndex([pd.Timestamp.now().normalize()])
+            index = prior_index.append(today_index)
+            closes = [94.0, 93.0, 92.0, 91.0, 90.0, 100.0]
+            return pd.DataFrame({"Close": closes}, index=index)
+
+        @property
+        def fast_info(self):
+            class FakeFastInfo:
+                year_high = 150.0
+                year_low = 80.0
+
+            return FakeFastInfo()
+
+        @property
+        def info(self):
+            return {}
+
+    def fake_screen(query, sortField=None, sortAsc=None, size=None):
+        return {"quotes": [{"symbol": "TODAYBAR", "shortName": "Today Bar Co", "regularMarketPrice": 100.5, "marketCap": 5e9}]}
+
+    monkeypatch.setattr(bd.yf, "screen", fake_screen)
+    monkeypatch.setattr(bd.yf, "Ticker", FakeTicker)
+
+    results = bd.find_bigdrop_candidates(min_market_cap=1e9)
+    assert len(results) == 1
+    # Must compare against 90.0 (yesterday's real close), NOT 100.0
+    # (today's still-forming bar, which current_price of 100.5 is nearly
+    # identical to -- the exact scenario that collapsed to ~0% live).
+    assert results[0]["pct_change_1d"] == pytest.approx((100.5 - 90.0) / 90.0 * 100.0)
 
 
 def test_find_bigdrop_candidates_includes_candidates_with_no_analyst_coverage(monkeypatch):

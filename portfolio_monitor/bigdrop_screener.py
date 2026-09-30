@@ -33,6 +33,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
+import pandas as pd
 import yfinance as yf
 from yfinance import EquityQuery
 
@@ -145,6 +146,21 @@ def _enrich_candidate(q: dict) -> tuple[Optional[dict], str]:
     except Exception as exc:
         return None, f"history_error:{type(exc).__name__}"
     if hist is None or hist.empty:
+        return None, "no_history"
+    # yfinance's daily bar for the CURRENT session updates live while the
+    # market's open and is still present (at whatever the latest price
+    # was) right after close -- if left in, it's essentially the same
+    # value as current_price, making pct_change_1d compare current_price
+    # against itself and show ~0% for every candidate (exactly the bug
+    # reported live: every row showed +0.0%/-0.0% for 1-Day while 1-Week/
+    # 1-Month, far enough back to be unaffected, showed real numbers).
+    # Dropping it keeps closes[-1] as the most recently COMPLETED prior
+    # session's close, in the exchange's own timezone (hist.index is
+    # timezone-aware), regardless of when this runs relative to that
+    # market's own session.
+    today_local = (pd.Timestamp.now(tz=hist.index.tz) if hist.index.tz is not None else pd.Timestamp.now()).date()
+    hist = hist[hist.index.date < today_local]
+    if hist.empty:
         return None, "no_history"
     closes = [float(c) for c in hist["Close"].dropna().tolist()]
     if not closes:
