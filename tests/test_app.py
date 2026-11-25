@@ -2195,3 +2195,71 @@ def test_stock_analysis_panel_returns_five_agent_takes(client, monkeypatch):
     body = res.get_json()
     assert body["ticker"] == "ORCL"
     assert len(body["panel"]) == 5
+
+
+# --- options strategy panel -------------------------------------------------
+
+
+def test_run_options_strategy_panel_requires_ticker(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    res = client.post("/api/options-strategy/run", data=json.dumps({}), content_type="application/json")
+    assert res.status_code == 400
+
+
+def test_run_options_strategy_panel_rejects_unknown_provider(client):
+    res = client.post(
+        "/api/options-strategy/run",
+        data=json.dumps({"ticker": "ACME", "provider": "not-a-real-provider"}),
+        content_type="application/json",
+    )
+    assert res.status_code == 400
+
+
+def test_run_options_strategy_panel_requires_api_key(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: None)
+    res = client.post("/api/options-strategy/run", data=json.dumps({"ticker": "ACME"}), content_type="application/json")
+    assert res.status_code == 400
+    assert "API key" in res.get_json()["error"]
+
+
+def test_run_options_strategy_panel_404s_when_ticker_has_no_options(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    monkeypatch.setattr(app_mod.data, "get_options_strategy_context", lambda ticker: None)
+    res = client.post("/api/options-strategy/run", data=json.dumps({"ticker": "ACME"}), content_type="application/json")
+    assert res.status_code == 404
+
+
+def test_run_options_strategy_panel_handles_context_fetch_failure(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+
+    def boom(ticker):
+        raise RuntimeError("yfinance down")
+
+    monkeypatch.setattr(app_mod.data, "get_options_strategy_context", boom)
+    res = client.post("/api/options-strategy/run", data=json.dumps({"ticker": "ACME"}), content_type="application/json")
+    assert res.status_code == 502
+    assert "error" in res.get_json()
+
+
+def test_run_options_strategy_panel_returns_all_13_strategies(client, monkeypatch):
+    monkeypatch.setattr(app_mod.credentials, "resolve_api_key", lambda provider, interactive=False: "sk-test")
+    fake_context = {"current_price": 100.0, "atm_iv_pct": 40.0}
+    monkeypatch.setattr(app_mod.data, "get_options_strategy_context", lambda ticker: fake_context)
+
+    captured = {}
+
+    def fake_run_panel(ticker, context, provider, model, api_key=None):
+        captured["ticker"] = ticker
+        captured["context"] = context
+        return [{"strategy": "long_call", "label": "Long Call", "category": "Single-Leg Strategies", "verdict": "favorable", "rationale": "ok", "suggested_structure": "n/a", "error": None}]
+
+    monkeypatch.setattr(app_mod.options_strategy_analysis, "run_strategy_panel", fake_run_panel)
+
+    res = client.post("/api/options-strategy/run", data=json.dumps({"ticker": "acme"}), content_type="application/json")
+    assert res.status_code == 200
+    body = res.get_json()
+    assert body["ticker"] == "ACME"  # uppercased
+    assert body["context"] == fake_context
+    assert body["strategies"][0]["strategy"] == "long_call"
+    assert captured["ticker"] == "ACME"
+    assert captured["context"] == fake_context

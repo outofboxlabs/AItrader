@@ -821,3 +821,173 @@ def test_get_peer_comparison_peer_group_none_when_no_sector_either(monkeypatch):
     result = data_mod.get_peer_comparison("WRD")
     assert result["peer_group"] is None
     assert result["peers"] == []
+
+
+# --- get_options_strategy_context -------------------------------------------
+
+
+def test_nearest_expiry_picks_closest_dte():
+    today = datetime(2026, 1, 1, tzinfo=timezone.utc).date()
+    expiries = ["2026-01-15", "2026-02-01", "2026-04-01"]  # 14, 31, 90 dte
+    result = data_mod._nearest_expiry(expiries, today, target_dte=30)
+    assert result == ("2026-02-01", 31)
+
+
+def test_nearest_expiry_respects_min_dte_and_exclude():
+    today = datetime(2026, 1, 1, tzinfo=timezone.utc).date()
+    expiries = ["2026-01-15", "2026-02-01", "2026-04-01"]
+    result = data_mod._nearest_expiry(expiries, today, target_dte=30, min_dte=45, exclude="2026-02-01")
+    assert result == ("2026-04-01", 90)
+
+
+def test_nearest_expiry_none_when_nothing_qualifies():
+    today = datetime(2026, 1, 1, tzinfo=timezone.utc).date()
+    assert data_mod._nearest_expiry(["2026-01-15"], today, target_dte=30, min_dte=45) is None
+
+
+def test_closest_strike_row_finds_nearest_strike():
+    df = pd.DataFrame({"strike": [90.0, 100.0, 110.0], "impliedVolatility": [0.5, 0.4, 0.35]})
+    row = data_mod._closest_strike_row(df, 101.0)
+    assert row == {"strike": 100.0, "iv": 0.4}
+
+
+def test_closest_strike_row_none_for_empty_frame():
+    assert data_mod._closest_strike_row(pd.DataFrame({"strike": [], "impliedVolatility": []}), 100.0) is None
+
+
+def test_annualized_volatility_none_with_insufficient_history():
+    assert data_mod._annualized_volatility([100.0, 101.0], 20) is None
+
+
+def test_annualized_volatility_positive_for_varying_closes():
+    import random
+
+    random.seed(0)
+    closes = [100.0]
+    for _ in range(25):
+        closes.append(closes[-1] * (1 + random.uniform(-0.02, 0.02)))
+    hv = data_mod._annualized_volatility(closes, 20)
+    assert hv is not None
+    assert hv > 0
+
+
+def _fake_option_chain_ticker(near_expiry, far_expiry, near_frames, far_frames, closes, earnings_in_days):
+    class FakeChain:
+        def __init__(self, calls, puts):
+            self.calls = calls
+            self.puts = puts
+
+    class FakeFastInfo:
+        last_price = 100.0
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        @property
+        def options(self):
+            return (near_expiry, far_expiry) if far_expiry else (near_expiry,)
+
+        @property
+        def fast_info(self):
+            return FakeFastInfo()
+
+        def option_chain(self, expiry):
+            calls, puts = near_frames if expiry == near_expiry else far_frames
+            return FakeChain(calls, puts)
+
+        def history(self, period=None, interval=None):
+            idx = pd.bdate_range(end=pd.Timestamp.now().normalize() - pd.Timedelta(days=1), periods=len(closes))
+            return pd.DataFrame({"Close": closes}, index=idx)
+
+        def get_earnings_dates(self, limit=8):
+            if earnings_in_days is None:
+                return pd.DataFrame()
+            today = datetime.now(timezone.utc).date()
+            idx = pd.DatetimeIndex([pd.Timestamp(today + timedelta(days=earnings_in_days))])
+            return pd.DataFrame({"EPS Estimate": [1.0]}, index=idx)
+
+    return FakeTicker
+
+
+def test_get_options_strategy_context_computes_term_structure_skew_and_earnings(monkeypatch):
+    today = datetime.now(timezone.utc).date()
+    near_expiry = (today + timedelta(days=30)).strftime("%Y-%m-%d")
+    far_expiry = (today + timedelta(days=75)).strftime("%Y-%m-%d")
+
+    near_calls = pd.DataFrame({"strike": [90.0, 100.0, 110.0], "impliedVolatility": [0.45, 0.40, 0.35]})
+    near_puts = pd.DataFrame({"strike": [90.0, 100.0, 110.0], "impliedVolatility": [0.50, 0.42, 0.38]})
+    far_calls = pd.DataFrame({"strike": [90.0, 100.0, 110.0], "impliedVolatility": [0.30, 0.28, 0.26]})
+    far_puts = pd.DataFrame({"strike": [90.0, 100.0, 110.0], "impliedVolatility": [0.32, 0.29, 0.27]})
+    closes = [100.0 + i * 0.1 for i in range(60)]
+
+    FakeTicker = _fake_option_chain_ticker(
+        near_expiry, far_expiry, (near_calls, near_puts), (far_calls, far_puts), closes, earnings_in_days=5
+    )
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+
+    context = data_mod.get_options_strategy_context("ACME")
+    assert context is not None
+    assert context["current_price"] == 100.0
+    assert context["near_expiry_dte"] == 30
+    assert context["far_expiry_dte"] == 75
+    # ATM (strike 100): call IV 0.40, put IV 0.42 -> avg * 100
+    assert context["atm_iv_pct"] == pytest.approx(41.0)
+    # OTM call target 110 (IV 0.35), OTM put target 90 (IV 0.50) -> (0.50-0.35)*100
+    assert context["skew_pct"] == pytest.approx(15.0)
+    # far ATM (strike 100): (0.28+0.29)/2=0.285 ; near ATM 0.41 -> (0.285-0.41)*100
+    assert context["term_structure_pct"] == pytest.approx(-12.5)
+    assert context["days_to_earnings"] == 5
+    assert context["hv_20_pct"] is not None
+    assert context["technical"]  # daily history was long enough to compute something
+
+
+def test_get_options_strategy_context_none_without_any_listed_options(monkeypatch):
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        @property
+        def options(self):
+            return ()
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    assert data_mod.get_options_strategy_context("ACME") is None
+
+
+def test_get_options_strategy_context_none_without_price(monkeypatch):
+    class FakeFastInfo:
+        last_price = None
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            pass
+
+        @property
+        def options(self):
+            return ("2026-01-01",)
+
+        @property
+        def fast_info(self):
+            return FakeFastInfo()
+
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+    assert data_mod.get_options_strategy_context("ACME") is None
+
+
+def test_get_options_strategy_context_degrades_gracefully_without_far_expiry(monkeypatch):
+    """A thinly-listed ticker with only near-dated options still gets a
+    usable context -- term structure just isn't available."""
+    today = datetime.now(timezone.utc).date()
+    near_expiry = (today + timedelta(days=30)).strftime("%Y-%m-%d")
+    near_calls = pd.DataFrame({"strike": [100.0], "impliedVolatility": [0.40]})
+    near_puts = pd.DataFrame({"strike": [100.0], "impliedVolatility": [0.42]})
+
+    FakeTicker = _fake_option_chain_ticker(near_expiry, None, (near_calls, near_puts), (None, None), [100.0] * 5, earnings_in_days=None)
+    monkeypatch.setattr(data_mod.yf, "Ticker", FakeTicker)
+
+    context = data_mod.get_options_strategy_context("ACME")
+    assert context is not None
+    assert context["far_expiry_dte"] is None
+    assert context["term_structure_pct"] is None
+    assert context["atm_iv_pct"] == pytest.approx(41.0)

@@ -28,7 +28,7 @@ from typing import Optional
 from flask import Flask, jsonify, render_template_string, request
 
 import config
-from portfolio_monitor import bigdrop_screener, credentials, data, edgar, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_analysis, nearlow_screener, news, pennystock_screener, pipeline, scheduler, stocktwits_sentiment, technical_indicators, vision
+from portfolio_monitor import bigdrop_screener, credentials, data, edgar, exports, forex_calendar, forex_live_monitor, growth_screener, movers, nearlow_analysis, nearlow_screener, news, options_strategy_analysis, pennystock_screener, pipeline, scheduler, stocktwits_sentiment, technical_indicators, vision
 from portfolio_monitor import db as db_mod
 from portfolio_monitor.models import Position
 
@@ -958,6 +958,44 @@ def stock_analysis_panel():
     return jsonify({"ticker": ticker, "panel": panel})
 
 
+# --- Options Strategies (Options Strategies tab) -------------------------
+#
+# Given one ticker, evaluates all 13 options strategies listed in
+# options_strategy_analysis.STRATEGY_LABELS against that ticker's real
+# options-chain-derived context (implied vs. realized volatility, term
+# structure, skew, days to next earnings, technical trend) -- not a
+# screen, just an on-demand per-ticker lookup, same as Stock Analysis.
+# Ticker resolution reuses /api/stock-analysis/resolve (same lookup
+# problem, no reason to duplicate it).
+
+
+@app.route("/api/options-strategy/run", methods=["POST"])
+def run_options_strategy_panel():
+    body = request.get_json(force=True)
+    ticker = (body.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker required"}), 400
+
+    requested_provider = body.get("provider")
+    if requested_provider and requested_provider not in PROVIDERS:
+        return jsonify({"error": f"unknown provider {requested_provider!r}"}), 400
+    provider, api_key = _resolve_forex_analysis_provider(requested_provider)
+    if not api_key:
+        return jsonify({"error": "No saved API key for any provider. Add one in the Settings tab first."}), 400
+    model = body.get("model") or NEWS_DEFAULT_MODEL[provider]
+
+    try:
+        context = data.get_options_strategy_context(ticker)
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"error": str(exc)}), 502
+    if context is None:
+        return jsonify({"error": f"No listed options found for {ticker} (or its price couldn't be determined)."}), 404
+
+    strategies = options_strategy_analysis.run_strategy_panel(ticker, context, provider, model, api_key=api_key)
+    return jsonify({"ticker": ticker, "context": context, "strategies": strategies})
+
+
 # --- Forex Factory economic calendar (Forex Calendar tab) -------------------
 #
 # Informational only -- shows the scheduled high-impact news calendar so
@@ -1579,6 +1617,7 @@ PAGE_TEMPLATE = """<!doctype html>
   <button class="tab-btn" data-tab="pennystock">Penny Stocks</button>
   <button class="tab-btn" data-tab="bigdrop">Big Drops</button>
   <button class="tab-btn" data-tab="stock-analysis">Stock Analysis</button>
+  <button class="tab-btn" data-tab="options-strategy">Options Strategies</button>
   <button class="tab-btn" data-tab="watchlist">Potential Portfolio</button>
   <button class="tab-btn" data-tab="forex">Forex Calendar</button>
   <button class="tab-btn" data-tab="positions">Positions</button>
@@ -1917,6 +1956,26 @@ PAGE_TEMPLATE = """<!doctype html>
     <div id="sa-status" style="margin-top:8px;"></div>
     <div id="sa-result" style="display:none; margin-top:12px; max-width:720px;"></div>
     <div id="sa-chart" style="max-width:720px;"></div>
+  </div>
+
+  <!-- ===================== OPTIONS STRATEGIES TAB ===================== -->
+  <div class="tab-panel" id="tab-options-strategy">
+    <p class="muted" style="max-width:640px;">
+      Type a ticker or company name, then "Analyze Strategies" to judge all 13 options strategies below
+      against that stock's REAL current options-chain data: implied volatility vs. its own trailing
+      realized volatility, term structure (near-term vs. longer-dated implied vol -- an inverted
+      reading usually means an event like earnings sits between the two expiries), put/call skew, days
+      to the next earnings date, and a technical/trend snapshot. Each strategy gets its own
+      favorable/neutral/unfavorable verdict, a short rationale, and a rough suggested structure, all
+      using that real data rather than generic textbook advice. Needs an API key saved in Settings (one
+      AI call per strategy, 13 total per run). This is not investment advice.
+    </p>
+    <div class="controls">
+      <input type="text" id="os-query" placeholder="Ticker or company name" style="min-width:240px;" onkeydown="if(event.key==='Enter') lookupOptionsStrategy();">
+      <button class="action" id="os-lookup-btn" onclick="lookupOptionsStrategy()">Look Up</button>
+    </div>
+    <div id="os-status" style="margin-top:8px;"></div>
+    <div id="os-result" style="display:none; margin-top:12px;"></div>
   </div>
 
   <!-- ===================== POTENTIAL PORTFOLIO TAB ===================== -->
@@ -4284,6 +4343,117 @@ async function runStockAnalysisPanel() {
     renderStockAnalysisResult();
   } catch (err) {
     statusEl.textContent = "Error: " + err;
+  }
+}
+
+// ---------- OPTIONS STRATEGIES TAB ----------
+// Not a screen -- an on-demand per-ticker lookup like Stock Analysis,
+// reusing its /resolve endpoint for the same ticker-or-company-name
+// search. One run always evaluates all 13 strategies (no subset picker
+// for this tab -- see options_strategy_analysis.run_strategy_panel for
+// why that's parallelized server-side instead of sequential).
+let osCurrent = null;  // { ticker, name } from the last successful lookup
+let osResult = null;   // { ticker, context, strategies } from the last successful run
+
+const OPTIONS_STRATEGY_VERDICT_COLOR = { favorable: "#4caf7d", unfavorable: "#d9615b", neutral: "#2d6cdf" };
+
+async function lookupOptionsStrategy() {
+  const query = document.getElementById("os-query").value.trim();
+  if (!query) return;
+  const statusEl = document.getElementById("os-status");
+  const resultEl = document.getElementById("os-result");
+  const btn = document.getElementById("os-lookup-btn");
+  resultEl.style.display = "none";
+  osCurrent = null;
+  osResult = null;
+  btn.disabled = true;
+  statusEl.innerHTML = '<span class="spinner"></span> Looking up...';
+  try {
+    const res = await fetch("/api/stock-analysis/resolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
+    });
+    const resData = await res.json();
+    if (!res.ok) { statusEl.textContent = "Error: " + resData.error; return; }
+    osCurrent = { ticker: resData.ticker, name: resData.name };
+    statusEl.textContent = "";
+    renderOptionsStrategyResult();
+  } catch (err) {
+    statusEl.textContent = "Error: " + err;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderOptionsStrategyCard(s) {
+  if (s.error) {
+    return `<div class="news-card" style="margin-top:6px;"><strong>${escapeHtml(s.label)}</strong><div class="muted">Error: ${escapeHtml(s.error)}</div></div>`;
+  }
+  const color = OPTIONS_STRATEGY_VERDICT_COLOR[s.verdict] || OPTIONS_STRATEGY_VERDICT_COLOR.neutral;
+  return `<div class="news-card" style="margin-top:6px;">
+    <strong>${escapeHtml(s.label)}</strong>
+    <span style="margin-left:6px; padding:1px 6px; border-radius:8px; background:${color}22; color:${color}; font-size:0.7rem; text-transform:uppercase;">${escapeHtml(s.verdict || "neutral")}</span>
+    <div style="margin-top:4px;">${escapeHtml(s.rationale || "n/a")}</div>
+    ${s.suggested_structure ? `<div class="muted" style="margin-top:4px;">Suggested: ${escapeHtml(s.suggested_structure)}</div>` : ""}
+  </div>`;
+}
+
+function renderOptionsStrategyResult() {
+  const resultEl = document.getElementById("os-result");
+  if (!osCurrent) { resultEl.style.display = "none"; return; }
+
+  const analyzeHtml = `<button class="action" id="os-analyze-btn" onclick="runOptionsStrategyAnalysis()">Analyze Strategies</button>`;
+  let bodyHtml = "";
+  if (osResult) {
+    const ctx = osResult.context || {};
+    const fmtSignedPct = (v) => v !== null && v !== undefined ? `${v >= 0 ? "+" : ""}${fmtNum(v, 1)}%` : "n/a";
+    const fmtPlainPct = (v) => v !== null && v !== undefined ? `${fmtNum(v, 1)}%` : "n/a";
+    bodyHtml += `<div class="news-card" style="margin-top:10px;">
+      <strong>Market snapshot</strong>
+      <div style="margin-top:4px;">
+        Price: ${fmtMoney(ctx.current_price)}
+        &middot; ATM IV (~${ctx.near_expiry_dte ?? "n/a"}d): ${fmtPlainPct(ctx.atm_iv_pct)}
+        &middot; 20d realized vol: ${fmtPlainPct(ctx.hv_20_pct)}
+        &middot; Term structure: ${fmtSignedPct(ctx.term_structure_pct)}
+        &middot; Skew: ${fmtSignedPct(ctx.skew_pct)}
+        &middot; Next earnings: ${ctx.days_to_earnings !== null && ctx.days_to_earnings !== undefined ? ctx.days_to_earnings + "d" : "n/a"}
+      </div>
+    </div>`;
+
+    const categories = [];
+    (osResult.strategies || []).forEach(s => { if (!categories.includes(s.category)) categories.push(s.category); });
+    categories.forEach(cat => {
+      const items = osResult.strategies.filter(s => s.category === cat);
+      bodyHtml += `<h4 style="margin:14px 0 6px;">${escapeHtml(cat)}</h4>` + items.map(renderOptionsStrategyCard).join("");
+    });
+  }
+
+  resultEl.innerHTML = `
+    <div class="news-card">
+      <span class="ticker">${escapeHtml(osCurrent.ticker)}</span> <span class="muted">${escapeHtml(osCurrent.name || "")}</span>
+      <div id="os-analyze" style="margin-top:8px;">${analyzeHtml}</div>
+    </div>
+    ${bodyHtml}`;
+  resultEl.style.display = "block";
+}
+
+async function runOptionsStrategyAnalysis() {
+  const btn = document.getElementById("os-analyze-btn");
+  const analyzeEl = document.getElementById("os-analyze");
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Running 13 agents\\u2014can take a bit...'; }
+  try {
+    const res = await fetch("/api/options-strategy/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker: osCurrent.ticker }),
+    });
+    const resData = await res.json();
+    if (!res.ok) { analyzeEl.innerHTML = `Error: ${escapeHtml(resData.error)}`; return; }
+    osResult = resData;
+    renderOptionsStrategyResult();
+  } catch (err) {
+    analyzeEl.innerHTML = `Error: ${escapeHtml(String(err))}`;
   }
 }
 

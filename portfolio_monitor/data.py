@@ -12,6 +12,8 @@ from typing import Optional
 import yfinance as yf
 from yfinance import EquityQuery
 
+from . import technical_indicators
+
 
 @dataclass
 class Quote:
@@ -338,6 +340,152 @@ def get_stock_snapshot(ticker: str) -> Optional[dict]:
     # Same round-trip as the screeners -- yfinance's dict conversions carry
     # numpy/pandas types that json.dumps chokes on downstream (jsonify).
     return json.loads(json.dumps(snapshot, default=str))
+
+
+def _nearest_expiry(expiries: list[str], today, target_dte: int, min_dte: int = 0, exclude: Optional[str] = None) -> Optional[tuple[str, int]]:
+    """The listed expiry whose days-to-expiry is closest to `target_dte`,
+    excluding `exclude` (used to force the "far" pick to be genuinely
+    later than the "near" one) and anything under `min_dte` out. Returns
+    (expiry_string, dte) or None if nothing qualifies."""
+    candidates = []
+    for expiry in expiries:
+        if expiry == exclude:
+            continue
+        try:
+            dte = (datetime.strptime(expiry, "%Y-%m-%d").date() - today).days
+        except ValueError:
+            continue
+        if dte < min_dte:
+            continue
+        candidates.append((expiry, dte))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda pair: abs(pair[1] - target_dte))
+
+
+def _closest_strike_row(df, target_strike: float) -> Optional[dict]:
+    if df is None or df.empty:
+        return None
+    idx = (df["strike"] - target_strike).abs().idxmin()
+    row = df.loc[idx]
+    iv = _safe_float(row.get("impliedVolatility"))
+    return {"strike": _safe_float(row.get("strike")), "iv": iv}
+
+
+def _annualized_volatility(closes: list[float], window: int) -> Optional[float]:
+    """Trailing realized (historical) volatility, annualized, as a
+    percentage -- the standard close-to-close log-return stdev * sqrt(252)
+    -- computed over the most recent `window` trading days. This is what
+    an options strategy's implied volatility is actually priced against:
+    IV meaningfully above recent realized vol means options are "rich"
+    (favors premium-selling strategies), IV near or below it means
+    they're not especially expensive for the move the stock's actually
+    been making."""
+    if len(closes) < window + 1:
+        return None
+    recent = closes[-(window + 1):]
+    log_returns = [math.log(recent[i] / recent[i - 1]) for i in range(1, len(recent)) if recent[i - 1] and recent[i]]
+    if len(log_returns) < 2:
+        return None
+    mean = sum(log_returns) / len(log_returns)
+    variance = sum((r - mean) ** 2 for r in log_returns) / (len(log_returns) - 1)
+    return math.sqrt(variance) * math.sqrt(252) * 100.0
+
+
+def get_options_strategy_context(ticker: str) -> Optional[dict]:
+    """Real options-chain-derived context for judging options-strategy
+    suitability on one ticker: current price, near-term and
+    longer-dated at-the-money implied vol (the difference is the term
+    structure -- negative/inverted usually means the market's pricing in
+    a near-term event like earnings between the two expiries), OTM
+    put/call IV (the difference is skew), trailing realized volatility
+    at 20 and 60 days (what IV is actually rich or cheap relative to),
+    the next upcoming earnings date if there is one, and a technical/
+    trend snapshot (reused from the same indicators the other tabs use).
+
+    Returns None if the ticker has no listed options at all, or its
+    price can't be determined -- there's nothing options-strategy-
+    specific to say about it then."""
+    t = yf.Ticker(ticker)
+    try:
+        expiries = list(t.options)
+    except Exception:
+        return None
+    if not expiries:
+        return None
+
+    try:
+        fast_info = t.fast_info
+        current_price = fast_info.last_price
+    except Exception:
+        return None
+    if not current_price:
+        return None
+
+    today = datetime.now(timezone.utc).date()
+    near = _nearest_expiry(expiries, today, target_dte=30, min_dte=7)
+    far = None
+    if near is not None:
+        far = _nearest_expiry(expiries, today, target_dte=75, min_dte=near[1] + 14, exclude=near[0])
+
+    def _chain_summary(expiry: Optional[str]) -> Optional[dict]:
+        if expiry is None:
+            return None
+        try:
+            opt = t.option_chain(expiry)
+        except Exception:
+            return None
+        atm_call = _closest_strike_row(opt.calls, current_price)
+        atm_put = _closest_strike_row(opt.puts, current_price)
+        otm_call = _closest_strike_row(opt.calls, current_price * 1.10)
+        otm_put = _closest_strike_row(opt.puts, current_price * 0.90)
+        return {"atm_call_iv": atm_call and atm_call["iv"], "atm_put_iv": atm_put and atm_put["iv"], "otm_call_iv": otm_call and otm_call["iv"], "otm_put_iv": otm_put and otm_put["iv"]}
+
+    near_chain = _chain_summary(near[0]) if near else None
+    far_chain = _chain_summary(far[0]) if far else None
+
+    atm_iv = None
+    if near_chain and near_chain["atm_call_iv"] and near_chain["atm_put_iv"]:
+        atm_iv = (near_chain["atm_call_iv"] + near_chain["atm_put_iv"]) / 2.0 * 100.0
+    skew_pct = None
+    if near_chain and near_chain["otm_put_iv"] and near_chain["otm_call_iv"]:
+        skew_pct = (near_chain["otm_put_iv"] - near_chain["otm_call_iv"]) * 100.0
+    term_structure_pct = None
+    if near_chain and far_chain and near_chain["atm_call_iv"] and far_chain["atm_call_iv"]:
+        near_atm = (near_chain["atm_call_iv"] + (near_chain["atm_put_iv"] or near_chain["atm_call_iv"])) / 2.0
+        far_atm = (far_chain["atm_call_iv"] + (far_chain["atm_put_iv"] or far_chain["atm_call_iv"])) / 2.0
+        term_structure_pct = (far_atm - near_atm) * 100.0
+
+    daily_history = get_daily_price_history(ticker, period="3mo")
+    closes = [d["close"] for d in daily_history if d.get("close") is not None]
+    hv_20 = _annualized_volatility(closes, 20)
+    hv_60 = _annualized_volatility(closes, 60)
+    technical = technical_indicators.compute_technical_snapshot(daily_history) if daily_history else {}
+
+    days_to_earnings = None
+    try:
+        earnings_dates = t.get_earnings_dates(limit=8)
+        if earnings_dates is not None and not earnings_dates.empty:
+            upcoming = [d.date() if hasattr(d, "date") else d for d in earnings_dates.index if (d.date() if hasattr(d, "date") else d) >= today]
+            if upcoming:
+                days_to_earnings = (min(upcoming) - today).days
+    except Exception:
+        pass
+
+    context = {
+        "ticker": ticker,
+        "current_price": current_price,
+        "near_expiry_dte": near[1] if near else None,
+        "far_expiry_dte": far[1] if far else None,
+        "atm_iv_pct": atm_iv,
+        "skew_pct": skew_pct,
+        "term_structure_pct": term_structure_pct,
+        "hv_20_pct": hv_20,
+        "hv_60_pct": hv_60,
+        "days_to_earnings": days_to_earnings,
+        "technical": technical,
+    }
+    return json.loads(json.dumps(context, default=str))
 
 
 def get_financial_highlights(ticker: str) -> Optional[dict]:
